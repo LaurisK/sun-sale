@@ -6,10 +6,10 @@
         "description": "Configure the electricity tariff formula for your provider.",
         "data": {
           "distribution_fee": "Distribution fee (EUR/kWh, buy)",
-          "tax_rate": "Tax/VAT rate on buy (0.0–1.0)",
+          "tax_rate": "Tax/VAT rate on buy (%)",
           "markup": "Retailer markup (EUR/kWh, buy)",
           "sell_distribution_fee": "Distribution fee (EUR/kWh, sell)",
-          "sell_tax_rate": "Tax rate on sell revenue (0.0–1.0)",
+          "sell_tax_rate": "Tax rate on sell revenue (%)",
           "sell_markup": "Retailer deduction (EUR/kWh, sell)"
         }
       },
@@ -21,9 +21,9 @@
           "rated_cycle_life": "Rated cycle life",
           "max_charge_power_kw": "Max charge power (kW)",
           "max_discharge_power_kw": "Max discharge power (kW)",
-          "min_soc": "Minimum SoC (0.0–1.0)",
-          "max_soc": "Maximum SoC (0.0–1.0)",
-          "round_trip_efficiency": "Round-trip efficiency (0.0–1.0)",
+          "min_soc": "Minimum SoC (%)",
+          "max_soc": "Maximum SoC (%)",
+          "round_trip_efficiency": "Round-trip efficiency (%)",
           "nominal_voltage_v": "Nominal DC bus voltage (V)"
         }
       },
@@ -93,23 +93,101 @@
     },
     "error": {
       "negative_fee": "Distribution fee cannot be negative.",
-      "invalid_tax_rate": "Tax rate must be between 0.0 and 1.0.",
+      "invalid_tax_rate": "Tax rate must be between 0 and 100.",
       "invalid_capacity": "Capacity must be greater than 0.",
       "invalid_price": "Purchase price must be greater than 0.",
-      "invalid_efficiency": "Efficiency must be between 0 and 1."
+      "invalid_efficiency": "Efficiency must be between 0 and 100."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Update Tariff Parameters",
+        "title": "Tariff Configuration",
+        "description": "Configure the electricity tariff formula for your provider.",
         "data": {
           "distribution_fee": "Distribution fee (EUR/kWh, buy)",
-          "tax_rate": "Tax/VAT rate on buy (0.0–1.0)",
+          "tax_rate": "Tax/VAT rate on buy (%)",
           "markup": "Retailer markup (EUR/kWh, buy)",
           "sell_distribution_fee": "Distribution fee (EUR/kWh, sell)",
-          "sell_tax_rate": "Tax rate on sell revenue (0.0–1.0)",
+          "sell_tax_rate": "Tax rate on sell revenue (%)",
           "sell_markup": "Retailer deduction (EUR/kWh, sell)"
+        }
+      },
+      "battery": {
+        "title": "Battery Configuration",
+        "data": {
+          "nominal_capacity_kwh": "Nominal capacity (kWh)",
+          "purchase_price_eur": "Battery purchase price (EUR)",
+          "rated_cycle_life": "Rated cycle life",
+          "max_charge_power_kw": "Max charge power (kW)",
+          "max_discharge_power_kw": "Max discharge power (kW)",
+          "min_soc": "Minimum SoC (%)",
+          "max_soc": "Maximum SoC (%)",
+          "round_trip_efficiency": "Round-trip efficiency (%)",
+          "nominal_voltage_v": "Nominal DC bus voltage (V)"
+        }
+      },
+      "inverter": {
+        "title": "Inverter Setup",
+        "description": "Select your inverter platform.",
+        "data": {
+          "inverter_platform": "Inverter platform"
+        }
+      },
+      "inverter_entities": {
+        "title": "Inverter Entity Mapping",
+        "description": "Map the four entities your inverter integration exposes.",
+        "data": {
+          "inverter_entity_battery_soc": "Battery SoC entity",
+          "inverter_entity_battery_power": "Battery power entity (kW)",
+          "inverter_entity_grid_power": "Grid power entity (kW)",
+          "inverter_entity_charge_control": "Charge control entity"
+        }
+      },
+      "inverter_solis": {
+        "title": "Solis Inverter Entity Mapping",
+        "description": "Map the solis_modbus entities. Defaults are the canonical entity IDs — accept them unless your integration uses a custom prefix.",
+        "data": {
+          "inverter_entity_battery_soc": "Battery SoC entity",
+          "inverter_entity_battery_power": "Battery power entity (kW)",
+          "inverter_entity_grid_power": "Grid power entity (kW)",
+          "inverter_solis_charge_current": "Charge current entity (number, slot-1 amps)",
+          "inverter_solis_discharge_current": "Discharge current entity (number, slot-1 amps)",
+          "inverter_solis_charge_start_hour_1": "Charge start hour entity (slot 1)",
+          "inverter_solis_charge_start_minute_1": "Charge start minute entity (slot 1)",
+          "inverter_solis_charge_end_hour_1": "Charge end hour entity (slot 1)",
+          "inverter_solis_charge_end_minute_1": "Charge end minute entity (slot 1)",
+          "inverter_solis_discharge_start_hour_1": "Discharge start hour entity (slot 1)",
+          "inverter_solis_discharge_start_minute_1": "Discharge start minute entity (slot 1)",
+          "inverter_solis_discharge_end_hour_1": "Discharge end hour entity (slot 1)",
+          "inverter_solis_discharge_end_minute_1": "Discharge end minute entity (slot 1)",
+          "inverter_solis_tou_mode_switch": "TOU mode switch entity",
+          "inverter_solis_allow_grid_charge_switch": "Allow-grid-charge switch entity",
+          "inverter_solis_self_use_mode_switch": "Self-use mode switch entity"
+        }
+      },
+      "ev": {
+        "title": "EV Charger (Optional)",
+        "description": "Leave 'Enable EV charger' off to skip.",
+        "data": {
+          "ev_enabled": "Enable EV charger control",
+          "ev_platform": "EV charger platform",
+          "ev_battery_capacity_kwh": "EV battery capacity (kWh)",
+          "ev_max_charge_power_kw": "Max charge power (kW)",
+          "ev_min_charge_power_kw": "Min charge power (kW)",
+          "ev_entity_plug_state": "Plug state entity (binary_sensor)",
+          "ev_entity_soc": "EV SoC entity (sensor, optional)",
+          "ev_entity_target_soc": "Target SoC entity (optional)",
+          "ev_entity_departure_time": "Departure time entity (optional)",
+          "ev_entity_charger_switch": "Charger switch entity"
+        }
+      },
+      "sources": {
+        "title": "Data Sources",
+        "description": "Select the Nordpool and solar forecast entities.",
+        "data": {
+          "nordpool_entity": "Nordpool price sensor entity",
+          "solar_forecast_entity": "Solar forecast entity (optional)"
         }
       }
     }

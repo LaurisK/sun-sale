@@ -42,6 +42,7 @@ _HA_MODULES = [
     "homeassistant.config_entries",
     "homeassistant.exceptions",
     "homeassistant.helpers",
+    "homeassistant.helpers.selector",
     "homeassistant.helpers.update_coordinator",
     "homeassistant.helpers.storage",
     "homeassistant.helpers.entity_platform",

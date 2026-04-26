@@ -66,7 +66,7 @@ sunSale ships with `hacs.json` and is installable as a HACS **custom repository*
 
 1. Make sure [HACS](https://hacs.xyz/) is installed.
 2. In HACS, open **Integrations → ⋮ (top right) → Custom repositories**.
-3. Add the repository URL: `https://github.com/laurynas/sun-sale`
+3. Add the repository URL: `https://github.com/LaurisK/sun-sale`
 4. Set **Category** to **Integration**, then click **Add**.
 5. Find **sunSale** in the HACS integrations list and click **Download**.
 6. **Restart Home Assistant.**

@@ -129,14 +129,14 @@ class SunSaleCoordinator(DataUpdateCoordinator):
 
     async def async_setup(self) -> None:
         """Initialise from config entry data."""
-        data = self._entry.data
+        data = {**self._entry.data, **self._entry.options}
 
         self._tariff_config = TariffConfig(
             distribution_fee=data[CONF_TARIFF_DISTRIBUTION_FEE],
-            tax_rate=data[CONF_TARIFF_TAX_RATE],
+            tax_rate=data[CONF_TARIFF_TAX_RATE] / 100.0,
             markup=data[CONF_TARIFF_MARKUP],
             sell_distribution_fee=data[CONF_TARIFF_SELL_DISTRIBUTION_FEE],
-            sell_tax_rate=data[CONF_TARIFF_SELL_TAX_RATE],
+            sell_tax_rate=data[CONF_TARIFF_SELL_TAX_RATE] / 100.0,
             sell_markup=data[CONF_TARIFF_SELL_MARKUP],
         )
 
@@ -146,9 +146,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             rated_cycle_life=data[CONF_BATTERY_RATED_CYCLE_LIFE],
             max_charge_power_kw=data[CONF_BATTERY_MAX_CHARGE_POWER],
             max_discharge_power_kw=data[CONF_BATTERY_MAX_DISCHARGE_POWER],
-            min_soc=data[CONF_BATTERY_MIN_SOC],
-            max_soc=data[CONF_BATTERY_MAX_SOC],
-            round_trip_efficiency=data[CONF_BATTERY_ROUND_TRIP_EFFICIENCY],
+            min_soc=data[CONF_BATTERY_MIN_SOC] / 100.0,
+            max_soc=data[CONF_BATTERY_MAX_SOC] / 100.0,
+            round_trip_efficiency=data[CONF_BATTERY_ROUND_TRIP_EFFICIENCY] / 100.0,
             nominal_voltage_v=data.get(CONF_BATTERY_NOMINAL_VOLTAGE, DEFAULT_BATTERY_NOMINAL_VOLTAGE),
         )
 

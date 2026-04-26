@@ -26,7 +26,7 @@ from custom_components.sun_sale.inverter import InverterPlatform
 
 VALID_TARIFF_INPUT = {
     CONF_TARIFF_DISTRIBUTION_FEE: 0.03,
-    CONF_TARIFF_TAX_RATE: 0.21,
+    CONF_TARIFF_TAX_RATE: 21.0,
     CONF_TARIFF_MARKUP: 0.005,
     CONF_TARIFF_SELL_DISTRIBUTION_FEE: 0.01,
     CONF_TARIFF_SELL_TAX_RATE: 0.0,
@@ -39,9 +39,9 @@ VALID_BATTERY_INPUT = {
     CONF_BATTERY_RATED_CYCLE_LIFE: 6000,
     CONF_BATTERY_MAX_CHARGE_POWER: 5.0,
     CONF_BATTERY_MAX_DISCHARGE_POWER: 5.0,
-    CONF_BATTERY_MIN_SOC: 0.10,
-    CONF_BATTERY_MAX_SOC: 0.95,
-    CONF_BATTERY_ROUND_TRIP_EFFICIENCY: 0.90,
+    CONF_BATTERY_MIN_SOC: 10,
+    CONF_BATTERY_MAX_SOC: 95,
+    CONF_BATTERY_ROUND_TRIP_EFFICIENCY: 90,
     CONF_BATTERY_NOMINAL_VOLTAGE: 48.0,
 }
 
@@ -73,7 +73,7 @@ async def test_step_user_negative_fee_returns_error():
 
 async def test_step_user_invalid_tax_rate_returns_error():
     flow = SunSaleConfigFlow()
-    bad = {**VALID_TARIFF_INPUT, CONF_TARIFF_TAX_RATE: 1.5}
+    bad = {**VALID_TARIFF_INPUT, CONF_TARIFF_TAX_RATE: 150.0}
     result = await flow.async_step_user(bad)
     assert result["step_id"] == "user"
     assert CONF_TARIFF_TAX_RATE in result["errors"]
@@ -81,7 +81,7 @@ async def test_step_user_invalid_tax_rate_returns_error():
 
 async def test_step_user_negative_tax_returns_error():
     flow = SunSaleConfigFlow()
-    bad = {**VALID_TARIFF_INPUT, CONF_TARIFF_TAX_RATE: -0.1}
+    bad = {**VALID_TARIFF_INPUT, CONF_TARIFF_TAX_RATE: -1.0}
     result = await flow.async_step_user(bad)
     assert result["step_id"] == "user"
     assert CONF_TARIFF_TAX_RATE in result["errors"]
@@ -91,7 +91,7 @@ async def test_step_user_stores_data():
     flow = SunSaleConfigFlow()
     await flow.async_step_user(VALID_TARIFF_INPUT)
     assert flow._data[CONF_TARIFF_DISTRIBUTION_FEE] == 0.03
-    assert flow._data[CONF_TARIFF_TAX_RATE] == 0.21
+    assert flow._data[CONF_TARIFF_TAX_RATE] == 21.0
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ async def test_step_battery_zero_price_returns_error():
 
 async def test_step_battery_invalid_efficiency_returns_error():
     flow = SunSaleConfigFlow()
-    bad = {**VALID_BATTERY_INPUT, CONF_BATTERY_ROUND_TRIP_EFFICIENCY: 1.1}
+    bad = {**VALID_BATTERY_INPUT, CONF_BATTERY_ROUND_TRIP_EFFICIENCY: 110.0}
     result = await flow.async_step_battery(bad)
     assert result["step_id"] == "battery"
     assert CONF_BATTERY_ROUND_TRIP_EFFICIENCY in result["errors"]

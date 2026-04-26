@@ -7,6 +7,13 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
     CONF_BATTERY_MAX_CHARGE_POWER,
@@ -81,6 +88,119 @@ from .inverter import InverterPlatform
 INVERTER_PLATFORMS = [p.value for p in InverterPlatform]
 EV_PLATFORMS = [p.value for p in EVChargerPlatform]
 
+_SENSOR = EntitySelector(EntitySelectorConfig(domain="sensor"))
+_BINARY_SENSOR = EntitySelector(EntitySelectorConfig(domain="binary_sensor"))
+_SWITCH = EntitySelector(EntitySelectorConfig(domain="switch"))
+_NUMBER = EntitySelector(EntitySelectorConfig(domain="number"))
+_ANY_ENTITY = EntitySelector(EntitySelectorConfig())
+
+
+def _platform_selector(options: list[str]) -> SelectSelector:
+    return SelectSelector(SelectSelectorConfig(options=options, mode=SelectSelectorMode.LIST))
+
+
+def _req(key: str, d: dict, fallback: Any = vol.UNDEFINED) -> vol.Required:
+    """Return vol.Required with a default only when a value is available."""
+    v = d.get(key, fallback)
+    return vol.Required(key, default=v) if v is not vol.UNDEFINED else vol.Required(key)
+
+
+def _opt(key: str, d: dict, fallback: Any = vol.UNDEFINED) -> vol.Optional:
+    """Return vol.Optional with a default only when a value is available."""
+    v = d.get(key, fallback)
+    return vol.Optional(key, default=v) if v is not vol.UNDEFINED else vol.Optional(key)
+
+
+# ---------------------------------------------------------------------------
+# Schema builders (shared between config flow and options flow)
+# ---------------------------------------------------------------------------
+
+def _tariff_schema(d: dict) -> vol.Schema:
+    return vol.Schema({
+        _req(CONF_TARIFF_DISTRIBUTION_FEE, d, 0.03): vol.Coerce(float),
+        _req(CONF_TARIFF_TAX_RATE, d, 21.0): vol.Coerce(float),
+        _req(CONF_TARIFF_MARKUP, d, 0.005): vol.Coerce(float),
+        _req(CONF_TARIFF_SELL_DISTRIBUTION_FEE, d, 0.01): vol.Coerce(float),
+        _req(CONF_TARIFF_SELL_TAX_RATE, d, 0.0): vol.Coerce(float),
+        _req(CONF_TARIFF_SELL_MARKUP, d, 0.0): vol.Coerce(float),
+    })
+
+
+def _battery_schema(d: dict) -> vol.Schema:
+    return vol.Schema({
+        _req(CONF_BATTERY_NOMINAL_CAPACITY, d): vol.Coerce(float),
+        _req(CONF_BATTERY_PURCHASE_PRICE, d): vol.Coerce(float),
+        _req(CONF_BATTERY_RATED_CYCLE_LIFE, d, DEFAULT_BATTERY_RATED_CYCLE_LIFE): vol.Coerce(int),
+        _req(CONF_BATTERY_MAX_CHARGE_POWER, d, 5.0): vol.Coerce(float),
+        _req(CONF_BATTERY_MAX_DISCHARGE_POWER, d, 5.0): vol.Coerce(float),
+        _req(CONF_BATTERY_MIN_SOC, d, DEFAULT_BATTERY_MIN_SOC): vol.Coerce(float),
+        _req(CONF_BATTERY_MAX_SOC, d, DEFAULT_BATTERY_MAX_SOC): vol.Coerce(float),
+        _req(CONF_BATTERY_ROUND_TRIP_EFFICIENCY, d, DEFAULT_BATTERY_ROUND_TRIP_EFFICIENCY): vol.Coerce(float),
+        _req(CONF_BATTERY_NOMINAL_VOLTAGE, d, DEFAULT_BATTERY_NOMINAL_VOLTAGE): vol.Coerce(float),
+    })
+
+
+def _inverter_platform_schema(d: dict) -> vol.Schema:
+    return vol.Schema({
+        _req(CONF_INVERTER_PLATFORM, d, InverterPlatform.GENERIC.value): _platform_selector(INVERTER_PLATFORMS),
+    })
+
+
+def _inverter_entities_schema(d: dict) -> vol.Schema:
+    return vol.Schema({
+        _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d): _SENSOR,
+        _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d): _SENSOR,
+        _req(CONF_INVERTER_ENTITY_GRID_POWER, d): _SENSOR,
+        _req(CONF_INVERTER_ENTITY_CHARGE_CONTROL, d): _ANY_ENTITY,
+    })
+
+
+def _inverter_solis_schema(d: dict) -> vol.Schema:
+    return vol.Schema({
+        _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d, "sensor.solis_battery_soc"): _SENSOR,
+        _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d, "sensor.solis_battery_power"): _SENSOR,
+        _req(CONF_INVERTER_ENTITY_GRID_POWER, d, "sensor.solis_ac_grid_port_power"): _SENSOR,
+        _req(CONF_INVERTER_SOLIS_CHARGE_CURRENT, d, DEFAULT_SOLIS_CHARGE_CURRENT): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_DISCHARGE_CURRENT, d, DEFAULT_SOLIS_DISCHARGE_CURRENT): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_CHARGE_START_HOUR_1, d, DEFAULT_SOLIS_CHARGE_START_HOUR_1): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_CHARGE_START_MINUTE_1, d, DEFAULT_SOLIS_CHARGE_START_MINUTE_1): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_CHARGE_END_HOUR_1, d, DEFAULT_SOLIS_CHARGE_END_HOUR_1): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_CHARGE_END_MINUTE_1, d, DEFAULT_SOLIS_CHARGE_END_MINUTE_1): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_DISCHARGE_START_HOUR_1, d, DEFAULT_SOLIS_DISCHARGE_START_HOUR_1): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_DISCHARGE_START_MINUTE_1, d, DEFAULT_SOLIS_DISCHARGE_START_MINUTE_1): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_DISCHARGE_END_HOUR_1, d, DEFAULT_SOLIS_DISCHARGE_END_HOUR_1): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_DISCHARGE_END_MINUTE_1, d, DEFAULT_SOLIS_DISCHARGE_END_MINUTE_1): _NUMBER,
+        _req(CONF_INVERTER_SOLIS_TOU_MODE_SWITCH, d, DEFAULT_SOLIS_TOU_MODE_SWITCH): _SWITCH,
+        _req(CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH, d, DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH): _SWITCH,
+        _req(CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH, d, DEFAULT_SOLIS_SELF_USE_MODE_SWITCH): _SWITCH,
+    })
+
+
+def _ev_schema(d: dict) -> vol.Schema:
+    return vol.Schema({
+        _req(CONF_EV_ENABLED, d, False): bool,
+        _opt(CONF_EV_PLATFORM, d, EVChargerPlatform.GENERIC.value): _platform_selector(EV_PLATFORMS),
+        _opt(CONF_EV_BATTERY_CAPACITY, d): vol.Coerce(float),
+        _opt(CONF_EV_MAX_CHARGE_POWER, d): vol.Coerce(float),
+        _opt(CONF_EV_MIN_CHARGE_POWER, d, DEFAULT_EV_MIN_CHARGE_POWER_KW): vol.Coerce(float),
+        _opt(CONF_EV_ENTITY_PLUG_STATE, d): _BINARY_SENSOR,
+        _opt(CONF_EV_ENTITY_SOC, d): _SENSOR,
+        _opt(CONF_EV_ENTITY_TARGET_SOC, d): _ANY_ENTITY,
+        _opt(CONF_EV_ENTITY_DEPARTURE_TIME, d): _ANY_ENTITY,
+        _opt(CONF_EV_ENTITY_CHARGER_SWITCH, d): _SWITCH,
+    })
+
+
+def _sources_schema(d: dict) -> vol.Schema:
+    return vol.Schema({
+        _req(CONF_NORDPOOL_ENTITY, d): _SENSOR,
+        _opt(CONF_SOLAR_FORECAST_ENTITY, d): _SENSOR,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Config flow
+# ---------------------------------------------------------------------------
 
 class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Multi-step config flow: tariff → battery → inverter platform → inverter entities → EV → sources."""
@@ -97,7 +217,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             if user_input[CONF_TARIFF_DISTRIBUTION_FEE] < 0:
                 errors[CONF_TARIFF_DISTRIBUTION_FEE] = "negative_fee"
-            if not 0.0 <= user_input[CONF_TARIFF_TAX_RATE] <= 1.0:
+            if not 0.0 <= user_input[CONF_TARIFF_TAX_RATE] <= 100.0:
                 errors[CONF_TARIFF_TAX_RATE] = "invalid_tax_rate"
             if not errors:
                 self._data.update(user_input)
@@ -106,14 +226,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             errors=errors,
-            data_schema=vol.Schema({
-                vol.Required(CONF_TARIFF_DISTRIBUTION_FEE, default=0.03): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_TAX_RATE, default=0.21): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_MARKUP, default=0.005): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_SELL_DISTRIBUTION_FEE, default=0.01): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_SELL_TAX_RATE, default=0.0): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_SELL_MARKUP, default=0.0): vol.Coerce(float),
-            }),
+            data_schema=_tariff_schema({}),
         )
 
     async def async_step_battery(self, user_input: dict | None = None) -> FlowResult:
@@ -124,7 +237,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors[CONF_BATTERY_NOMINAL_CAPACITY] = "invalid_capacity"
             if user_input[CONF_BATTERY_PURCHASE_PRICE] <= 0:
                 errors[CONF_BATTERY_PURCHASE_PRICE] = "invalid_price"
-            if not 0.0 < user_input[CONF_BATTERY_ROUND_TRIP_EFFICIENCY] <= 1.0:
+            if not 0.0 < user_input[CONF_BATTERY_ROUND_TRIP_EFFICIENCY] <= 100.0:
                 errors[CONF_BATTERY_ROUND_TRIP_EFFICIENCY] = "invalid_efficiency"
             if not errors:
                 self._data.update(user_input)
@@ -133,17 +246,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="battery",
             errors=errors,
-            data_schema=vol.Schema({
-                vol.Required(CONF_BATTERY_NOMINAL_CAPACITY): vol.Coerce(float),
-                vol.Required(CONF_BATTERY_PURCHASE_PRICE): vol.Coerce(float),
-                vol.Required(CONF_BATTERY_RATED_CYCLE_LIFE, default=DEFAULT_BATTERY_RATED_CYCLE_LIFE): vol.Coerce(int),
-                vol.Required(CONF_BATTERY_MAX_CHARGE_POWER, default=5.0): vol.Coerce(float),
-                vol.Required(CONF_BATTERY_MAX_DISCHARGE_POWER, default=5.0): vol.Coerce(float),
-                vol.Required(CONF_BATTERY_MIN_SOC, default=DEFAULT_BATTERY_MIN_SOC): vol.Coerce(float),
-                vol.Required(CONF_BATTERY_MAX_SOC, default=DEFAULT_BATTERY_MAX_SOC): vol.Coerce(float),
-                vol.Required(CONF_BATTERY_ROUND_TRIP_EFFICIENCY, default=DEFAULT_BATTERY_ROUND_TRIP_EFFICIENCY): vol.Coerce(float),
-                vol.Required(CONF_BATTERY_NOMINAL_VOLTAGE, default=DEFAULT_BATTERY_NOMINAL_VOLTAGE): vol.Coerce(float),
-            }),
+            data_schema=_battery_schema({}),
         )
 
     async def async_step_inverter(self, user_input: dict | None = None) -> FlowResult:
@@ -157,9 +260,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="inverter",
-            data_schema=vol.Schema({
-                vol.Required(CONF_INVERTER_PLATFORM, default=InverterPlatform.GENERIC.value): vol.In(INVERTER_PLATFORMS),
-            }),
+            data_schema=_inverter_platform_schema({}),
         )
 
     async def async_step_inverter_entities(self, user_input: dict | None = None) -> FlowResult:
@@ -170,12 +271,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="inverter_entities",
-            data_schema=vol.Schema({
-                vol.Required(CONF_INVERTER_ENTITY_BATTERY_SOC): str,
-                vol.Required(CONF_INVERTER_ENTITY_BATTERY_POWER): str,
-                vol.Required(CONF_INVERTER_ENTITY_GRID_POWER): str,
-                vol.Required(CONF_INVERTER_ENTITY_CHARGE_CONTROL): str,
-            }),
+            data_schema=_inverter_entities_schema({}),
         )
 
     async def async_step_inverter_solis(self, user_input: dict | None = None) -> FlowResult:
@@ -186,24 +282,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="inverter_solis",
-            data_schema=vol.Schema({
-                vol.Required(CONF_INVERTER_ENTITY_BATTERY_SOC, default="sensor.solis_battery_soc"): str,
-                vol.Required(CONF_INVERTER_ENTITY_BATTERY_POWER, default="sensor.solis_battery_power"): str,
-                vol.Required(CONF_INVERTER_ENTITY_GRID_POWER, default="sensor.solis_ac_grid_port_power"): str,
-                vol.Required(CONF_INVERTER_SOLIS_CHARGE_CURRENT, default=DEFAULT_SOLIS_CHARGE_CURRENT): str,
-                vol.Required(CONF_INVERTER_SOLIS_DISCHARGE_CURRENT, default=DEFAULT_SOLIS_DISCHARGE_CURRENT): str,
-                vol.Required(CONF_INVERTER_SOLIS_CHARGE_START_HOUR_1, default=DEFAULT_SOLIS_CHARGE_START_HOUR_1): str,
-                vol.Required(CONF_INVERTER_SOLIS_CHARGE_START_MINUTE_1, default=DEFAULT_SOLIS_CHARGE_START_MINUTE_1): str,
-                vol.Required(CONF_INVERTER_SOLIS_CHARGE_END_HOUR_1, default=DEFAULT_SOLIS_CHARGE_END_HOUR_1): str,
-                vol.Required(CONF_INVERTER_SOLIS_CHARGE_END_MINUTE_1, default=DEFAULT_SOLIS_CHARGE_END_MINUTE_1): str,
-                vol.Required(CONF_INVERTER_SOLIS_DISCHARGE_START_HOUR_1, default=DEFAULT_SOLIS_DISCHARGE_START_HOUR_1): str,
-                vol.Required(CONF_INVERTER_SOLIS_DISCHARGE_START_MINUTE_1, default=DEFAULT_SOLIS_DISCHARGE_START_MINUTE_1): str,
-                vol.Required(CONF_INVERTER_SOLIS_DISCHARGE_END_HOUR_1, default=DEFAULT_SOLIS_DISCHARGE_END_HOUR_1): str,
-                vol.Required(CONF_INVERTER_SOLIS_DISCHARGE_END_MINUTE_1, default=DEFAULT_SOLIS_DISCHARGE_END_MINUTE_1): str,
-                vol.Required(CONF_INVERTER_SOLIS_TOU_MODE_SWITCH, default=DEFAULT_SOLIS_TOU_MODE_SWITCH): str,
-                vol.Required(CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH, default=DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH): str,
-                vol.Required(CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH, default=DEFAULT_SOLIS_SELF_USE_MODE_SWITCH): str,
-            }),
+            data_schema=_inverter_solis_schema({}),
         )
 
     async def async_step_ev(self, user_input: dict | None = None) -> FlowResult:
@@ -214,18 +293,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="ev",
-            data_schema=vol.Schema({
-                vol.Required(CONF_EV_ENABLED, default=False): bool,
-                vol.Optional(CONF_EV_PLATFORM, default=EVChargerPlatform.GENERIC.value): vol.In(EV_PLATFORMS),
-                vol.Optional(CONF_EV_BATTERY_CAPACITY): vol.Coerce(float),
-                vol.Optional(CONF_EV_MAX_CHARGE_POWER): vol.Coerce(float),
-                vol.Optional(CONF_EV_MIN_CHARGE_POWER, default=DEFAULT_EV_MIN_CHARGE_POWER_KW): vol.Coerce(float),
-                vol.Optional(CONF_EV_ENTITY_PLUG_STATE, default=""): str,
-                vol.Optional(CONF_EV_ENTITY_SOC, default=""): str,
-                vol.Optional(CONF_EV_ENTITY_TARGET_SOC, default=""): str,
-                vol.Optional(CONF_EV_ENTITY_DEPARTURE_TIME, default=""): str,
-                vol.Optional(CONF_EV_ENTITY_CHARGER_SWITCH, default=""): str,
-            }),
+            data_schema=_ev_schema({}),
         )
 
     async def async_step_sources(self, user_input: dict | None = None) -> FlowResult:
@@ -236,10 +304,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="sources",
-            data_schema=vol.Schema({
-                vol.Required(CONF_NORDPOOL_ENTITY): str,
-                vol.Optional(CONF_SOLAR_FORECAST_ENTITY, default=""): str,
-            }),
+            data_schema=_sources_schema({}),
         )
 
     @staticmethod
@@ -250,25 +315,113 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return SunSaleOptionsFlow(config_entry)
 
 
+# ---------------------------------------------------------------------------
+# Options flow (full reconfiguration)
+# ---------------------------------------------------------------------------
+
 class SunSaleOptionsFlow(config_entries.OptionsFlow):
-    """Handle post-setup option changes (tariff parameters)."""
+    """Allow reconfiguring all settings post-setup."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._entry = config_entry
+        self._data: dict[str, Any] = {}
+        self._inverter_platform: str = InverterPlatform.GENERIC.value
+
+    def _defaults(self) -> dict[str, Any]:
+        return {**self._entry.data, **self._entry.options}
 
     async def async_step_init(self, user_input: dict | None = None) -> FlowResult:
+        """Step 1: Tariff parameters."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            if user_input[CONF_TARIFF_DISTRIBUTION_FEE] < 0:
+                errors[CONF_TARIFF_DISTRIBUTION_FEE] = "negative_fee"
+            if not 0.0 <= user_input[CONF_TARIFF_TAX_RATE] <= 100.0:
+                errors[CONF_TARIFF_TAX_RATE] = "invalid_tax_rate"
+            if not errors:
+                self._data.update(user_input)
+                return await self.async_step_battery()
 
-        data = {**self._entry.data, **self._entry.options}
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema({
-                vol.Required(CONF_TARIFF_DISTRIBUTION_FEE, default=data.get(CONF_TARIFF_DISTRIBUTION_FEE, 0.03)): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_TAX_RATE, default=data.get(CONF_TARIFF_TAX_RATE, 0.21)): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_MARKUP, default=data.get(CONF_TARIFF_MARKUP, 0.005)): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_SELL_DISTRIBUTION_FEE, default=data.get(CONF_TARIFF_SELL_DISTRIBUTION_FEE, 0.01)): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_SELL_TAX_RATE, default=data.get(CONF_TARIFF_SELL_TAX_RATE, 0.0)): vol.Coerce(float),
-                vol.Required(CONF_TARIFF_SELL_MARKUP, default=data.get(CONF_TARIFF_SELL_MARKUP, 0.0)): vol.Coerce(float),
-            }),
+            errors=errors,
+            data_schema=_tariff_schema(self._defaults()),
+        )
+
+    async def async_step_battery(self, user_input: dict | None = None) -> FlowResult:
+        """Step 2: Battery parameters."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if user_input[CONF_BATTERY_NOMINAL_CAPACITY] <= 0:
+                errors[CONF_BATTERY_NOMINAL_CAPACITY] = "invalid_capacity"
+            if user_input[CONF_BATTERY_PURCHASE_PRICE] <= 0:
+                errors[CONF_BATTERY_PURCHASE_PRICE] = "invalid_price"
+            if not 0.0 < user_input[CONF_BATTERY_ROUND_TRIP_EFFICIENCY] <= 100.0:
+                errors[CONF_BATTERY_ROUND_TRIP_EFFICIENCY] = "invalid_efficiency"
+            if not errors:
+                self._data.update(user_input)
+                return await self.async_step_inverter()
+
+        return self.async_show_form(
+            step_id="battery",
+            errors=errors,
+            data_schema=_battery_schema(self._defaults()),
+        )
+
+    async def async_step_inverter(self, user_input: dict | None = None) -> FlowResult:
+        """Step 3a: Inverter platform selection."""
+        if user_input is not None:
+            self._inverter_platform = user_input[CONF_INVERTER_PLATFORM]
+            self._data[CONF_INVERTER_PLATFORM] = self._inverter_platform
+            if self._inverter_platform == InverterPlatform.SOLIS.value:
+                return await self.async_step_inverter_solis()
+            return await self.async_step_inverter_entities()
+
+        return self.async_show_form(
+            step_id="inverter",
+            data_schema=_inverter_platform_schema(self._defaults()),
+        )
+
+    async def async_step_inverter_entities(self, user_input: dict | None = None) -> FlowResult:
+        """Step 3b: Standard inverter entity mapping."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_ev()
+
+        return self.async_show_form(
+            step_id="inverter_entities",
+            data_schema=_inverter_entities_schema(self._defaults()),
+        )
+
+    async def async_step_inverter_solis(self, user_input: dict | None = None) -> FlowResult:
+        """Step 3b (Solis): TOU-model entity mapping."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_ev()
+
+        return self.async_show_form(
+            step_id="inverter_solis",
+            data_schema=_inverter_solis_schema(self._defaults()),
+        )
+
+    async def async_step_ev(self, user_input: dict | None = None) -> FlowResult:
+        """Step 4: EV charger (optional)."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_sources()
+
+        return self.async_show_form(
+            step_id="ev",
+            data_schema=_ev_schema(self._defaults()),
+        )
+
+    async def async_step_sources(self, user_input: dict | None = None) -> FlowResult:
+        """Step 5: Nordpool and solar forecast entities."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return self.async_create_entry(title="", data=self._data)
+
+        return self.async_show_form(
+            step_id="sources",
+            data_schema=_sources_schema(self._defaults()),
         )
