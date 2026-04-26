@@ -37,14 +37,10 @@ SOLIS_ENTITY_IDS = {
     "grid_power": "sensor.solis_ac_grid_port_power",
     "solis_charge_current": "number.solis_time_charging_charge_current",
     "solis_discharge_current": "number.solis_time_charging_discharge_current",
-    "solis_charge_start_hour_1": "number.solis_time_charging_charge_start_hour_slot_1",
-    "solis_charge_start_minute_1": "number.solis_time_charging_charge_start_minute_slot_1",
-    "solis_charge_end_hour_1": "number.solis_time_charging_charge_end_hour_slot_1",
-    "solis_charge_end_minute_1": "number.solis_time_charging_charge_end_minute_slot_1",
-    "solis_discharge_start_hour_1": "number.solis_time_charging_discharge_start_hour_slot_1",
-    "solis_discharge_start_minute_1": "number.solis_time_charging_discharge_start_minute_slot_1",
-    "solis_discharge_end_hour_1": "number.solis_time_charging_discharge_end_hour_slot_1",
-    "solis_discharge_end_minute_1": "number.solis_time_charging_discharge_end_minute_slot_1",
+    "solis_charge_start_time_1": "time.solis_time_charging_charge_start_slot_1",
+    "solis_charge_end_time_1": "time.solis_time_charging_charge_end_slot_1",
+    "solis_discharge_start_time_1": "time.solis_time_charging_discharge_start_slot_1",
+    "solis_discharge_end_time_1": "time.solis_time_charging_discharge_end_slot_1",
     "solis_tou_mode_switch": "switch.solis_time_of_use_mode",
     "solis_allow_grid_charge_switch": "switch.solis_allow_grid_to_charge_the_battery",
     "solis_self_use_mode_switch": "switch.solis_self_use_mode",
@@ -68,9 +64,9 @@ def _calls_for(hass: MagicMock):
 
 
 def _entity_value(calls, entity_id: str):
-    """Return the value from the first number.set_value call to entity_id."""
+    """Return the value from the first number.set_value or time.set_value call to entity_id."""
     for domain, svc, data in calls:
-        if domain == "number" and svc == "set_value" and data.get("entity_id") == entity_id:
+        if svc == "set_value" and data.get("entity_id") == entity_id:
             return data["value"]
     return None
 
@@ -95,6 +91,8 @@ async def test_charge_issues_correct_service_calls():
 
     # charge current written
     assert ("number", "set_value") in domains_svcs
+    # time slots written
+    assert ("time", "set_value") in domains_svcs
     # allow-grid-charge and TOU mode turned on
     assert ("switch", "turn_on") in domains_svcs
 
@@ -104,27 +102,21 @@ async def test_charge_issues_correct_service_calls():
     assert actual_amps is not None
     assert abs(actual_amps - expected_amps) < 0.01
 
-    # 4 slot-time writes
-    slot_keys = [
-        "solis_charge_start_hour_1",
-        "solis_charge_start_minute_1",
-        "solis_charge_end_hour_1",
-        "solis_charge_end_minute_1",
-    ]
-    for key in slot_keys:
+    # 2 slot-time writes
+    for key in ("solis_charge_start_time_1", "solis_charge_end_time_1"):
         assert _entity_value(calls, SOLIS_ENTITY_IDS[key]) is not None, f"missing write to {key}"
 
     # start time: hour=10, minute rounded down to 15
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_start_hour_1"]) == 10
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_start_minute_1"]) == 15
+    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_start_time_1"]) == "10:15:00"
+    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_end_time_1"]) == "11:00:00"
 
     # allow-grid-charge switched on
     turn_on_entities = [d["entity_id"] for dom, svc, d in calls if svc == "turn_on"]
     assert SOLIS_ENTITY_IDS["solis_allow_grid_charge_switch"] in turn_on_entities
     assert SOLIS_ENTITY_IDS["solis_tou_mode_switch"] in turn_on_entities
 
-    # total calls: 1 charge_current + 4 slot times + 1 allow_grid + 1 tou = 7
-    assert len(calls) == 7
+    # total calls: 1 charge_current + 2 time slots + 1 allow_grid + 1 tou = 5
+    assert len(calls) == 5
 
 
 @pytest.mark.asyncio
@@ -159,14 +151,13 @@ async def test_discharge_issues_correct_service_calls():
     assert actual_amps is not None
     assert abs(actual_amps - expected_amps) < 0.01
 
-    # 4 discharge slot-time writes
-    for key in ["solis_discharge_start_hour_1", "solis_discharge_start_minute_1",
-                "solis_discharge_end_hour_1", "solis_discharge_end_minute_1"]:
+    # 2 discharge slot-time writes
+    for key in ("solis_discharge_start_time_1", "solis_discharge_end_time_1"):
         assert _entity_value(calls, SOLIS_ENTITY_IDS[key]) is not None
 
     # start: hour=14, minute rounded to 30
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_start_hour_1"]) == 14
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_start_minute_1"]) == 30
+    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_start_time_1"]) == "14:30:00"
+    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_end_time_1"]) == "15:00:00"
 
     # TOU mode switched on
     turn_on_entities = [d["entity_id"] for _, svc, d in calls if svc == "turn_on"]
@@ -175,8 +166,8 @@ async def test_discharge_issues_correct_service_calls():
     # no allow-grid-charge for discharge
     assert SOLIS_ENTITY_IDS["solis_allow_grid_charge_switch"] not in turn_on_entities
 
-    # total: 1 discharge_current + 4 slot times + 1 tou = 6
-    assert len(calls) == 6
+    # total: 1 discharge_current + 2 time slots + 1 tou = 4
+    assert len(calls) == 4
 
 
 # ---------------------------------------------------------------------------

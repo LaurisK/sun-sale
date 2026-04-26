@@ -35,14 +35,10 @@ class InverterController:
       - "battery_soc", "battery_power", "grid_power" as above
       - "solis_charge_current"          number entity for charge amps
       - "solis_discharge_current"       number entity for discharge amps
-      - "solis_charge_start_hour_1"     number entity, slot-1 charge start hour
-      - "solis_charge_start_minute_1"   number entity, slot-1 charge start minute
-      - "solis_charge_end_hour_1"       number entity, slot-1 charge end hour
-      - "solis_charge_end_minute_1"     number entity, slot-1 charge end minute
-      - "solis_discharge_start_hour_1"  number entity, slot-1 discharge start hour
-      - "solis_discharge_start_minute_1"
-      - "solis_discharge_end_hour_1"
-      - "solis_discharge_end_minute_1"
+      - "solis_charge_start_time_1"     time entity, slot-1 charge start (HH:MM:SS)
+      - "solis_charge_end_time_1"       time entity, slot-1 charge end (HH:MM:SS)
+      - "solis_discharge_start_time_1"  time entity, slot-1 discharge start (HH:MM:SS)
+      - "solis_discharge_end_time_1"    time entity, slot-1 discharge end (HH:MM:SS)
       - "solis_tou_mode_switch"         switch entity for TOU mode
       - "solis_allow_grid_charge_switch" switch entity to allow grid charging
       - "solis_self_use_mode_switch"    switch entity for self-use / idle mode
@@ -148,10 +144,10 @@ class InverterController:
         nominal_v = cfg.nominal_voltage_v if cfg is not None else 48.0
 
         now = datetime.now(timezone.utc)
-        start_hour = now.hour
         start_minute = (now.minute // 5) * 5
+        start_time = f"{now.hour:02d}:{start_minute:02d}:00"
         end_hour = (now.hour + 1) % 24
-        end_minute = 0
+        end_time = f"{end_hour:02d}:00:00"
 
         if mode == "charge":
             max_amps = ((cfg.max_charge_power_kw * 1000) / nominal_v) if cfg is not None else float("inf")
@@ -163,23 +159,13 @@ class InverterController:
                 blocking=True,
             )
             await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_charge_start_hour_1"], "value": start_hour},
+                "time", "set_value",
+                {"entity_id": self._entity_ids["solis_charge_start_time_1"], "value": start_time},
                 blocking=True,
             )
             await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_charge_start_minute_1"], "value": start_minute},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_charge_end_hour_1"], "value": end_hour},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_charge_end_minute_1"], "value": end_minute},
+                "time", "set_value",
+                {"entity_id": self._entity_ids["solis_charge_end_time_1"], "value": end_time},
                 blocking=True,
             )
             await self._hass.services.async_call(
@@ -203,23 +189,13 @@ class InverterController:
                 blocking=True,
             )
             await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_discharge_start_hour_1"], "value": start_hour},
+                "time", "set_value",
+                {"entity_id": self._entity_ids["solis_discharge_start_time_1"], "value": start_time},
                 blocking=True,
             )
             await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_discharge_start_minute_1"], "value": start_minute},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_discharge_end_hour_1"], "value": end_hour},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_discharge_end_minute_1"], "value": end_minute},
+                "time", "set_value",
+                {"entity_id": self._entity_ids["solis_discharge_end_time_1"], "value": end_time},
                 blocking=True,
             )
             await self._hass.services.async_call(
