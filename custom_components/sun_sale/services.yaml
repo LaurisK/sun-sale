@@ -1,0 +1,6 @@
+force_recalculate:
+  name: Force Recalculate
+  description: >
+    Trigger an immediate re-run of the price optimizer without waiting for the
+    next scheduled update interval.
+  fields: {}
