@@ -277,23 +277,56 @@ class SunSaleCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------ #
 
     def _read_nordpool_prices(self) -> list[HourlyPrice]:
-        """Parse Nordpool sensor today/tomorrow price attributes."""
+        """Parse Nordpool sensor price attributes.
+
+        Supports both the new format (raw_today/raw_tomorrow with timestamps,
+        possibly 15-min granularity) and the legacy flat hourly lists.
+        """
         entity_id = self._entry.data.get(CONF_NORDPOOL_ENTITY, "")
         state = self.hass.states.get(entity_id)
         if state is None:
             _LOGGER.warning("Nordpool entity '%s' not found", entity_id)
             return []
 
+        # New Nordpool format: raw_today / raw_tomorrow contain dicts with
+        # explicit timestamps and may be at 15-min granularity.
+        raw_entries: list[dict] = []
+        for attr_key in ("raw_today", "raw_tomorrow"):
+            raw = state.attributes.get(attr_key)
+            if isinstance(raw, list):
+                raw_entries.extend(raw)
+
+        if raw_entries:
+            hourly: dict[datetime, list[float]] = {}
+            for entry in raw_entries:
+                try:
+                    start_utc = (
+                        datetime.fromisoformat(entry["start"])
+                        .astimezone(timezone.utc)
+                        .replace(minute=0, second=0, microsecond=0)
+                    )
+                    hourly.setdefault(start_utc, []).append(float(entry["value"]))
+                except (KeyError, ValueError):
+                    continue
+            return [
+                HourlyPrice(
+                    start=h,
+                    end=h + timedelta(hours=1),
+                    price_eur_kwh=sum(vals) / len(vals),
+                )
+                for h, vals in sorted(hourly.items())
+            ]
+
+        # Legacy format: flat list of up to 24 hourly prices per day.
         now = datetime.now(timezone.utc)
         prices: list[HourlyPrice] = []
-
         for offset, attr_key in enumerate(("today", "tomorrow")):
             raw = state.attributes.get(attr_key)
             if not isinstance(raw, list):
                 continue
             base_date = (now + timedelta(days=offset)).date()
             for hour_idx, price in enumerate(raw):
-                if price is None:
+                if price is None or hour_idx >= 24:
                     continue
                 start = datetime(
                     base_date.year, base_date.month, base_date.day,
@@ -304,7 +337,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     end=start + timedelta(hours=1),
                     price_eur_kwh=float(price),
                 ))
-
         return prices
 
     def _read_solar_forecast(self) -> list[SolarForecast]:
