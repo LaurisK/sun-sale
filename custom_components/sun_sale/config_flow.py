@@ -89,7 +89,10 @@ INVERTER_PLATFORMS = [p.value for p in InverterPlatform]
 EV_PLATFORMS = [p.value for p in EVChargerPlatform]
 
 _SENSOR = EntitySelector(EntitySelectorConfig(domain="sensor"))
-_BINARY_SENSOR = EntitySelector(EntitySelectorConfig(domain="binary_sensor"))
+_SENSOR_POWER = EntitySelector(EntitySelectorConfig(domain="sensor", device_class="power"))
+_SENSOR_SOC = EntitySelector(EntitySelectorConfig(domain="sensor", device_class="battery"))
+_SENSOR_ENERGY = EntitySelector(EntitySelectorConfig(domain="sensor", device_class=["energy", "power"]))
+_BINARY_SENSOR_PLUG = EntitySelector(EntitySelectorConfig(domain="binary_sensor", device_class="plug"))
 _SWITCH = EntitySelector(EntitySelectorConfig(domain="switch"))
 _NUMBER = EntitySelector(EntitySelectorConfig(domain="number"))
 _ANY_ENTITY = EntitySelector(EntitySelectorConfig())
@@ -148,18 +151,18 @@ def _inverter_platform_schema(d: dict) -> vol.Schema:
 
 def _inverter_entities_schema(d: dict) -> vol.Schema:
     return vol.Schema({
-        _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d): _SENSOR,
-        _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d): _SENSOR,
-        _req(CONF_INVERTER_ENTITY_GRID_POWER, d): _SENSOR,
+        _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d): _SENSOR_SOC,
+        _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d): _SENSOR_POWER,
+        _req(CONF_INVERTER_ENTITY_GRID_POWER, d): _SENSOR_POWER,
         _req(CONF_INVERTER_ENTITY_CHARGE_CONTROL, d): _ANY_ENTITY,
     })
 
 
 def _inverter_solis_schema(d: dict) -> vol.Schema:
     return vol.Schema({
-        _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d, "sensor.solis_battery_soc"): _SENSOR,
-        _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d, "sensor.solis_battery_power"): _SENSOR,
-        _req(CONF_INVERTER_ENTITY_GRID_POWER, d, "sensor.solis_ac_grid_port_power"): _SENSOR,
+        _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d, "sensor.solis_battery_soc"): _SENSOR_SOC,
+        _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d, "sensor.solis_battery_power"): _SENSOR_POWER,
+        _req(CONF_INVERTER_ENTITY_GRID_POWER, d, "sensor.solis_ac_grid_port_power"): _SENSOR_POWER,
         _req(CONF_INVERTER_SOLIS_CHARGE_CURRENT, d, DEFAULT_SOLIS_CHARGE_CURRENT): _NUMBER,
         _req(CONF_INVERTER_SOLIS_DISCHARGE_CURRENT, d, DEFAULT_SOLIS_DISCHARGE_CURRENT): _NUMBER,
         _req(CONF_INVERTER_SOLIS_CHARGE_START_HOUR_1, d, DEFAULT_SOLIS_CHARGE_START_HOUR_1): _NUMBER,
@@ -183,8 +186,8 @@ def _ev_schema(d: dict) -> vol.Schema:
         _opt(CONF_EV_BATTERY_CAPACITY, d): vol.Coerce(float),
         _opt(CONF_EV_MAX_CHARGE_POWER, d): vol.Coerce(float),
         _opt(CONF_EV_MIN_CHARGE_POWER, d, DEFAULT_EV_MIN_CHARGE_POWER_KW): vol.Coerce(float),
-        _opt(CONF_EV_ENTITY_PLUG_STATE, d): _BINARY_SENSOR,
-        _opt(CONF_EV_ENTITY_SOC, d): _SENSOR,
+        _opt(CONF_EV_ENTITY_PLUG_STATE, d): _BINARY_SENSOR_PLUG,
+        _opt(CONF_EV_ENTITY_SOC, d): _SENSOR_SOC,
         _opt(CONF_EV_ENTITY_TARGET_SOC, d): _ANY_ENTITY,
         _opt(CONF_EV_ENTITY_DEPARTURE_TIME, d): _ANY_ENTITY,
         _opt(CONF_EV_ENTITY_CHARGER_SWITCH, d): _SWITCH,
@@ -194,7 +197,7 @@ def _ev_schema(d: dict) -> vol.Schema:
 def _sources_schema(d: dict) -> vol.Schema:
     return vol.Schema({
         _req(CONF_NORDPOOL_ENTITY, d): _SENSOR,
-        _opt(CONF_SOLAR_FORECAST_ENTITY, d): _SENSOR,
+        _opt(CONF_SOLAR_FORECAST_ENTITY, d): _SENSOR_ENERGY,
     })
 
 
