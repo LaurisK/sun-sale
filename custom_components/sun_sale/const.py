@@ -55,6 +55,9 @@ CONF_EV_ENTITY_CHARGE_CURRENT = "ev_entity_charge_current"
 # Config entry keys — data sources
 CONF_NORDPOOL_ENTITY = "nordpool_entity"
 CONF_SOLAR_FORECAST_ENTITY = "solar_forecast_entity"
+CONF_SOLAR_FORECAST_ENTITY_2 = "solar_forecast_entity_2"
+CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD = "inverter_entity_household_load"
+CONF_INVERTER_ENTITY_PV_POWER = "inverter_entity_pv_power"
 
 # Persistent storage
 STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"

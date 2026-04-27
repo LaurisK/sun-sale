@@ -38,6 +38,7 @@ async def async_setup_entry(
         EVChargingSensor(coordinator, entry),
         EVChargeCostSensor(coordinator, entry),
         ScheduleSensor(coordinator, entry),
+        DashboardSensor(coordinator, entry),
     ])
 
 
@@ -303,4 +304,32 @@ class ScheduleSensor(_BaseSensor):
             "total_expected_profit_eur": round(schedule.total_expected_profit_eur, 4),
             "degradation_cost_per_kwh": round(schedule.degradation_cost_per_kwh, 6),
             "computed_at": schedule.computed_at.isoformat(),
+        }
+
+
+class DashboardSensor(_BaseSensor):
+    """Exposes pre-built future slots and frozen solar forecast for the panel."""
+
+    _attr_name = "sunSale Dashboard"
+    _attr_icon = "mdi:chart-timeline-variant"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "dashboard")
+
+    @property
+    def native_value(self) -> str:
+        return "ok" if self.coordinator.data else "unavailable"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        now = datetime.now(timezone.utc)
+        bc = self.coordinator.battery_config
+        return {
+            "generated_at": now.isoformat(),
+            "now_ts": int(now.timestamp() * 1000),
+            "slots": self.coordinator.data.get("dashboard_slots", []),
+            "solar_frozen_forecast": self.coordinator.data.get("solar_frozen_forecast", []),
+            "battery_capacity_kwh": round(bc.nominal_capacity_kwh, 2) if bc else None,
         }

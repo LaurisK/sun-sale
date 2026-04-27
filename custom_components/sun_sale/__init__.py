@@ -1,6 +1,10 @@
 """sunSale – electricity buy/sell and EV charging optimiser for Home Assistant."""
 from __future__ import annotations
 
+from pathlib import Path
+
+from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -8,6 +12,11 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from .const import DOMAIN
 from .coordinator import SunSaleCoordinator
 from .debug_view import SunSaleDebugView
+
+_PANEL_KEY = f"{DOMAIN}_panel_registered"
+_STATIC_PATH = "/sun_sale"
+_PANEL_URL = "sun-sale"
+_WEBCOMPONENT = "sun-sale-panel"
 
 _DEBUG_VIEW_KEY = f"{DOMAIN}_debug_view_registered"
 
@@ -33,6 +42,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.data.get(_DEBUG_VIEW_KEY):
         hass.http.register_view(SunSaleDebugView())
         hass.data[_DEBUG_VIEW_KEY] = True
+
+    if not hass.data.get(_PANEL_KEY):
+        await hass.http.async_register_static_paths([
+            StaticPathConfig(
+                _STATIC_PATH,
+                str(Path(__file__).parent / "www"),
+                cache_headers=False,
+            )
+        ])
+        await async_register_panel(
+            hass,
+            frontend_url_path=_PANEL_URL,
+            webcomponent_name=_WEBCOMPONENT,
+            sidebar_title="Sun Sale",
+            sidebar_icon="mdi:solar-panel",
+            module_url=f"{_STATIC_PATH}/sun-sale-panel.js",
+            require_admin=False,
+            config={},
+        )
+        hass.data[_PANEL_KEY] = True
 
     async def handle_force_recalculate(call: ServiceCall) -> None:
         for coord in hass.data[DOMAIN].values():

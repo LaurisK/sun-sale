@@ -8,5 +8,5 @@
   "iot_class": "local_polling",
   "codeowners": ["@LaurisK"],
   "requirements": [],
-  "dependencies": []
+  "dependencies": ["panel_custom", "http"]
 }

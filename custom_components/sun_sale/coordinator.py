@@ -14,6 +14,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import battery as battery_module
+from . import dashboard as dashboard_module
 from . import ev_scheduler, optimizer, tariff
 from .battery import CapacityEstimator
 from .const import (
@@ -119,6 +120,14 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self.automation_enabled: bool = True
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
+
+    @property
+    def battery_config(self) -> "BatteryConfig | None":
+        return self._battery_config
+
+    @property
+    def tariff_config(self) -> "TariffConfig | None":
+        return self._tariff_config
 
     async def async_setup(self) -> None:
         """Initialise from config entry data."""
@@ -257,7 +266,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             self._last_battery_soc = soc
             self._last_battery_power = battery_power
 
-            return {
+            partial_data = {
                 "schedule": schedule,
                 "ev_schedule": ev_schedule,
                 "tariffs": tariffs,
@@ -269,6 +278,19 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 "grid_power_kw": grid_power,
                 "battery_power_kw": battery_power,
                 "ev_state": ev_state,
+            }
+
+            config = {**self._entry.data, **self._entry.options}
+            dashboard_slots = dashboard_module.build_future_slots(
+                self.hass, config, partial_data,
+                self._battery_config, self._tariff_config,
+            )
+            solar_frozen = dashboard_module.build_solar_frozen_forecast(self.hass, config)
+
+            return {
+                **partial_data,
+                "dashboard_slots": dashboard_slots,
+                "solar_frozen_forecast": solar_frozen,
             }
 
         except Exception as exc:
