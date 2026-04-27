@@ -5,6 +5,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -20,8 +21,12 @@ async def async_setup_entry(
     async_add_entities([AutomationSwitch(coordinator, entry)])
 
 
-class AutomationSwitch(CoordinatorEntity, SwitchEntity):
-    """When off the coordinator still computes schedules but does not send commands."""
+class AutomationSwitch(CoordinatorEntity, RestoreEntity, SwitchEntity):
+    """When off the coordinator still computes schedules but does not send commands.
+
+    State is persisted via RestoreEntity so it survives HA restarts.
+    Defaults to OFF on first install.
+    """
 
     _attr_name = "sunSale Automation"
     _attr_icon = "mdi:auto-fix"
@@ -30,6 +35,13 @@ class AutomationSwitch(CoordinatorEntity, SwitchEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_enabled"
         self._entry = entry
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None:
+            self.coordinator.automation_enabled = last.state == "on"
+        # If last is None (first install) the coordinator default of False stays.
 
     @property
     def device_info(self) -> dict:

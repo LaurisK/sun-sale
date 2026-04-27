@@ -117,7 +117,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._last_action: str | None = None
         self._last_battery_soc: float | None = None
         self._last_battery_power: float | None = None
-        self.automation_enabled: bool = True
+        self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
 
