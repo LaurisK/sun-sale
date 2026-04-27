@@ -105,6 +105,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=UPDATE_INTERVAL_MINUTES),
         )
         self._entry = config_entry
+        self._config: dict = {}
         self._store: Store | None = None
         self._inverter: InverterController | None = None
         self._ev_charger: EVChargerController | None = None
@@ -122,6 +123,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
     async def async_setup(self) -> None:
         """Initialise from config entry data."""
         data = {**self._entry.data, **self._entry.options}
+        self._config = data
 
         self._tariff_config = TariffConfig(
             distribution_fee=data[CONF_TARIFF_DISTRIBUTION_FEE],
@@ -282,7 +284,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         Supports both the new format (raw_today/raw_tomorrow with timestamps,
         possibly 15-min granularity) and the legacy flat hourly lists.
         """
-        entity_id = self._entry.data.get(CONF_NORDPOOL_ENTITY, "")
+        entity_id = self._config.get(CONF_NORDPOOL_ENTITY, "")
         state = self.hass.states.get(entity_id)
         if state is None:
             _LOGGER.warning("Nordpool entity '%s' not found", entity_id)
@@ -345,7 +347,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
 
     def _read_solar_forecast(self) -> list[SolarForecast]:
         """Parse Forecast.Solar / Solcast forecast attribute."""
-        entity_id = self._entry.data.get(CONF_SOLAR_FORECAST_ENTITY, "")
+        entity_id = self._config.get(CONF_SOLAR_FORECAST_ENTITY, "")
         if not entity_id:
             return []
         state = self.hass.states.get(entity_id)
@@ -372,7 +374,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         soc = self._ev_charger.get_ev_soc()
 
         target_soc = DEFAULT_EV_TARGET_SOC
-        target_entity = self._entry.data.get(CONF_EV_ENTITY_TARGET_SOC, "")
+        target_entity = self._config.get(CONF_EV_ENTITY_TARGET_SOC, "")
         if target_entity:
             ts = self.hass.states.get(target_entity)
             if ts and ts.state not in ("unavailable", "unknown", ""):
@@ -383,7 +385,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     pass
 
         departure_time: datetime | None = None
-        dep_entity = self._entry.data.get(CONF_EV_ENTITY_DEPARTURE_TIME, "")
+        dep_entity = self._config.get(CONF_EV_ENTITY_DEPARTURE_TIME, "")
         if dep_entity:
             ds = self.hass.states.get(dep_entity)
             if ds and ds.state not in ("unavailable", "unknown", ""):
