@@ -77,7 +77,13 @@ from .const import (
 from .ev_charger import EVChargerPlatform
 from .inverter import InverterPlatform
 
-INVERTER_PLATFORMS = [p.value for p in InverterPlatform]
+INVERTER_PLATFORMS = [
+    {"value": InverterPlatform.SOLIS.value, "label": "Solis (solis_modbus)"},
+    {"value": InverterPlatform.HUAWEI_SOLAR.value, "label": "Huawei Solar (not tested)"},
+    {"value": InverterPlatform.SOLAREDGE.value, "label": "SolarEdge (not tested)"},
+    {"value": InverterPlatform.GOODWE.value, "label": "GoodWe (not tested)"},
+    {"value": InverterPlatform.GENERIC.value, "label": "Generic (not tested)"},
+]
 EV_PLATFORMS = [p.value for p in EVChargerPlatform]
 
 _SENSOR = EntitySelector(EntitySelectorConfig(domain="sensor"))
@@ -138,7 +144,7 @@ def _battery_schema(d: dict) -> vol.Schema:
 
 def _inverter_platform_schema(d: dict) -> vol.Schema:
     return vol.Schema({
-        _req(CONF_INVERTER_PLATFORM, d, InverterPlatform.GENERIC.value): _platform_selector(INVERTER_PLATFORMS),
+        _req(CONF_INVERTER_PLATFORM, d, InverterPlatform.SOLIS.value): _platform_selector(INVERTER_PLATFORMS),
     })
 
 

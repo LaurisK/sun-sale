@@ -300,13 +300,17 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             hourly: dict[datetime, list[float]] = {}
             for entry in raw_entries:
                 try:
-                    start_utc = (
-                        datetime.fromisoformat(entry["start"])
-                        .astimezone(timezone.utc)
-                        .replace(minute=0, second=0, microsecond=0)
-                    )
+                    start_val = entry["start"]
+                    # HA state machine stores datetimes as objects; REST API returns strings.
+                    if isinstance(start_val, datetime):
+                        start_dt = start_val
+                    else:
+                        start_dt = datetime.fromisoformat(str(start_val))
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                    start_utc = start_dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
                     hourly.setdefault(start_utc, []).append(float(entry["value"]))
-                except (KeyError, ValueError):
+                except (KeyError, ValueError, TypeError):
                     continue
             return [
                 HourlyPrice(
