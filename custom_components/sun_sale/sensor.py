@@ -39,6 +39,7 @@ async def async_setup_entry(
         EVChargeCostSensor(coordinator, entry),
         ScheduleSensor(coordinator, entry),
         DashboardSensor(coordinator, entry),
+        InverterModeSensor(coordinator, entry),
     ])
 
 
@@ -305,6 +306,34 @@ class ScheduleSensor(_BaseSensor):
             "degradation_cost_per_kwh": round(schedule.degradation_cost_per_kwh, 6),
             "computed_at": schedule.computed_at.isoformat(),
         }
+
+
+class InverterModeSensor(_BaseSensor):
+    """Current inverter operating mode as a string — recorded by HA for history.
+
+    State mirrors the inverter_mode field that build_future_slots computes for
+    the current 15-min slot, so the dashboard's past mode band uses real data.
+    """
+
+    _attr_name = "sunSale Inverter Mode"
+    _attr_icon = "mdi:solar-power-variant"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "inverter_mode")
+
+    @property
+    def native_value(self) -> str:
+        if self.coordinator.data is None:
+            return "idle"
+        slots: list[dict] = self.coordinator.data.get("dashboard_slots", [])
+        if not slots:
+            return "idle"
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        slot_ms = 15 * 60 * 1000
+        cur = next((s for s in slots if s["t"] <= now_ms < s["t"] + slot_ms), None)
+        if cur is None:
+            cur = slots[0]
+        return cur.get("inverter_mode", "idle")
 
 
 class DashboardSensor(_BaseSensor):

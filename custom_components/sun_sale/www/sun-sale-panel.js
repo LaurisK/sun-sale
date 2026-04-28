@@ -19,13 +19,15 @@
   const APEXCHARTS_CDN = 'https://cdn.jsdelivr.net/npm/apexcharts@3.54.0/dist/apexcharts.min.js';
 
   const HISTORY_ENTITIES = [
-    'sensor.nordpool_kwh_lt_eur_3_10_0',
-    'sensor.namai_inv_total_pv_power_2',
-    'sensor.namai_inv_battery_soc_2',
-    'sensor.namai_inv_rc_force_battery_charge_discharge_2',
-    'sensor.namai_inv_grid_power_net',
-    'sensor.namai_inv_household_load_power_2',
+    'sensor.nordpool_kwh_lt_eur_3_10_0',       // 0 price
+    'sensor.namai_inv_total_pv_power_2',        // 1 solar W
+    'sensor.namai_inv_battery_soc_2',           // 2 SoC %
+    'sensor.namai_inv_rc_force_battery_charge_discharge_2', // 3 (unused)
+    'sensor.namai_inv_grid_power_net',          // 4 grid W
+    'sensor.namai_inv_household_load_power_2',  // 5 load W
+    'sensor.sunsale_inverter_mode',             // 6 mode string (our own sensor)
   ];
+  const MODE_HISTORY_ENTITY = 'sensor.sunsale_inverter_mode';
 
   const SLOT_MS = 15 * 60 * 1000;
 
@@ -57,8 +59,23 @@
   // ── Utility: resample sparse state-change history to fixed 15-min buckets ──
 
   function resample15min(points, startMs, endMs) {
-    // points: [{t, v}] sorted ascending
+    // points: [{t, v}] sorted ascending, v numeric
     // returns: [[t_ms, v], ...] one per 15-min slot, forward-filled
+    const out = [];
+    let cursor = 0;
+    let last = null;
+    for (let t = startMs; t <= endMs; t += SLOT_MS) {
+      while (cursor < points.length && points[cursor].t <= t) {
+        last = points[cursor].v;
+        cursor++;
+      }
+      if (last !== null) out.push([t, last]);
+    }
+    return out;
+  }
+
+  function resample15minStr(points, startMs, endMs) {
+    // Same as resample15min but v is a string — all slots included once a value exists
     const out = [];
     let cursor = 0;
     let last = null;
@@ -76,6 +93,31 @@
 
   function floor15(ms) {
     return ms - (ms % SLOT_MS);
+  }
+
+  // ── Utility: group consecutive same-value items into runs ─────────────────
+
+  function groupRuns(items, valueOf, timestampOf) {
+    const runs = [];
+    let cur = null;
+    for (const item of items) {
+      const v = valueOf(item);
+      const t = timestampOf(item);
+      if (!cur || cur.value !== v) {
+        if (cur) cur.end = t;
+        cur = { start: t, end: t + SLOT_MS, value: v };
+        runs.push(cur);
+      } else {
+        cur.end = t + SLOT_MS;
+      }
+    }
+    return runs;
+  }
+
+  function gridPowerToMode(gridW) {
+    if (gridW > 200)  return 'charge_from_grid';
+    if (gridW < -200) return 'sell_discharge';
+    return 'self_use';
   }
 
   // ── Utility: midnight UTC for a date offset ────────────────────────────────
@@ -248,10 +290,17 @@
       for (const entityHistory of rawArrays) {
         if (!entityHistory?.length) continue;
         const eid = entityHistory[0].entity_id;
-        out[eid] = entityHistory
-          .filter(s => s.state !== 'unavailable' && s.state !== 'unknown' && s.state !== 'None')
-          .map(s => ({ t: new Date(s.last_changed).getTime(), v: parseFloat(s.state) }))
-          .filter(p => isFinite(p.v));
+        const filtered = entityHistory.filter(
+          s => s.state !== 'unavailable' && s.state !== 'unknown' && s.state !== 'None'
+        );
+        if (eid === MODE_HISTORY_ENTITY) {
+          // String states — keep as-is
+          out[eid] = filtered.map(s => ({ t: new Date(s.last_changed).getTime(), v: s.state }));
+        } else {
+          out[eid] = filtered
+            .map(s => ({ t: new Date(s.last_changed).getTime(), v: parseFloat(s.state) }))
+            .filter(p => isFinite(p.v));
+        }
       }
       return out;
     }
@@ -303,7 +352,7 @@
       );
 
       const priceActivePast = pricePast
-        .filter(([t]) => gridActiveSet.has(floor15(t)));
+        .map(([t, v]) => [t, gridActiveSet.has(floor15(t)) ? v : null]);
 
       // Solar actual (W → kW)
       const pvPts = hist[HISTORY_ENTITIES[1]] || [];
@@ -351,14 +400,22 @@
 
       // Active future slots (where grid operation is buy or sell)
       const priceActiveFuture = futureSlots
-        .filter(s => s.grid_operation != null)
-        .map(s => [s.t, s.buy_price]);
+        .map(s => [s.t, s.grid_operation != null ? s.buy_price : null]);
 
-      // Mode band (encode as integer index, shown as scatter strip)
-      const modeData = futureSlots.map(s => {
-        const idx = MODE_ORDER.indexOf(s.inverter_mode);
-        return { x: s.t, y: 0, mode: s.inverter_mode, idx: idx >= 0 ? idx : MODE_ORDER.length - 1 };
-      });
+      // Mode runs — past from dedicated mode sensor when available, else grid-power approximation
+      const modePts = hist[MODE_HISTORY_ENTITY] || [];
+      let pastModeRuns;
+      if (modePts.length > 0) {
+        // Forward-fill mode string across 15-min slots
+        const modePast = resample15minStr(modePts, windowStart, now - SLOT_MS);
+        pastModeRuns = groupRuns(modePast, ([, v]) => v, ([t]) => t);
+      } else {
+        pastModeRuns = groupRuns(gridPast, ([, v]) => gridPowerToMode(v), ([t]) => t);
+      }
+      const futureModeRuns = groupRuns(futureSlots, s => s.inverter_mode, s => s.t);
+      this._modeRuns = [...pastModeRuns, ...futureModeRuns];
+      this._windowStart = windowStart;
+      this._windowEnd   = windowEnd;
 
       return {
         pricePast, priceActivePast,
@@ -366,7 +423,6 @@
         pvAboveForecast, pvBelowForecast, pvForecastLine,
         pvForecastFuture,
         socPast, socFuture,
-        modeData,
         windowStart, windowEnd, now,
       };
     }
@@ -412,6 +468,48 @@
       });
     }
 
+    _drawModeBand() {
+      if (!this._chart || !this._modeRuns) return;
+      const g = this._chart.w.globals;
+      const svgEl = this.shadowRoot.querySelector('#chart svg');
+      if (!svgEl) return;
+
+      // Remove previous band
+      svgEl.querySelectorAll('.ss-mode-band').forEach(el => el.remove());
+
+      const xOff  = g.translateX;
+      const chartW = g.gridWidth;
+      const chartY = g.translateY;
+      const chartH = g.gridHeight;
+      if (!chartW || !chartH) return;
+
+      const xMin = this._windowStart;
+      const xMax = this._windowEnd;
+      const msToX = ms => xOff + (ms - xMin) / (xMax - xMin) * chartW;
+
+      const BAND_H = 14;
+      const bandY  = chartY + chartH - BAND_H;
+
+      const grp = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      grp.setAttribute('class', 'ss-mode-band');
+
+      for (const r of this._modeRuns) {
+        const x1 = Math.max(xOff, msToX(r.start));
+        const x2 = Math.min(xOff + chartW, msToX(r.end));
+        if (x2 <= x1) continue;
+        const meta = MODE_META[r.value] || { color: '#607d8b' };
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x',      x1);
+        rect.setAttribute('y',      bandY);
+        rect.setAttribute('width',  x2 - x1);
+        rect.setAttribute('height', BAND_H);
+        rect.setAttribute('fill',   meta.color);
+        rect.setAttribute('opacity', '0.75');
+        grp.appendChild(rect);
+      }
+      svgEl.appendChild(grp);
+    }
+
     _seriesArray(s) {
       return [
         { name: 'Price past',         data: s.pricePast },
@@ -442,6 +540,12 @@
           zoom: { enabled: true, type: 'x' },
           animations: { enabled: false },
           fontFamily: 'inherit',
+          events: {
+            rendered: () => this._drawModeBand(),
+            updated:  () => this._drawModeBand(),
+            zoomed:   () => this._drawModeBand(),
+            scrolled: () => this._drawModeBand(),
+          },
         },
 
         theme: { mode: 'dark' },
@@ -614,7 +718,7 @@
     // ── Legend ─────────────────────────────────────────────────────────────
 
     _updateLegend() {
-      const items = [
+      const lines = [
         { color: '#ffb300', label: 'Price (past)' },
         { color: '#ff5722', label: 'Price (active grid op)', thick: true },
         { color: '#ffcc02', label: 'Buy price (future)', dashed: true },
@@ -624,9 +728,11 @@
         { color: '#ffe082', label: 'Solar forecast', dashed: true },
         { color: '#42a5f5', label: 'Battery SoC' },
       ];
+      const modes = Object.entries(MODE_META).map(([, m]) => ({ color: m.color, label: m.label, band: true }));
+      const items = [...lines, ...modes];
       this.shadowRoot.querySelector('#legend').innerHTML = items.map(i => `
         <div class="leg">
-          <div class="leg-dot" style="background:${i.color};opacity:${i.dashed ? 0.6 : 1}"></div>
+          <div class="leg-dot" style="background:${i.color};opacity:${i.dashed ? 0.6 : 1};${i.band ? 'border-radius:2px;height:8px;' : ''}"></div>
           <span>${i.label}</span>
         </div>
       `).join('');
