@@ -5,12 +5,10 @@ platform-specific Home Assistant service calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from homeassistant.util import dt as dt_util
 from enum import Enum
-from typing import Optional
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .models import BatteryConfig
 
@@ -50,7 +48,7 @@ class InverterController:
         hass: HomeAssistant,
         platform: InverterPlatform,
         entity_ids: dict[str, str],
-        battery_config: Optional[BatteryConfig] = None,
+        battery_config: BatteryConfig | None = None,
     ) -> None:
         self._hass = hass
         self._platform = platform
@@ -146,9 +144,9 @@ class InverterController:
 
         now = dt_util.now()  # HA-local time — inverter clock matches local timezone
         start_minute = (now.minute // 5) * 5
-        start_time = f"{now.hour:02d}:{start_minute:02d}"
+        start_time = f"{now.hour:02d}:{start_minute:02d}:00"
         end_hour = (now.hour + 1) % 24
-        end_time = f"{end_hour:02d}:00"
+        end_time = f"{end_hour:02d}:00:00"
 
         if mode == "charge":
             max_amps = ((cfg.max_charge_power_kw * 1000) / nominal_v) if cfg is not None else float("inf")

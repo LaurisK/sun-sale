@@ -248,7 +248,7 @@ class EVChargingSensor(_BaseSensor):
             return "off"
         now = datetime.now(timezone.utc)
         current = next(
-            (s for s in ev_schedule.slots if s.start <= now < s.start + timedelta(hours=1)),
+            (s for s in ev_schedule.slots if s.start <= now < s.end),
             None,
         )
         return "on" if current and current.charge_power_kw > 0 else "off"

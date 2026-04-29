@@ -58,7 +58,7 @@ def make_coordinator(
         sell_tax_rate=0.0,
         sell_markup=0.005,
     )
-    coord._tariff_config = tariff_cfg
+    coord.tariff_config = tariff_cfg
 
     schedule = Schedule(
         slots=[make_slot(0, Action.CHARGE_FROM_GRID), make_slot(1, Action.DISCHARGE_TO_GRID)],

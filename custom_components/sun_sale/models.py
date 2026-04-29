@@ -1,10 +1,9 @@
 """Shared data structures for sunSale. No logic, no HA imports."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 
 class Action(Enum):
@@ -62,7 +61,6 @@ class BatteryState:
     """Current observed battery state."""
     soc: float                       # 0.0–1.0
     estimated_capacity_kwh: float    # Learned usable capacity
-    cycle_count: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -108,7 +106,7 @@ class EVChargerState:
     is_plugged_in: bool
     soc: float                         # 0.0–1.0, current EV SoC
     target_soc: float                  # 0.0–1.0, desired SoC by departure
-    departure_time: Optional[datetime] = None
+    departure_time: datetime | None = None
 
 
 @dataclass(frozen=True)

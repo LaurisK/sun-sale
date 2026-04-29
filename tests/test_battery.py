@@ -4,7 +4,6 @@ import pytest
 from custom_components.sun_sale.battery import (
     CapacityEstimator,
     degradation_cost_per_kwh,
-    is_trade_profitable,
     trade_profit_per_kwh,
 )
 from custom_components.sun_sale.models import BatteryConfig, BatteryState, CapacityObservation
@@ -41,21 +40,20 @@ def test_degradation_scales_with_capacity():
 
 
 # ---------------------------------------------------------------------------
-# is_trade_profitable / trade_profit_per_kwh
+# trade_profit_per_kwh
 # ---------------------------------------------------------------------------
 
 def test_trade_profitable_positive_spread():
     # sell=0.20 * 0.9 - buy=0.05 - deg=0.04 * 2 = 0.18 - 0.05 - 0.08 = 0.05
-    assert is_trade_profitable(0.05, 0.20, 0.04, 0.9) is True
+    assert trade_profit_per_kwh(0.05, 0.20, 0.04, 0.9) > 0
 
 
 def test_trade_not_profitable_small_spread():
     # sell=0.12 * 0.9 - buy=0.10 - deg=0.04 * 2 = 0.108 - 0.10 - 0.08 = -0.072
-    assert is_trade_profitable(0.10, 0.12, 0.04, 0.9) is False
+    assert trade_profit_per_kwh(0.10, 0.12, 0.04, 0.9) <= 0
 
 
 def test_trade_zero_profit_boundary():
-    # Exactly zero profit should be not profitable (strictly >0 required)
     # solve: sell * eff - buy - deg * 2 = 0
     # sell = (buy + deg * 2) / eff = (0.05 + 0.08) / 0.9 = 0.14444...
     buy = 0.05
@@ -64,7 +62,6 @@ def test_trade_zero_profit_boundary():
     sell = (buy + deg * 2) / eff
     profit = trade_profit_per_kwh(buy, sell, deg, eff)
     assert abs(profit) < 1e-10
-    assert is_trade_profitable(buy, sell, deg, eff) is False
 
 
 def test_trade_profit_formula():

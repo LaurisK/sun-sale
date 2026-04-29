@@ -11,6 +11,7 @@ def make_hass(domain_data: dict | None = None) -> MagicMock:
     hass = MagicMock()
     hass.data = {DOMAIN: domain_data} if domain_data is not None else {}
     hass.http = MagicMock()
+    hass.http.async_register_static_paths = AsyncMock()
     hass.services = MagicMock()
     hass.services.has_service.return_value = False
     hass.config_entries = MagicMock()

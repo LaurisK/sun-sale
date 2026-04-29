@@ -54,8 +54,8 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
             } if battery_state is not None else None,
             "grid_power_kw": data.get("grid_power_kw"),
             "tariff_config": (
-                dataclasses.asdict(coordinator._tariff_config)
-                if coordinator._tariff_config is not None else None
+                dataclasses.asdict(coordinator.tariff_config)
+                if coordinator.tariff_config is not None else None
             ),
             "ev": {
                 "plugged_in": ev_state.is_plugged_in,

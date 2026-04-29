@@ -19,29 +19,25 @@
   const APEXCHARTS_CDN = 'https://cdn.jsdelivr.net/npm/apexcharts@3.54.0/dist/apexcharts.min.js';
 
   const HISTORY_ENTITIES = [
-    'sensor.nordpool_kwh_lt_eur_3_10_0',       // 0 price
-    'sensor.namai_inv_total_pv_power_2',        // 1 solar W
-    'sensor.namai_inv_battery_soc_2',           // 2 SoC %
-    'sensor.namai_inv_rc_force_battery_charge_discharge_2', // 3 (unused)
-    'sensor.namai_inv_grid_power_net',          // 4 grid W
-    'sensor.namai_inv_household_load_power_2',  // 5 load W
-    'sensor.sunsale_inverter_mode',             // 6 mode string (our own sensor)
+    'sensor.nordpool_kwh_lt_eur_3_10_0',  // 0 price
+    'sensor.namai_inv_total_pv_power_2',  // 1 solar W
+    'sensor.namai_inv_battery_soc_2',     // 2 SoC %
+    'sensor.namai_inv_grid_power_net',    // 3 grid W
+    'sensor.sunsale_inverter_mode',       // 4 mode string (our own sensor)
   ];
   const MODE_HISTORY_ENTITY = 'sensor.sunsale_inverter_mode';
 
   const SLOT_MS = 15 * 60 * 1000;
 
-  // mode integer → label + colour
+  // mode string → label + colour
   const MODE_META = {
-    charge_from_grid:  { label: 'Charge (grid)',    color: '#2196f3' },
-    charge_solar:      { label: 'Charge (solar)',   color: '#00bcd4' },
-    sell_solar:        { label: 'Sell solar',       color: '#ffeb3b' },
-    sell_discharge:    { label: 'Sell + discharge', color: '#ff9800' },
-    self_use_sell:     { label: 'Self-use + sell',  color: '#8bc34a' },
-    self_use:          { label: 'Self-use',         color: '#607d8b' },
-    idle:              { label: 'Idle',             color: '#37474f' },
+    charge_from_grid: { label: 'Charge (grid)',    color: '#2196f3' },
+    charge_solar:     { label: 'Charge (solar)',   color: '#00bcd4' },
+    sell_discharge:   { label: 'Sell + discharge', color: '#ff9800' },
+    self_use_sell:    { label: 'Self-use + sell',  color: '#8bc34a' },
+    self_use:         { label: 'Self-use',         color: '#607d8b' },
+    idle:             { label: 'Idle',             color: '#37474f' },
   };
-  const MODE_ORDER = Object.keys(MODE_META);
 
   // ── ApexCharts loader ──────────────────────────────────────────────────────
 
@@ -61,21 +57,6 @@
   function resample15min(points, startMs, endMs) {
     // points: [{t, v}] sorted ascending, v numeric
     // returns: [[t_ms, v], ...] one per 15-min slot, forward-filled
-    const out = [];
-    let cursor = 0;
-    let last = null;
-    for (let t = startMs; t <= endMs; t += SLOT_MS) {
-      while (cursor < points.length && points[cursor].t <= t) {
-        last = points[cursor].v;
-        cursor++;
-      }
-      if (last !== null) out.push([t, last]);
-    }
-    return out;
-  }
-
-  function resample15minStr(points, startMs, endMs) {
-    // Same as resample15min but v is a string — all slots included once a value exists
     const out = [];
     let cursor = 0;
     let last = null;
@@ -345,7 +326,7 @@
       const pricePast = resample15min(nordpoolPts, windowStart, now - SLOT_MS);
 
       // Determine slots where grid was actually active (|grid_power| > 50 W)
-      const gridPts = hist[HISTORY_ENTITIES[4]] || [];
+      const gridPts = hist[HISTORY_ENTITIES[3]] || [];
       const gridPast = resample15min(gridPts, windowStart, now - SLOT_MS);
       const gridActiveSet = new Set(
         gridPast.filter(([, v]) => Math.abs(v) > 50).map(([t]) => floor15(t))
@@ -407,7 +388,7 @@
       let pastModeRuns;
       if (modePts.length > 0) {
         // Forward-fill mode string across 15-min slots
-        const modePast = resample15minStr(modePts, windowStart, now - SLOT_MS);
+        const modePast = resample15min(modePts, windowStart, now - SLOT_MS);
         pastModeRuns = groupRuns(modePast, ([, v]) => v, ([t]) => t);
       } else {
         pastModeRuns = groupRuns(gridPast, ([, v]) => gridPowerToMode(v), ([t]) => t);
@@ -458,7 +439,6 @@
       this._updateKPIs();
       const s = this._buildSeries();
       this._chart.updateSeries(this._seriesArray(s), false);
-      // Refresh "now" annotation
       this._chart.clearAnnotations();
       this._chart.addXaxisAnnotation({
         x: s.now,
@@ -466,48 +446,20 @@
         strokeDashArray: 4,
         label: { text: 'Now', style: { color: '#fff', background: '#444', fontSize: '11px' } },
       });
+      for (const ann of this._modeAnnotations()) {
+        this._chart.addXaxisAnnotation(ann);
+      }
     }
 
-    _drawModeBand() {
-      if (!this._chart || !this._modeRuns) return;
-      const g = this._chart.w.globals;
-      const svgEl = this.shadowRoot.querySelector('#chart svg');
-      if (!svgEl) return;
-
-      // Remove previous band
-      svgEl.querySelectorAll('.ss-mode-band').forEach(el => el.remove());
-
-      const xOff  = g.translateX;
-      const chartW = g.gridWidth;
-      const chartY = g.translateY;
-      const chartH = g.gridHeight;
-      if (!chartW || !chartH) return;
-
-      const xMin = g.minX || this._windowStart;
-      const xMax = g.maxX || this._windowEnd;
-      const msToX = ms => xOff + (ms - xMin) / (xMax - xMin) * chartW;
-
-      const BAND_H = 14;
-      const bandY  = chartY + chartH - BAND_H;
-
-      const grp = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-      grp.setAttribute('class', 'ss-mode-band');
-
-      for (const r of this._modeRuns) {
-        const x1 = Math.max(xOff, msToX(r.start));
-        const x2 = Math.min(xOff + chartW, msToX(r.end));
-        if (x2 <= x1) continue;
-        const meta = MODE_META[r.value] || { color: '#607d8b' };
-        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        rect.setAttribute('x',      x1);
-        rect.setAttribute('y',      bandY);
-        rect.setAttribute('width',  x2 - x1);
-        rect.setAttribute('height', BAND_H);
-        rect.setAttribute('fill',   meta.color);
-        rect.setAttribute('opacity', '0.75');
-        grp.appendChild(rect);
-      }
-      svgEl.appendChild(grp);
+    _modeAnnotations() {
+      return (this._modeRuns || []).map(r => ({
+        x: r.start,
+        x2: r.end,
+        fillColor: MODE_META[r.value]?.color || '#607d8b',
+        opacity: 0.13,
+        borderWidth: 0,
+        label: { text: '' },
+      }));
     }
 
     _seriesArray(s) {
@@ -541,10 +493,9 @@
           animations: { enabled: false },
           fontFamily: 'inherit',
           events: {
-            mounted:  () => this._drawModeBand(),
-            updated:  () => this._drawModeBand(),
-            zoomed:   () => this._drawModeBand(),
-            scrolled: () => this._drawModeBand(),
+            beforeResetZoom: () => ({
+              xaxis: { min: this._windowStart, max: this._windowEnd },
+            }),
           },
         },
 
@@ -661,6 +612,7 @@
                 style: { color: '#fff', background: '#333', fontSize: '11px', padding: { top: 2, bottom: 2, left: 6, right: 6 } },
               },
             },
+            ...this._modeAnnotations(),
           ],
         },
 

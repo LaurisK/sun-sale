@@ -21,16 +21,6 @@ def degradation_cost_per_kwh(config: BatteryConfig, state: BatteryState) -> floa
     )
 
 
-def is_trade_profitable(
-    buy_tariff: float,
-    sell_tariff: float,
-    deg_cost: float,
-    efficiency: float,
-) -> bool:
-    """True if selling at sell_tariff after buying at buy_tariff covers costs."""
-    return trade_profit_per_kwh(buy_tariff, sell_tariff, deg_cost, efficiency) > 0.0
-
-
 def trade_profit_per_kwh(
     buy_tariff: float,
     sell_tariff: float,

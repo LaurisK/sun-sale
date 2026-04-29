@@ -2,7 +2,7 @@
 
 A Home Assistant custom integration that automates electricity **buying, selling, and EV charging** decisions for households with solar panels and battery storage. It optimises the battery and EV charger purely around Nordpool spot prices, your tariff formula, solar generation, battery state, and battery degradation cost.
 
-> **Status: alpha (v0.1.0).** Structurally complete and unit-tested. Huawei Solar and Solis have dedicated inverter branches; SolarEdge and GoodWe fall through to a generic `number.set_value` call and will likely need adjustment. Use the **Automation** master switch to run in observation mode first.
+> **Status: alpha (v0.1.2).** Structurally complete and unit-tested. Huawei Solar and Solis have dedicated inverter branches; SolarEdge and GoodWe fall through to a generic `number.set_value` call and will likely need adjustment. Use the **Automation** master switch to run in observation mode first.
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 
@@ -152,9 +152,10 @@ Pick the platform. The next step depends on the selection:
 | Grid power | `sensor.solis_ac_grid_port_power` |
 | Charge current (slot 1) | `number.solis_time_charging_charge_current` |
 | Discharge current (slot 1) | `number.solis_time_charging_discharge_current` |
-| Charge start hour/minute (slot 1) | `number.solis_time_charging_charge_start_{hour,minute}_slot_1` |
-| Charge end hour/minute (slot 1) | `number.solis_time_charging_charge_end_{hour,minute}_slot_1` |
-| Discharge start/end hour/minute (slot 1) | similar, with `discharge` |
+| Charge start time (slot 1) | `time.solis_time_charging_charge_start_slot_1` |
+| Charge end time (slot 1) | `time.solis_time_charging_charge_end_slot_1` |
+| Discharge start time (slot 1) | `time.solis_time_charging_discharge_start_slot_1` |
+| Discharge end time (slot 1) | `time.solis_time_charging_discharge_end_slot_1` |
 | TOU mode switch | `switch.solis_time_of_use_mode` |
 | Allow-grid-charge switch | `switch.solis_allow_grid_to_charge_the_battery` |
 | Self-use mode switch | `switch.solis_self_use_mode` |
@@ -170,7 +171,7 @@ Toggle off if you don't have one. Otherwise pick a platform and provide:
 
 ### 5. Data sources
 
-- **Nordpool entity** — typically `sensor.nordpool_kwh_<area>_eur_3_10_0` or similar. Must expose `today` and `tomorrow` attributes as hourly arrays.
+- **Nordpool entity** — typically `sensor.nordpool_kwh_<area>_eur_3_10_0` or similar. The integration prefers `raw_today` / `raw_tomorrow` (15-min slots with timestamps) and falls back to legacy hourly `today` / `tomorrow` arrays when only those are present.
 - **Solar forecast entity** *(optional)* — must expose a `forecast` attribute as a list of `{time, pv_estimate | energy}` entries.
 
 Tariff parameters can be edited later via **Configure** on the integration card.
@@ -194,6 +195,8 @@ Created under a single `sunSale` device:
 | `sensor.sunsale_ev_charging` | `on` / `off` | Whether EV should charge in the current hour |
 | `sensor.sunsale_ev_charge_cost` | EUR | Total cost of the planned EV session |
 | `sensor.sunsale_schedule` | sensor | Current action; full hourly plan in `extra_state_attributes.schedule` |
+| `sensor.sunsale_inverter_mode` | sensor | Current inverter mode label (recorded in HA history for the dashboard's past-mode band) |
+| `sensor.sunsale_dashboard` | sensor | Pre-built 15-min slots and frozen solar forecast consumed by the side-panel chart |
 | `switch.sunsale_automation` | switch | Master kill-switch — when off, schedules are still computed but no commands are sent |
 
 ### Service
@@ -220,7 +223,7 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements_dev.txt
 
-pytest tests/                         # 65 tests, optimiser + tariff + battery + EV scheduler
+pytest tests/                         # full suite, optimiser + tariff + battery + EV scheduler + entity smoke
 pytest tests/test_optimizer.py        # one file
 ruff check custom_components/sun_sale/
 mypy custom_components/sun_sale/
@@ -247,8 +250,11 @@ The optimisation core (`optimizer.py`, `tariff.py`, `battery.py`, `ev_scheduler.
 ├── ev_scheduler.py      # cheapest-hours EV plan
 ├── inverter.py          # platform abstraction
 ├── ev_charger.py        # platform abstraction
-├── sensor.py            # 11 sensor entities
+├── sensor.py            # 13 sensor entities
 ├── switch.py            # automation kill-switch
+├── debug_view.py        # /api/sun_sale/debug JSON snapshot view
+├── dashboard.py         # 15-min future slot builder for the side-panel chart
+├── www/sun-sale-panel.js # custom HA sidebar panel
 ├── services.yaml        # force_recalculate
 ├── strings.json
 └── translations/en.json

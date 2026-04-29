@@ -19,6 +19,7 @@ def make_coordinator(nordpool_entity: str = "sensor.nordpool",
         CONF_SOLAR_FORECAST_ENTITY: solar_entity,
     }
     coord = SunSaleCoordinator(hass, entry)
+    coord._config = dict(entry.data)
     return coord, hass
 
 
@@ -79,7 +80,6 @@ def test_read_nordpool_prices_slot_spans_one_hour():
 
 def test_read_solar_forecast_empty_when_no_entity_configured():
     coord, hass = make_coordinator(solar_entity="")
-    coord._entry.data[CONF_SOLAR_FORECAST_ENTITY] = ""
     assert coord._read_solar_forecast() == []
 
 

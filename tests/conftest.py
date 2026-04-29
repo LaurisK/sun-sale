@@ -42,16 +42,20 @@ _HA_MODULES = [
     "homeassistant.config_entries",
     "homeassistant.exceptions",
     "homeassistant.helpers",
+    "homeassistant.helpers.restore_state",
     "homeassistant.helpers.selector",
     "homeassistant.helpers.update_coordinator",
     "homeassistant.helpers.storage",
     "homeassistant.helpers.entity_platform",
     "homeassistant.components",
     "homeassistant.components.http",
+    "homeassistant.components.panel_custom",
     "homeassistant.components.sensor",
     "homeassistant.components.switch",
     "homeassistant.const",
     "homeassistant.data_entry_flow",
+    "homeassistant.util",
+    "homeassistant.util.dt",
     "aiohttp",
     "voluptuous",
 ]
@@ -146,6 +150,34 @@ _sensor_mod.SensorStateClass = MagicMock()
 # Give switch module shapes
 _switch_mod = sys.modules["homeassistant.components.switch"]
 _switch_mod.SwitchEntity = _SwitchEntityStub
+
+# RestoreEntity stub for switch.py
+class _RestoreEntityStub:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    async def async_added_to_hass(self):
+        pass
+
+    async def async_get_last_state(self):
+        return None
+
+
+_restore_mod = sys.modules["homeassistant.helpers.restore_state"]
+_restore_mod.RestoreEntity = _RestoreEntityStub
+
+# panel_custom: register_panel must be awaitable, not bare MagicMock
+_panel_mod = sys.modules["homeassistant.components.panel_custom"]
+from unittest.mock import AsyncMock as _AsyncMock  # noqa: E402
+_panel_mod.async_register_panel = _AsyncMock()
+
+# http: StaticPathConfig is a dataclass-like; expose a passthrough
+_http_mod.StaticPathConfig = lambda *a, **kw: object()
+
+# dt_util.now() returns a real datetime so format strings work in tests
+import datetime as _dt  # noqa: E402
+_dt_util_mod = sys.modules["homeassistant.util.dt"]
+_dt_util_mod.now = lambda: _dt.datetime.now(_dt.timezone.utc)
 
 # @callback must be a no-op pass-through decorator
 _core_mod = sys.modules["homeassistant.core"]

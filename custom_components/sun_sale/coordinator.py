@@ -461,7 +461,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         if not ev_schedule.slots:
             return
         current_slot = next(
-            (s for s in ev_schedule.slots if s.start <= now < s.start + timedelta(hours=1)),
+            (s for s in ev_schedule.slots if s.start <= now < s.end),
             None,
         )
         if current_slot is None:
