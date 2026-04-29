@@ -483,8 +483,8 @@
       const chartH = g.gridHeight;
       if (!chartW || !chartH) return;
 
-      const xMin = this._windowStart;
-      const xMax = this._windowEnd;
+      const xMin = g.minX || this._windowStart;
+      const xMax = g.maxX || this._windowEnd;
       const msToX = ms => xOff + (ms - xMin) / (xMax - xMin) * chartW;
 
       const BAND_H = 14;
@@ -541,7 +541,7 @@
           animations: { enabled: false },
           fontFamily: 'inherit',
           events: {
-            rendered: () => this._drawModeBand(),
+            mounted:  () => this._drawModeBand(),
             updated:  () => this._drawModeBand(),
             zoomed:   () => this._drawModeBand(),
             scrolled: () => this._drawModeBand(),
