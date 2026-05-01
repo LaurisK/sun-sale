@@ -431,7 +431,11 @@
         this._chart = null;
       }
       this._chart = new ApexCharts(el, options);
-      this._chart.render();
+      this._chart.render().then(() => {
+        if (this._chart) {
+          this._chart.zoomX(this._windowStart, this._windowEnd);
+        }
+      });
     }
 
     _refreshChart() {
