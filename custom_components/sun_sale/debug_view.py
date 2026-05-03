@@ -8,7 +8,7 @@ from typing import Any
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 
-from .const import DOMAIN
+from .const import CONF_SOLAR_FORECAST_ENTITY, CONF_SOLAR_FORECAST_ENTITY_2, CONF_NORDPOOL_ENTITY, DOMAIN
 
 
 class SunSaleDebugView(HomeAssistantView):
@@ -34,10 +34,16 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     battery_state = data.get("battery_state")
     ev_state = data.get("ev_state")
 
+    cfg = coordinator._config  # noqa: SLF001
     return {
         "entry_id": entry_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "automation_enabled": coordinator.automation_enabled,
+        "config": {
+            "nordpool_entity": cfg.get(CONF_NORDPOOL_ENTITY, ""),
+            "solar_forecast_entity": cfg.get(CONF_SOLAR_FORECAST_ENTITY, ""),
+            "solar_forecast_entity_2": cfg.get(CONF_SOLAR_FORECAST_ENTITY_2, ""),
+        },
         "inputs": {
             "nordpool_prices": [
                 {"start": p.start.isoformat(), "end": p.end.isoformat(), "price": p.price_eur_kwh}
