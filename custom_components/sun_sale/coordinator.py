@@ -53,6 +53,7 @@ from .const import (
     CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_NORDPOOL_ENTITY,
     CONF_SOLAR_FORECAST_ENTITY,
+    CONF_SOLAR_FORECAST_ENTITY_2,
     CONF_TARIFF_DISTRIBUTION_FEE,
     CONF_TARIFF_MARKUP,
     CONF_TARIFF_SELL_DISTRIBUTION_FEE,
@@ -93,6 +94,14 @@ from .models import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _solar_tomorrow_entity(entity_id: str) -> str:
+    """Derive the tomorrow variant of a today Open Meteo entity by naming convention."""
+    for pattern in ("_today_", "_today"):
+        if pattern in entity_id:
+            return entity_id.replace(pattern, pattern.replace("today", "tomorrow"), 1)
+    return ""
 
 
 class SunSaleCoordinator(DataUpdateCoordinator):
@@ -368,23 +377,69 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         return prices
 
     def _read_solar_forecast(self) -> list[SolarForecast]:
-        """Parse Forecast.Solar / Solcast forecast attribute."""
-        entity_id = self._config.get(CONF_SOLAR_FORECAST_ENTITY, "")
+        """Read Open Meteo solar forecast (watts attribute) from both configured strings.
+
+        For each configured entity (today variant) the tomorrow entity is derived
+        automatically using the standard Open Meteo naming convention so the
+        optimizer always has a full 48-hour solar view.
+
+        Falls back to Forecast.Solar / Solcast 'forecast' attribute format when
+        no 'watts' data is found (for compatibility with other forecast integrations).
+        """
+        entity_ids = [
+            self._config.get(CONF_SOLAR_FORECAST_ENTITY, ""),
+            self._config.get(CONF_SOLAR_FORECAST_ENTITY_2, ""),
+        ]
+
+        # Accumulate watts per 15-min UTC slot, summed across all entities/strings
+        combined: dict[datetime, float] = {}
+        for base_eid in entity_ids:
+            if not base_eid:
+                continue
+            for eid in (base_eid, _solar_tomorrow_entity(base_eid)):
+                if not eid:
+                    continue
+                state = self.hass.states.get(eid)
+                if state is None:
+                    continue
+                watts = state.attributes.get("watts")
+                if not isinstance(watts, dict):
+                    continue
+                for ts_str, w in watts.items():
+                    try:
+                        dt = datetime.fromisoformat(str(ts_str))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        slot_utc = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+                        combined[slot_utc] = combined.get(slot_utc, 0.0) + float(w)
+                    except (ValueError, TypeError):
+                        continue
+
+        if combined:
+            # Aggregate 15-min watts slots → hourly kWh  (W × 0.25 h / 1000 = kWh)
+            hourly: dict[datetime, float] = {}
+            for slot_utc, w in combined.items():
+                hour = slot_utc.replace(minute=0)
+                hourly[hour] = hourly.get(hour, 0.0) + w * 0.25 / 1000
+            return [
+                SolarForecast(start=h, end=h + timedelta(hours=1), generation_kwh=round(kwh, 4))
+                for h, kwh in sorted(hourly.items())
+            ]
+
+        # Fallback: Forecast.Solar / Solcast "forecast" attribute on first entity
+        entity_id = entity_ids[0]
         if not entity_id:
             return []
         state = self.hass.states.get(entity_id)
         if state is None:
             return []
-
         forecasts: list[SolarForecast] = []
         for entry in state.attributes.get("forecast", []):
             try:
                 start = datetime.fromisoformat(entry["time"]).replace(tzinfo=timezone.utc)
                 kwh = float(entry.get("pv_estimate", entry.get("energy", 0.0)))
                 forecasts.append(SolarForecast(
-                    start=start,
-                    end=start + timedelta(hours=1),
-                    generation_kwh=kwh,
+                    start=start, end=start + timedelta(hours=1), generation_kwh=kwh,
                 ))
             except (KeyError, ValueError):
                 continue

@@ -1,6 +1,7 @@
 """sunSale – electricity buy/sell and EV charging optimiser for Home Assistant."""
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from homeassistant.components.http import StaticPathConfig
@@ -17,6 +18,15 @@ _PANEL_KEY = f"{DOMAIN}_panel_registered"
 _STATIC_PATH = "/sun_sale"
 _PANEL_URL = "sun-sale"
 _WEBCOMPONENT = "sun-sale-panel"
+
+
+def _js_hash(filename: str) -> str:
+    """Return first 8 chars of MD5 of the JS file for cache-busting."""
+    path = Path(__file__).parent / "www" / filename
+    try:
+        return hashlib.md5(path.read_bytes()).hexdigest()[:8]  # noqa: S324
+    except OSError:
+        return "0"
 
 _DEBUG_VIEW_KEY = f"{DOMAIN}_debug_view_registered"
 
@@ -57,7 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             webcomponent_name=_WEBCOMPONENT,
             sidebar_title="Sun Sale",
             sidebar_icon="mdi:solar-panel",
-            module_url=f"{_STATIC_PATH}/sun-sale-panel.js",
+            module_url=f"{_STATIC_PATH}/sun-sale-panel.js?v={_js_hash('sun-sale-panel.js')}",
             require_admin=False,
             config={},
         )
