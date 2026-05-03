@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from .models import EVChargeSlot, EVChargerConfig, EVChargerState, EVSchedule, TariffResult
+from .models import EVChargeSlot, EVChargerConfig, EVChargerState, EVSchedule, PriceSeries, PriceSlot
 
 
 def schedule_ev_charge(
-    tariffs: list[TariffResult],
+    price_series: PriceSeries,
     ev_config: EVChargerConfig,
     ev_state: EVChargerState,
     now: datetime,
@@ -21,8 +21,8 @@ def schedule_ev_charge(
     Algorithm:
     1. Compute energy needed: (target_soc - current_soc) * battery_capacity_kwh
     2. Determine hours needed: ceil(energy / max_power)
-    3. Filter tariffs to future hours within departure window
-    4. Select cheapest N hours, assign full power (partial power for last slot)
+    3. Filter price slots to future slots within departure window
+    4. Select cheapest N slots, assign full power (partial power for last slot)
     """
     if not ev_state.is_plugged_in:
         return EVSchedule(slots=[], total_cost_eur=0.0, total_energy_kwh=0.0, computed_at=now)
@@ -34,9 +34,9 @@ def schedule_ev_charge(
     if energy_needed < 0.01:
         return EVSchedule(slots=[], total_cost_eur=0.0, total_energy_kwh=0.0, computed_at=now)
 
-    future = [t for t in tariffs if t.hour + timedelta(hours=1) > now]
+    future = [s for s in price_series.slots if s.end > now]
     if ev_state.departure_time is not None:
-        future = [t for t in future if t.hour < ev_state.departure_time]
+        future = [s for s in future if s.start < ev_state.departure_time]
 
     if not future:
         return EVSchedule(slots=[], total_cost_eur=0.0, total_energy_kwh=0.0, computed_at=now)
@@ -45,24 +45,23 @@ def schedule_ev_charge(
     remaining_energy = energy_needed - full_hours * ev_config.max_charge_power_kw
     hours_needed = full_hours + (1 if remaining_energy > 0.01 else 0)
 
-    cheap = _cheapest_hours(future, hours_needed, now, ev_state.departure_time)
-    cheap_sorted = sorted(cheap, key=lambda t: t.hour)
-    cheap_hours_set = {t.hour for t in cheap}
+    cheap = _cheapest_slots(future, hours_needed, now, ev_state.departure_time)
+    cheap_sorted = sorted(cheap, key=lambda s: s.start)
+    cheap_starts = {s.start for s in cheap}
 
-    # Determine which cheap slot gets partial power (the last one chronologically)
-    partial_hour = cheap_sorted[-1].hour if cheap_sorted and remaining_energy > 0.01 else None
+    partial_start = cheap_sorted[-1].start if cheap_sorted and remaining_energy > 0.01 else None
 
     slots: list[EVChargeSlot] = []
     total_cost = 0.0
     total_energy = 0.0
 
-    for tariff in future:
-        if tariff.hour in cheap_hours_set:
-            power = remaining_energy if tariff.hour == partial_hour else ev_config.max_charge_power_kw
-            cost = power * tariff.buy_price
+    for slot in future:
+        if slot.start in cheap_starts:
+            power = remaining_energy if slot.start == partial_start else ev_config.max_charge_power_kw
+            cost = power * slot.buy_eur_kwh
             slots.append(EVChargeSlot(
-                start=tariff.hour,
-                end=tariff.hour + timedelta(hours=1),
+                start=slot.start,
+                end=slot.end,
                 charge_power_kw=power,
                 cost_eur=cost,
             ))
@@ -70,8 +69,8 @@ def schedule_ev_charge(
             total_energy += power
         else:
             slots.append(EVChargeSlot(
-                start=tariff.hour,
-                end=tariff.hour + timedelta(hours=1),
+                start=slot.start,
+                end=slot.end,
                 charge_power_kw=0.0,
                 cost_eur=0.0,
             ))
@@ -84,14 +83,14 @@ def schedule_ev_charge(
     )
 
 
-def _cheapest_hours(
-    tariffs: list[TariffResult],
+def _cheapest_slots(
+    slots: list[PriceSlot],
     hours_needed: int,
     start: datetime,
     end: datetime | None,
-) -> list[TariffResult]:
-    """Select the N cheapest tariff hours within [start, end)."""
-    window = [t for t in tariffs if t.hour >= start]
+) -> list[PriceSlot]:
+    """Select the N cheapest price slots within [start, end)."""
+    window = [s for s in slots if s.start >= start]
     if end is not None:
-        window = [t for t in window if t.hour < end]
-    return sorted(window, key=lambda t: t.buy_price)[:hours_needed]
+        window = [s for s in window if s.start < end]
+    return sorted(window, key=lambda s: s.buy_eur_kwh)[:hours_needed]

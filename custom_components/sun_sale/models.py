@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 
 
@@ -135,3 +135,87 @@ class CapacityObservation:
     soc_end: float
     energy_kwh: float   # Measured energy throughput
     direction: str      # "charge" or "discharge"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline stage data contracts (Pricing → Forecast → Calculator → Schedule)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PriceSlot:
+    """Effective buy/sell prices for one time slot."""
+    start: datetime
+    end: datetime
+    buy_eur_kwh: float    # effective buy price (spot + fees + tax)
+    sell_eur_kwh: float   # effective sell price — can be NEGATIVE
+    spot_eur_kwh: float   # raw nordpool, kept for provenance
+    sell_allowed: bool    # sell_eur_kwh > 0
+    sources: tuple[str, ...]  # ("nordpool", "tariff") — for diagnostics
+
+
+@dataclass(frozen=True)
+class PriceSeries:
+    """Normalised price stream for all known slots."""
+    slots: tuple[PriceSlot, ...]
+    resolution: timedelta
+    computed_at: datetime
+
+    def slot_at(self, t: datetime) -> PriceSlot | None:
+        return next((s for s in self.slots if s.start <= t < s.end), None)
+
+    def window(self, t1: datetime, t2: datetime) -> tuple[PriceSlot, ...]:
+        return tuple(s for s in self.slots if s.end > t1 and s.start < t2)
+
+
+@dataclass(frozen=True)
+class GenerationSlot:
+    """Predicted solar generation for one time slot."""
+    start: datetime
+    end: datetime
+    expected_kwh: float
+    source: str           # "open_meteo" | "forecast_solar" | "frozen_morning"
+    confidence: float | None  # 0..1 if source provides it, else None
+
+
+@dataclass(frozen=True)
+class GenerationSeries:
+    """Normalised generation forecast from one or more sources."""
+    slots: tuple[GenerationSlot, ...]
+    primary: str          # which source the calculator should consume by default
+    overlays: tuple[str, ...]  # other sources kept for chart overlay
+    computed_at: datetime
+
+    def energy_between(self, t1: datetime, t2: datetime) -> float:
+        """Return expected kWh from the primary source between t1 and t2."""
+        total = 0.0
+        for s in self.slots:
+            if s.source != self.primary:
+                continue
+            overlap_start = max(s.start, t1)
+            overlap_end = min(s.end, t2)
+            if overlap_start >= overlap_end:
+                continue
+            slot_secs = (s.end - s.start).total_seconds()
+            overlap_secs = (overlap_end - overlap_start).total_seconds()
+            total += s.expected_kwh * (overlap_secs / slot_secs)
+        return total
+
+
+@dataclass(frozen=True)
+class SlotDecision:
+    """Per-slot decision flags produced by the Calculator stage."""
+    start: datetime
+    end: datetime
+    sell_allowed: bool              # False if sell_eur_kwh <= 0
+    expected_solar_kwh: float       # expected generation this slot
+    expected_solar_negative_sale_kwh: float  # production during negative-sale (reported only)
+    notes: tuple[str, ...]          # e.g. ("battery_full_during_lockout", "paid_to_charge")
+
+
+@dataclass(frozen=True)
+class CalculationResult:
+    """Output of the Calculator stage."""
+    slots: tuple[SlotDecision, ...]
+    feed_in_lockout_windows: tuple[tuple[datetime, datetime], ...]
+    total_negative_sale_kwh: float  # sum across locked-out slots — reported, no decision
+    computed_at: datetime

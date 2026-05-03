@@ -14,8 +14,8 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import battery as battery_module
-from . import dashboard as dashboard_module
-from . import ev_scheduler, optimizer, tariff
+from . import calculator, dashboard as dashboard_module
+from . import ev_scheduler, forecast as forecast_module, optimizer, pricing as pricing_module
 from .battery import CapacityEstimator
 from .const import (
     CONF_BATTERY_MAX_CHARGE_POWER,
@@ -52,8 +52,6 @@ from .const import (
     CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH,
     CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_NORDPOOL_ENTITY,
-    CONF_SOLAR_FORECAST_ENTITY,
-    CONF_SOLAR_FORECAST_ENTITY_2,
     CONF_TARIFF_DISTRIBUTION_FEE,
     CONF_TARIFF_MARKUP,
     CONF_TARIFF_SELL_DISTRIBUTION_FEE,
@@ -89,19 +87,10 @@ from .models import (
     EVSchedule,
     HourlyPrice,
     Schedule,
-    SolarForecast,
     TariffConfig,
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _solar_tomorrow_entity(entity_id: str) -> str:
-    """Derive the tomorrow variant of a today Open Meteo entity by naming convention."""
-    for pattern in ("_today_", "_today"):
-        if pattern in entity_id:
-            return entity_id.replace(pattern, pattern.replace("today", "tomorrow"), 1)
-    return ""
 
 
 class SunSaleCoordinator(DataUpdateCoordinator):
@@ -221,12 +210,12 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             )
 
     async def _async_update_data(self) -> dict:
-        """Main 5-minute update cycle."""
+        """Main 5-minute update cycle — four-stage pipeline."""
         now = datetime.now(timezone.utc)
 
         try:
+            # -- Inputs --
             prices = self._read_nordpool_prices()
-            solar = self._read_solar_forecast()
             soc = self._inverter.get_battery_soc()
             battery_power = self._inverter.get_battery_power()
             grid_power = self._inverter.get_grid_power()
@@ -235,27 +224,45 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 soc=soc,
                 estimated_capacity_kwh=self._capacity_estimator.estimated_capacity_kwh,
             )
-
-            tariffs = tariff.compute_tariffs(prices, self._tariff_config)
             deg_cost = battery_module.degradation_cost_per_kwh(
                 self._battery_config, battery_state
             )
 
+            config = {**self._entry.data, **self._entry.options}
+
+            ev_state = None
+            if self._ev_charger is not None and self._ev_config is not None:
+                ev_state = self._read_ev_state()
+
+            # -- Stage 1: Pricing --
+            price_series = pricing_module.build_price_series(
+                prices, self._tariff_config, now=now
+            )
+
+            # -- Stage 2: Forecast --
+            generation_series = forecast_module.build_generation_series(
+                self.hass, config, price_series, now=now
+            )
+
+            # -- Stage 3: Calculator --
+            calculation = calculator.calculate(
+                price_series, generation_series, battery_state, ev_state, now
+            )
+
+            # -- Stage 4: Schedule --
             schedule: Schedule = optimizer.optimize_schedule(
-                tariffs=tariffs,
-                solar_forecast=solar,
+                price_series=price_series,
+                calc=calculation,
                 battery_config=self._battery_config,
                 battery_state=battery_state,
                 degradation_cost=deg_cost,
                 now=now,
             )
 
-            ev_state = None
             ev_schedule: EVSchedule | None = None
-            if self._ev_charger is not None and self._ev_config is not None:
-                ev_state = self._read_ev_state()
+            if self._ev_charger is not None and self._ev_config is not None and ev_state is not None:
                 ev_schedule = ev_scheduler.schedule_ev_charge(
-                    tariffs=tariffs,
+                    price_series=price_series,
                     ev_config=self._ev_config,
                     ev_state=ev_state,
                     now=now,
@@ -276,20 +283,22 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             self._last_battery_power = battery_power
 
             partial_data = {
+                # pipeline outputs
+                "pricing": price_series,
+                "forecast": generation_series,
+                "calculation": calculation,
                 "schedule": schedule,
                 "ev_schedule": ev_schedule,
-                "tariffs": tariffs,
+                # supporting data
                 "battery_state": battery_state,
                 "degradation_cost": deg_cost,
                 "estimated_capacity": self._capacity_estimator.estimated_capacity_kwh,
                 "prices": prices,
-                "solar_forecast": solar,
                 "grid_power_kw": grid_power,
                 "battery_power_kw": battery_power,
                 "ev_state": ev_state,
             }
 
-            config = {**self._entry.data, **self._entry.options}
             dashboard_slots = dashboard_module.build_future_slots(
                 self.hass, config, partial_data,
                 self._battery_config, self._tariff_config,
@@ -375,75 +384,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     price_eur_kwh=float(price),
                 ))
         return prices
-
-    def _read_solar_forecast(self) -> list[SolarForecast]:
-        """Read Open Meteo solar forecast (watts attribute) from both configured strings.
-
-        For each configured entity (today variant) the tomorrow entity is derived
-        automatically using the standard Open Meteo naming convention so the
-        optimizer always has a full 48-hour solar view.
-
-        Falls back to Forecast.Solar / Solcast 'forecast' attribute format when
-        no 'watts' data is found (for compatibility with other forecast integrations).
-        """
-        entity_ids = [
-            self._config.get(CONF_SOLAR_FORECAST_ENTITY, ""),
-            self._config.get(CONF_SOLAR_FORECAST_ENTITY_2, ""),
-        ]
-
-        # Accumulate watts per 15-min UTC slot, summed across all entities/strings
-        combined: dict[datetime, float] = {}
-        for base_eid in entity_ids:
-            if not base_eid:
-                continue
-            for eid in (base_eid, _solar_tomorrow_entity(base_eid)):
-                if not eid:
-                    continue
-                state = self.hass.states.get(eid)
-                if state is None:
-                    continue
-                watts = state.attributes.get("watts")
-                if not isinstance(watts, dict):
-                    continue
-                for ts_str, w in watts.items():
-                    try:
-                        dt = datetime.fromisoformat(str(ts_str))
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        slot_utc = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
-                        combined[slot_utc] = combined.get(slot_utc, 0.0) + float(w)
-                    except (ValueError, TypeError):
-                        continue
-
-        if combined:
-            # Aggregate 15-min watts slots → hourly kWh  (W × 0.25 h / 1000 = kWh)
-            hourly: dict[datetime, float] = {}
-            for slot_utc, w in combined.items():
-                hour = slot_utc.replace(minute=0)
-                hourly[hour] = hourly.get(hour, 0.0) + w * 0.25 / 1000
-            return [
-                SolarForecast(start=h, end=h + timedelta(hours=1), generation_kwh=round(kwh, 4))
-                for h, kwh in sorted(hourly.items())
-            ]
-
-        # Fallback: Forecast.Solar / Solcast "forecast" attribute on first entity
-        entity_id = entity_ids[0]
-        if not entity_id:
-            return []
-        state = self.hass.states.get(entity_id)
-        if state is None:
-            return []
-        forecasts: list[SolarForecast] = []
-        for entry in state.attributes.get("forecast", []):
-            try:
-                start = datetime.fromisoformat(entry["time"]).replace(tzinfo=timezone.utc)
-                kwh = float(entry.get("pv_estimate", entry.get("energy", 0.0)))
-                forecasts.append(SolarForecast(
-                    start=start, end=start + timedelta(hours=1), generation_kwh=kwh,
-                ))
-            except (KeyError, ValueError):
-                continue
-        return forecasts
 
     def _read_ev_state(self) -> EVChargerState:
         """Build EVChargerState from HA entity states."""

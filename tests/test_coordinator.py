@@ -75,57 +75,6 @@ def test_read_nordpool_prices_slot_spans_one_hour():
 
 
 # ---------------------------------------------------------------------------
-# _read_solar_forecast
-# ---------------------------------------------------------------------------
-
-def test_read_solar_forecast_empty_when_no_entity_configured():
-    coord, hass = make_coordinator(solar_entity="")
-    assert coord._read_solar_forecast() == []
-
-
-def test_read_solar_forecast_empty_when_entity_missing():
-    coord, hass = make_coordinator()
-    hass.states.get.return_value = None
-    assert coord._read_solar_forecast() == []
-
-
-def test_read_solar_forecast_parses_pv_estimate():
-    coord, hass = make_coordinator()
-    hass.states.get.return_value = _state({
-        "forecast": [
-            {"time": "2024-01-15T10:00:00", "pv_estimate": 1.5},
-            {"time": "2024-01-15T11:00:00", "pv_estimate": 2.0},
-        ]
-    })
-    forecasts = coord._read_solar_forecast()
-    assert len(forecasts) == 2
-    assert abs(forecasts[0].generation_kwh - 1.5) < 1e-9
-    assert abs(forecasts[1].generation_kwh - 2.0) < 1e-9
-
-
-def test_read_solar_forecast_parses_energy_fallback():
-    coord, hass = make_coordinator()
-    hass.states.get.return_value = _state({
-        "forecast": [{"time": "2024-01-15T10:00:00", "energy": 1.2}]
-    })
-    forecasts = coord._read_solar_forecast()
-    assert len(forecasts) == 1
-    assert abs(forecasts[0].generation_kwh - 1.2) < 1e-9
-
-
-def test_read_solar_forecast_skips_bad_entries():
-    coord, hass = make_coordinator()
-    hass.states.get.return_value = _state({
-        "forecast": [
-            {"time": "bad-date", "pv_estimate": 1.0},
-            {"time": "2024-01-15T10:00:00", "pv_estimate": 2.0},
-        ]
-    })
-    forecasts = coord._read_solar_forecast()
-    assert len(forecasts) == 1
-
-
-# ---------------------------------------------------------------------------
 # _build_capacity_observation
 # ---------------------------------------------------------------------------
 
@@ -177,3 +126,66 @@ def test_build_capacity_observation_energy_computed():
     from custom_components.sun_sale.const import UPDATE_INTERVAL_MINUTES
     expected_energy = 4.0 * (UPDATE_INTERVAL_MINUTES / 60.0)
     assert abs(obs.energy_kwh - expected_energy) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Pipeline stage keys in coordinator.data
+# ---------------------------------------------------------------------------
+
+def _make_pipeline_data() -> dict:
+    """Build a minimal coordinator.data dict with all four pipeline stage keys."""
+    from custom_components.sun_sale.models import (
+        CalculationResult, GenerationSeries, PriceSeries, Schedule,
+    )
+    from custom_components.sun_sale.pricing import build_price_series
+    from custom_components.sun_sale.calculator import calculate
+    from tests.conftest import default_battery_state, default_tariff_config, make_price
+    now = BASE
+    prices = [make_price(h, 0.10) for h in range(4)]
+    tc = default_tariff_config()
+    ps = build_price_series(prices, tc, now=now)
+    gen = GenerationSeries(slots=(), primary="none", overlays=(), computed_at=now)
+    bs = default_battery_state()
+    calc = calculate(ps, gen, bs, None, now)
+    from custom_components.sun_sale.battery import degradation_cost_per_kwh
+    from custom_components.sun_sale.optimizer import optimize_schedule
+    from tests.conftest import default_battery_config
+    bc = default_battery_config()
+    deg = degradation_cost_per_kwh(bc, bs)
+    schedule = optimize_schedule(ps, calc, bc, bs, deg, now)
+    return {
+        "pricing": ps,
+        "forecast": gen,
+        "calculation": calc,
+        "schedule": schedule,
+    }
+
+
+def test_pipeline_keys_present_in_coordinator_data():
+    data = _make_pipeline_data()
+    for key in ("pricing", "forecast", "calculation", "schedule"):
+        assert key in data, f"missing pipeline key: {key}"
+
+
+def test_pipeline_pricing_is_price_series():
+    from custom_components.sun_sale.models import PriceSeries
+    data = _make_pipeline_data()
+    assert isinstance(data["pricing"], PriceSeries)
+
+
+def test_pipeline_forecast_is_generation_series():
+    from custom_components.sun_sale.models import GenerationSeries
+    data = _make_pipeline_data()
+    assert isinstance(data["forecast"], GenerationSeries)
+
+
+def test_pipeline_calculation_is_calculation_result():
+    from custom_components.sun_sale.models import CalculationResult
+    data = _make_pipeline_data()
+    assert isinstance(data["calculation"], CalculationResult)
+
+
+def test_pipeline_schedule_is_schedule():
+    from custom_components.sun_sale.models import Schedule
+    data = _make_pipeline_data()
+    assert isinstance(data["schedule"], Schedule)

@@ -24,7 +24,10 @@ def sell_price(spot: float, config: TariffConfig) -> float:
 
 
 def compute_tariffs(prices: list[HourlyPrice], config: TariffConfig) -> list[TariffResult]:
-    """Convert raw spot prices to effective buy/sell prices for each hour."""
+    """Convert raw spot prices to effective buy/sell prices for each hour.
+
+    Deprecated: new code should use pricing.build_price_series() instead.
+    """
     return [
         TariffResult(
             hour=p.start,

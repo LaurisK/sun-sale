@@ -10,14 +10,21 @@ from custom_components.sun_sale.debug_view import SunSaleDebugView, _coordinator
 from custom_components.sun_sale.models import (
     Action,
     BatteryState,
+    CalculationResult,
     EVChargerState,
+    GenerationSeries,
+    PriceSeries,
+    PriceSlot,
     Schedule,
     ScheduleSlot,
+    SlotDecision,
     TariffConfig,
-    TariffResult,
 )
+from custom_components.sun_sale.pricing import build_price_series
+from tests.conftest import BASE_DT, default_tariff_config, make_price
 
 BASE = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
+NOW = BASE_DT
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +41,31 @@ def make_slot(hour_offset: int = 0, action: Action = Action.IDLE) -> ScheduleSlo
         expected_soc_after=0.5,
         expected_profit_eur=0.0,
         reason="test",
+    )
+
+
+def _make_price_series() -> PriceSeries:
+    prices = [make_price(h, 0.10) for h in range(4)]
+    return build_price_series(prices, default_tariff_config(), now=NOW)
+
+
+def _make_gen_series() -> GenerationSeries:
+    return GenerationSeries(slots=(), primary="none", overlays=(), computed_at=NOW)
+
+
+def _make_calculation(price_series: PriceSeries) -> CalculationResult:
+    slots = tuple(
+        SlotDecision(
+            start=s.start, end=s.end,
+            sell_allowed=s.sell_allowed,
+            expected_solar_kwh=0.0,
+            expected_solar_negative_sale_kwh=0.0,
+            notes=(),
+        )
+        for s in price_series.slots
+    )
+    return CalculationResult(
+        slots=slots, feed_in_lockout_windows=(), total_negative_sale_kwh=0.0, computed_at=NOW
     )
 
 
@@ -74,17 +106,20 @@ def make_coordinator(
         departure_time=BASE + timedelta(hours=6),
     ) if include_ev else None
 
+    ps = _make_price_series()
+    gs = _make_gen_series()
+    calc = _make_calculation(ps)
+
     coord.data = {
+        "pricing": ps,
+        "forecast": gs,
+        "calculation": calc,
         "schedule": schedule,
         "ev_schedule": None,
-        "tariffs": [
-            TariffResult(hour=BASE, spot_price=0.08, buy_price=0.12, sell_price=0.06),
-        ],
         "battery_state": BatteryState(soc=0.62, estimated_capacity_kwh=9.8),
         "degradation_cost": 0.018,
         "estimated_capacity": 9.8,
         "prices": [],
-        "solar_forecast": [],
         "grid_power_kw": 0.1,
         "ev_state": ev_state,
     }
@@ -100,7 +135,7 @@ def test_required_top_level_keys_present():
     result = _coordinator_to_dict("entry_abc", coord)
 
     for key in ("entry_id", "timestamp", "automation_enabled", "inputs",
-                "computed", "outputs", "last_dispatched_action", "last_dispatched_at"):
+                "pipeline", "outputs", "last_dispatched_action", "last_dispatched_at"):
         assert key in result, f"missing top-level key: {key}"
 
 
@@ -139,16 +174,36 @@ def test_schedule_none_when_no_schedule():
     assert result["outputs"]["schedule"] is None
 
 
-def test_tariffs_serialised():
+def test_pipeline_pricing_present():
     coord = make_coordinator()
     result = _coordinator_to_dict("e", coord)
+    pricing = result["pipeline"]["pricing"]
+    assert pricing is not None
+    assert "slot_count" in pricing
+    assert "slots" in pricing
+    assert len(pricing["slots"]) == 4
+    slot = pricing["slots"][0]
+    for key in ("start", "buy", "sell", "spot", "sell_allowed"):
+        assert key in slot, f"missing pricing slot key: {key}"
 
-    tariffs = result["computed"]["tariffs"]
-    assert len(tariffs) == 1
-    t = tariffs[0]
-    for key in ("hour", "spot", "buy", "sell"):
-        assert key in t, f"missing tariff key: {key}"
-    assert abs(t["buy"] - 0.12) < 1e-9
+
+def test_pipeline_forecast_present():
+    coord = make_coordinator()
+    result = _coordinator_to_dict("e", coord)
+    forecast = result["pipeline"]["forecast"]
+    assert forecast is not None
+    assert forecast["primary"] == "none"
+    assert forecast["slots"] == []
+
+
+def test_pipeline_calculation_present():
+    coord = make_coordinator()
+    result = _coordinator_to_dict("e", coord)
+    calc = result["pipeline"]["calculation"]
+    assert calc is not None
+    assert "total_negative_sale_kwh" in calc
+    assert "feed_in_lockout_windows" in calc
+    assert "slots" in calc
 
 
 def test_battery_state_in_inputs():

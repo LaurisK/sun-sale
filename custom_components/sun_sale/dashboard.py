@@ -20,7 +20,7 @@ from .const import (
     CONF_SOLAR_FORECAST_ENTITY,
     CONF_SOLAR_FORECAST_ENTITY_2,
 )
-from .models import Action, BatteryConfig, BatteryState, Schedule, ScheduleSlot, TariffConfig
+from .models import Action, BatteryConfig, BatteryState, GenerationSeries, Schedule, ScheduleSlot, TariffConfig
 from . import tariff as tariff_module
 
 _LOGGER = logging.getLogger(__name__)
@@ -201,13 +201,16 @@ def build_future_slots(
         config.get(CONF_SOLAR_FORECAST_ENTITY_2, ""),
     )
 
-    # Fall back to coordinator's hourly solar forecast if no Open Meteo entities found
+    # Fall back to coordinator's GenerationSeries if no Open Meteo entities found
     if not solar:
-        for sf in coordinator_data.get("solar_forecast", []):
-            base = sf.start.replace(second=0, microsecond=0)
-            w = sf.generation_kwh * 1000.0
-            for i in range(4):
-                solar.setdefault(base + timedelta(minutes=i * 15), w)
+        gen: GenerationSeries | None = coordinator_data.get("forecast")
+        if gen:
+            for sf in gen.slots:
+                if sf.source == gen.primary:
+                    base = sf.start.replace(second=0, microsecond=0)
+                    w = sf.expected_kwh * 1000.0
+                    for i in range(4):
+                        solar.setdefault(base + timedelta(minutes=i * 15), w)
 
     load_w = _estimate_load_w(hass, config.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""))
 

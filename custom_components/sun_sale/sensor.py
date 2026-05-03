@@ -17,7 +17,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import SunSaleCoordinator
-from .models import Action, EVSchedule, Schedule
+from .models import Action, CalculationResult, EVSchedule, GenerationSeries, PriceSeries, PriceSlot, Schedule
 
 
 async def async_setup_entry(
@@ -40,6 +40,9 @@ async def async_setup_entry(
         ScheduleSensor(coordinator, entry),
         DashboardSensor(coordinator, entry),
         InverterModeSensor(coordinator, entry),
+        PricingPipelineSensor(coordinator, entry),
+        ForecastPipelineSensor(coordinator, entry),
+        CalculationPipelineSensor(coordinator, entry),
     ])
 
 
@@ -81,17 +84,14 @@ class _BaseSensor(CoordinatorEntity, SensorEntity):
             schedule.slots[0],
         )
 
-    def _current_tariff(self):
+    def _current_price_slot(self) -> PriceSlot | None:
         if self.coordinator.data is None:
             return None
-        tariffs = self.coordinator.data.get("tariffs", [])
-        if not tariffs:
+        pricing: PriceSeries | None = self.coordinator.data.get("pricing")
+        if not pricing or not pricing.slots:
             return None
         now = datetime.now(timezone.utc)
-        return next(
-            (t for t in tariffs if t.hour <= now < t.hour + timedelta(hours=1)),
-            tariffs[0],
-        )
+        return pricing.slot_at(now) or pricing.slots[0]
 
 
 class CurrentActionSensor(_BaseSensor):
@@ -215,8 +215,8 @@ class CurrentBuyPriceSensor(_BaseSensor):
 
     @property
     def native_value(self) -> float | None:
-        t = self._current_tariff()
-        return round(t.buy_price, 4) if t else None
+        slot = self._current_price_slot()
+        return round(slot.buy_eur_kwh, 4) if slot else None
 
 
 class CurrentSellPriceSensor(_BaseSensor):
@@ -230,8 +230,8 @@ class CurrentSellPriceSensor(_BaseSensor):
 
     @property
     def native_value(self) -> float | None:
-        t = self._current_tariff()
-        return round(t.sell_price, 4) if t else None
+        slot = self._current_price_slot()
+        return round(slot.sell_eur_kwh, 4) if slot else None
 
 
 class EVChargingSensor(_BaseSensor):
@@ -361,4 +361,136 @@ class DashboardSensor(_BaseSensor):
             "slots": self.coordinator.data.get("dashboard_slots", []),
             "solar_frozen_forecast": self.coordinator.data.get("solar_frozen_forecast", []),
             "battery_capacity_kwh": round(bc.nominal_capacity_kwh, 2) if bc else None,
+        }
+
+
+class PricingPipelineSensor(_BaseSensor):
+    """Diagnostic sensor — exposes full PriceSeries for chart rendering."""
+
+    _attr_name = "sunSale Pricing"
+    _attr_icon = "mdi:currency-eur"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "pricing_pipeline")
+
+    @property
+    def native_value(self) -> int:
+        pricing: PriceSeries | None = (self.coordinator.data or {}).get("pricing")
+        return len(pricing.slots) if pricing else 0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        pricing: PriceSeries | None = (self.coordinator.data or {}).get("pricing")
+        if not pricing:
+            return {}
+        buy_prices = [s.buy_eur_kwh for s in pricing.slots]
+        sell_prices = [s.sell_eur_kwh for s in pricing.slots]
+        return {
+            "resolution_s": int(pricing.resolution.total_seconds()),
+            "computed_at": pricing.computed_at.isoformat(),
+            "negative_sell_count": sum(1 for s in pricing.slots if not s.sell_allowed),
+            "min_buy": round(min(buy_prices), 4) if buy_prices else None,
+            "max_buy": round(max(buy_prices), 4) if buy_prices else None,
+            "min_sell": round(min(sell_prices), 4) if sell_prices else None,
+            "max_sell": round(max(sell_prices), 4) if sell_prices else None,
+            "slots": [
+                {
+                    "start": s.start.isoformat(),
+                    "end": s.end.isoformat(),
+                    "buy_eur_kwh": round(s.buy_eur_kwh, 4),
+                    "sell_eur_kwh": round(s.sell_eur_kwh, 4),
+                    "spot_eur_kwh": round(s.spot_eur_kwh, 4),
+                    "sell_allowed": s.sell_allowed,
+                }
+                for s in pricing.slots
+            ],
+        }
+
+
+class ForecastPipelineSensor(_BaseSensor):
+    """Diagnostic sensor — exposes full GenerationSeries for chart rendering."""
+
+    _attr_name = "sunSale Forecast"
+    _attr_icon = "mdi:solar-panel"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "forecast_pipeline")
+
+    @property
+    def native_value(self) -> float:
+        gen: GenerationSeries | None = (self.coordinator.data or {}).get("forecast")
+        if not gen:
+            return 0.0
+        from datetime import date
+        today = datetime.now(timezone.utc).date()
+        return round(
+            sum(s.expected_kwh for s in gen.slots if s.source == gen.primary and s.start.date() == today),
+            2,
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        gen: GenerationSeries | None = (self.coordinator.data or {}).get("forecast")
+        if not gen:
+            return {}
+        sources = list({s.source for s in gen.slots})
+        source_totals = {
+            src: round(sum(s.expected_kwh for s in gen.slots if s.source == src), 2)
+            for src in sources
+        }
+        return {
+            "primary": gen.primary,
+            "overlays": list(gen.overlays),
+            "computed_at": gen.computed_at.isoformat(),
+            "source_totals": source_totals,
+            "slots": [
+                {
+                    "start": s.start.isoformat(),
+                    "end": s.end.isoformat(),
+                    "expected_kwh": round(s.expected_kwh, 4),
+                    "source": s.source,
+                    "confidence": s.confidence,
+                }
+                for s in gen.slots
+            ],
+        }
+
+
+class CalculationPipelineSensor(_BaseSensor):
+    """Diagnostic sensor — exposes CalculationResult (lockout windows, etc.)."""
+
+    _attr_name = "sunSale Calculation"
+    _attr_icon = "mdi:calculator"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "calculation_pipeline")
+
+    @property
+    def native_value(self) -> int:
+        calc: CalculationResult | None = (self.coordinator.data or {}).get("calculation")
+        return len(calc.feed_in_lockout_windows) if calc else 0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        calc: CalculationResult | None = (self.coordinator.data or {}).get("calculation")
+        if not calc:
+            return {}
+        return {
+            "computed_at": calc.computed_at.isoformat(),
+            "total_negative_sale_kwh": round(calc.total_negative_sale_kwh, 4),
+            "feed_in_lockout_windows": [
+                {"start": w[0].isoformat(), "end": w[1].isoformat()}
+                for w in calc.feed_in_lockout_windows
+            ],
+            "slots": [
+                {
+                    "start": s.start.isoformat(),
+                    "end": s.end.isoformat(),
+                    "sell_allowed": s.sell_allowed,
+                    "expected_solar_kwh": round(s.expected_solar_kwh, 4),
+                    "expected_solar_negative_sale_kwh": round(s.expected_solar_negative_sale_kwh, 4),
+                    "notes": list(s.notes),
+                }
+                for s in calc.slots
+            ],
         }

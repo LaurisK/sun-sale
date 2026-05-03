@@ -1,10 +1,10 @@
 """Core battery scheduling optimizer.
 
-Pure Python — no Home Assistant imports. Takes prices and battery state,
+Pure Python — no Home Assistant imports. Takes a PriceSeries and CalculationResult,
 returns an hourly action schedule that maximises profit.
 
 Algorithm: greedy pair-matching.
-  1. Enumerate all (buy_hour, sell_hour) pairs where buy < sell.
+  1. Enumerate all (buy_hour, sell_hour) pairs where buy < sell and sell_allowed=True.
   2. Rank by net profit per kWh descending.
   3. Greedily assign pairs, tracking per-slot available power and running SoC.
   4. Fill remaining hours with CHARGE_FROM_SOLAR (if solar available) or IDLE.
@@ -18,52 +18,56 @@ from .models import (
     Action,
     BatteryConfig,
     BatteryState,
+    CalculationResult,
+    PriceSeries,
+    PriceSlot,
     Schedule,
     ScheduleSlot,
-    SolarForecast,
-    TariffResult,
+    SlotDecision,
 )
 
 
 def optimize_schedule(
-    tariffs: list[TariffResult],
-    solar_forecast: list[SolarForecast],
+    price_series: PriceSeries,
+    calc: CalculationResult,
     battery_config: BatteryConfig,
     battery_state: BatteryState,
     degradation_cost: float,
     now: datetime,
 ) -> Schedule:
-    """Produce an hourly action schedule that maximises profit."""
-    if not tariffs:
+    """Produce an hourly action schedule that maximises profit.
+
+    Slots flagged sell_allowed=False in calc are excluded from discharge pairs.
+    """
+    if not price_series.slots:
         return Schedule(slots=[], total_expected_profit_eur=0.0,
                         degradation_cost_per_kwh=degradation_cost, computed_at=now)
 
-    future_tariffs = [t for t in tariffs if t.hour + timedelta(hours=1) > now]
-    if not future_tariffs:
+    # Align price slots with their decisions; filter to future only
+    decision_by_start: dict[datetime, SlotDecision] = {d.start: d for d in calc.slots}
+    future_pairs: list[tuple[PriceSlot, SlotDecision]] = [
+        (p, decision_by_start[p.start])
+        for p in price_series.slots
+        if p.end > now and p.start in decision_by_start
+    ]
+
+    if not future_pairs:
         return Schedule(slots=[], total_expected_profit_eur=0.0,
                         degradation_cost_per_kwh=degradation_cost, computed_at=now)
 
-    solar_by_hour: dict[datetime, float] = {sf.start: sf.generation_kwh for sf in solar_forecast}
-
-    n = len(future_tariffs)
+    n = len(future_pairs)
     efficiency = battery_config.round_trip_efficiency
     capacity = battery_state.estimated_capacity_kwh
     max_charge = battery_config.max_charge_power_kw
     max_discharge = battery_config.max_discharge_power_kw
 
-    # Per-slot remaining power budget (kW = kWh at 1h resolution)
     charge_budget = [max_charge] * n
     discharge_budget = [max_discharge] * n
-
-    # Net energy committed per slot (positive = charging kWh stored,
-    # negative = discharging kWh leaving battery)
     committed_kwh: list[float] = [0.0] * n
-
-    # Actions assigned so far (None = unassigned)
     actions: list[Action | None] = [None] * n
     powers: list[float] = [0.0] * n
 
-    pairs = _rank_trade_pairs(future_tariffs, degradation_cost, efficiency)
+    pairs = _rank_trade_pairs(future_pairs, degradation_cost, efficiency)
 
     for buy_idx, sell_idx, profit in pairs:
         if profit <= 0:
@@ -73,14 +77,12 @@ def optimize_schedule(
         if tradeable < 0.01:
             continue
 
-        # Verify SoC feasibility with a forward simulation
         test = committed_kwh.copy()
         test[buy_idx] += tradeable
         test[sell_idx] -= tradeable * efficiency
 
         if _simulate_soc(test, battery_state.soc, capacity,
                          battery_config.min_soc, battery_config.max_soc) is None:
-            # Try half the amount
             tradeable /= 2.0
             if tradeable < 0.01:
                 continue
@@ -98,14 +100,13 @@ def optimize_schedule(
 
         actions[buy_idx] = Action.CHARGE_FROM_GRID
         powers[buy_idx] += tradeable
-
         actions[sell_idx] = Action.DISCHARGE_TO_GRID
         powers[sell_idx] += tradeable * efficiency
 
     # Fill unassigned slots: solar passthrough or idle
-    for i, tariff in enumerate(future_tariffs):
+    for i, (price_slot, decision) in enumerate(future_pairs):
         if actions[i] is None:
-            solar = solar_by_hour.get(tariff.hour, 0.0)
+            solar = decision.expected_solar_kwh
             if solar > 0:
                 actions[i] = Action.CHARGE_FROM_SOLAR
                 powers[i] = solar
@@ -117,7 +118,7 @@ def optimize_schedule(
     running_soc = battery_state.soc
     total_profit = 0.0
 
-    for i, tariff in enumerate(future_tariffs):
+    for i, (price_slot, _decision) in enumerate(future_pairs):
         action = actions[i]
         power = powers[i]
         kwh = committed_kwh[i]
@@ -128,11 +129,11 @@ def optimize_schedule(
         )
 
         if action == Action.CHARGE_FROM_GRID:
-            slot_profit = -(tariff.buy_price * power) - degradation_cost * power
-            reason = f"Charge from grid at {tariff.buy_price:.4f} EUR/kWh"
+            slot_profit = -(price_slot.buy_eur_kwh * power) - degradation_cost * power
+            reason = f"Charge from grid at {price_slot.buy_eur_kwh:.4f} EUR/kWh"
         elif action == Action.DISCHARGE_TO_GRID:
-            slot_profit = tariff.sell_price * power - degradation_cost * power
-            reason = f"Sell to grid at {tariff.sell_price:.4f} EUR/kWh"
+            slot_profit = price_slot.sell_eur_kwh * power - degradation_cost * power
+            reason = f"Sell to grid at {price_slot.sell_eur_kwh:.4f} EUR/kWh"
         elif action == Action.CHARGE_FROM_SOLAR:
             slot_profit = 0.0
             reason = f"Solar self-use: {power:.2f} kWh"
@@ -141,8 +142,8 @@ def optimize_schedule(
             reason = "Idle"
 
         slots.append(ScheduleSlot(
-            start=tariff.hour,
-            end=tariff.hour + timedelta(hours=1),
+            start=price_slot.start,
+            end=price_slot.end,
             action=action,
             power_kw=power,
             expected_soc_after=soc_after,
@@ -161,18 +162,23 @@ def optimize_schedule(
 
 
 def _rank_trade_pairs(
-    tariffs: list[TariffResult],
+    slots: list[tuple[PriceSlot, SlotDecision]],
     degradation_cost: float,
     efficiency: float,
 ) -> list[tuple[int, int, float]]:
-    """Return (buy_idx, sell_idx, profit_per_kwh) sorted by profit descending."""
+    """Return (buy_idx, sell_idx, profit_per_kwh) sorted by profit descending.
+
+    Sell slots with sell_allowed=False are excluded from the search.
+    """
     pairs = []
-    n = len(tariffs)
+    n = len(slots)
     for buy_idx in range(n):
         for sell_idx in range(buy_idx + 1, n):
+            if not slots[sell_idx][1].sell_allowed:
+                continue
             profit = trade_profit_per_kwh(
-                tariffs[buy_idx].buy_price,
-                tariffs[sell_idx].sell_price,
+                slots[buy_idx][0].buy_eur_kwh,
+                slots[sell_idx][0].sell_eur_kwh,
                 degradation_cost,
                 efficiency,
             )

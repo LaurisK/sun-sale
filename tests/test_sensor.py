@@ -12,6 +12,7 @@ from custom_components.sun_sale.models import (
     ScheduleSlot,
     TariffResult,
 )
+from custom_components.sun_sale.pricing import build_price_series
 from custom_components.sun_sale.sensor import (
     CurrentActionSensor,
     CurrentBuyPriceSensor,
@@ -23,6 +24,7 @@ from custom_components.sun_sale.sensor import (
     ExpectedProfitSensor,
     NextActionSensor,
 )
+from tests.conftest import default_tariff_config, make_price
 
 BASE = datetime(2024, 1, 15, 0, 0, tzinfo=timezone.utc)
 
@@ -70,6 +72,19 @@ def make_ev_slot(hour: int, power: float, cost: float) -> EVChargeSlot:
 
 def make_tariff(hour: int, buy: float = 0.12, sell: float = 0.06) -> TariffResult:
     return TariffResult(hour=BASE.replace(hour=hour), spot_price=0.08, buy_price=buy, sell_price=sell)
+
+
+def _make_price_series_for_hour(hour: int, buy_eur_kwh: float = 0.12, sell_eur_kwh: float = 0.06):
+    """Create a minimal PriceSeries with one slot matching the given buy/sell prices."""
+    from custom_components.sun_sale.models import PriceSlot, PriceSeries
+    from datetime import timedelta
+    start = BASE.replace(hour=hour)
+    slot = PriceSlot(
+        start=start, end=start + timedelta(hours=1),
+        buy_eur_kwh=buy_eur_kwh, sell_eur_kwh=sell_eur_kwh, spot_eur_kwh=0.08,
+        sell_allowed=sell_eur_kwh > 0, sources=("nordpool", "tariff"),
+    )
+    return PriceSeries(slots=(slot,), resolution=timedelta(hours=1), computed_at=BASE)
 
 
 def make_coord(data: dict | None = None) -> MagicMock:
@@ -181,15 +196,15 @@ def test_buy_price_none_when_no_data():
     assert sensor.native_value is None
 
 
-def test_buy_price_uses_first_tariff_as_fallback():
-    tariffs = [make_tariff(0, buy=0.15), make_tariff(1, buy=0.12)]
-    sensor = CurrentBuyPriceSensor(make_coord({"tariffs": tariffs}), make_entry())
+def test_buy_price_uses_first_slot_as_fallback():
+    ps = _make_price_series_for_hour(0, buy_eur_kwh=0.15)
+    sensor = CurrentBuyPriceSensor(make_coord({"pricing": ps}), make_entry())
     assert abs(sensor.native_value - 0.15) < 1e-6
 
 
-def test_sell_price_uses_first_tariff_as_fallback():
-    tariffs = [make_tariff(0, sell=0.07)]
-    sensor = CurrentSellPriceSensor(make_coord({"tariffs": tariffs}), make_entry())
+def test_sell_price_uses_first_slot_as_fallback():
+    ps = _make_price_series_for_hour(0, sell_eur_kwh=0.07)
+    sensor = CurrentSellPriceSensor(make_coord({"pricing": ps}), make_entry())
     assert abs(sensor.native_value - 0.07) < 1e-6
 
 

@@ -2,9 +2,10 @@
 from datetime import datetime, timedelta, timezone
 import pytest
 from custom_components.sun_sale.battery import degradation_cost_per_kwh
-from custom_components.sun_sale.models import Action, SolarForecast
+from custom_components.sun_sale.calculator import calculate
+from custom_components.sun_sale.models import Action, GenerationSeries, GenerationSlot, SolarForecast
 from custom_components.sun_sale.optimizer import _simulate_soc, optimize_schedule
-from custom_components.sun_sale.tariff import compute_tariffs
+from custom_components.sun_sale.pricing import build_price_series
 from tests.conftest import (
     BASE_DT,
     default_battery_config,
@@ -17,14 +18,25 @@ from tests.conftest import (
 NOW = BASE_DT  # 2024-01-15 00:00 UTC
 
 
+def _make_gen_series(solar: list[SolarForecast]) -> GenerationSeries:
+    slots = tuple(
+        GenerationSlot(start=sf.start, end=sf.end, expected_kwh=sf.generation_kwh,
+                       source="forecast_solar", confidence=None)
+        for sf in solar
+    )
+    return GenerationSeries(slots=slots, primary="forecast_solar", overlays=(), computed_at=NOW)
+
+
 def run(prices, solar=None, soc=0.50, battery_config=None, tariff_config=None):
     bc = battery_config or default_battery_config()
     tc = tariff_config or default_tariff_config()
-    tariffs = compute_tariffs(prices, tc)
     state = default_battery_state(soc)
     state.estimated_capacity_kwh = bc.nominal_capacity_kwh
     deg = degradation_cost_per_kwh(bc, state)
-    return optimize_schedule(tariffs, solar or [], bc, state, deg, NOW)
+    price_series = build_price_series(prices, tc, now=NOW)
+    gen_series = _make_gen_series(solar or [])
+    calc = calculate(price_series, gen_series, state, None, NOW)
+    return optimize_schedule(price_series, calc, bc, state, deg, NOW)
 
 
 # ---------------------------------------------------------------------------
@@ -184,3 +196,82 @@ def test_simulate_soc_returns_none_on_overflow():
 def test_simulate_soc_returns_none_on_underflow():
     result = _simulate_soc([-5.0], 0.3, 10.0, 0.0, 1.0)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# sell_allowed flag respected
+# ---------------------------------------------------------------------------
+
+def _run_with_negative_sell_window(locked_hours: list[int]) -> "Schedule":
+    """Run optimizer with some hours marked sell_allowed=False."""
+    from custom_components.sun_sale.models import TariffConfig
+    from custom_components.sun_sale.calculator import calculate
+    from custom_components.sun_sale.pricing import build_price_series
+
+    # High sell fee makes sell_eur_kwh negative for hours with low spot price
+    tc = TariffConfig(
+        distribution_fee=0.0, tax_rate=0.0, markup=0.0,
+        sell_distribution_fee=0.20, sell_tax_rate=0.0, sell_markup=0.0,
+    )
+    # Low spot in locked hours → negative sell; high elsewhere → cheap buy opportunity
+    prices = [make_price(h, 0.05 if h in locked_hours else 0.30) for h in range(24)]
+    bc = default_battery_config()
+    state = default_battery_state(0.50)
+    state.estimated_capacity_kwh = bc.nominal_capacity_kwh
+    from custom_components.sun_sale.battery import degradation_cost_per_kwh
+    deg = degradation_cost_per_kwh(bc, state)
+
+    ps = build_price_series(prices, tc, now=NOW)
+    gen = _make_gen_series([])
+    calc = calculate(ps, gen, state, None, NOW)
+    return optimize_schedule(ps, calc, bc, state, deg, NOW)
+
+
+def test_no_discharge_inside_lockout_window():
+    locked = list(range(10, 14))
+    result = _run_with_negative_sell_window(locked)
+    discharge_slots = [s for s in result.slots if s.action == Action.DISCHARGE_TO_GRID]
+    for slot in discharge_slots:
+        assert slot.start.hour not in locked, (
+            f"DISCHARGE_TO_GRID at hour {slot.start.hour} is inside a locked-out window"
+        )
+
+
+def test_discharge_allowed_outside_lockout_window():
+    """Only hour 12 locked; a profitable trade can still occur at other hours."""
+    from custom_components.sun_sale.models import TariffConfig
+    from custom_components.sun_sale.calculator import calculate
+    from custom_components.sun_sale.pricing import build_price_series
+    from custom_components.sun_sale.battery import degradation_cost_per_kwh
+
+    # Zero fees so buy ≈ spot, sell ≈ spot; gives large spread
+    tc = TariffConfig(
+        distribution_fee=0.0, tax_rate=0.0, markup=0.0,
+        sell_distribution_fee=0.20, sell_tax_rate=0.0, sell_markup=0.0,
+    )
+    # Hour 12: spot=0.05 → sell=0.05-0.20=-0.15 (locked); spot=0.01 elsewhere (cheap buy)
+    # Hour 23: spot=0.80 → sell=0.80-0.20=0.60 (very profitable sell)
+    prices = (
+        [make_price(0, 0.01)]
+        + [make_price(h, 0.10) for h in range(1, 12)]
+        + [make_price(12, 0.05)]     # locked-out (sell negative)
+        + [make_price(h, 0.10) for h in range(13, 23)]
+        + [make_price(23, 0.80)]     # high sell price
+    )
+    bc = default_battery_config()
+    state = default_battery_state(0.50)
+    state.estimated_capacity_kwh = bc.nominal_capacity_kwh
+    deg = degradation_cost_per_kwh(bc, state)
+
+    ps = build_price_series(prices, tc, now=NOW)
+    gen = _make_gen_series([])
+    calc = calculate(ps, gen, state, None, NOW)
+    result = optimize_schedule(ps, calc, bc, state, deg, NOW)
+
+    discharge_slots = [s for s in result.slots if s.action == Action.DISCHARGE_TO_GRID]
+    assert any(s.start.hour != 12 for s in discharge_slots), (
+        "Expected at least one DISCHARGE_TO_GRID slot outside the locked hour"
+    )
+    assert all(s.start.hour != 12 for s in discharge_slots), (
+        "No DISCHARGE_TO_GRID slot should be at the locked hour 12"
+    )

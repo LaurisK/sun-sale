@@ -33,6 +33,9 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     ev_schedule = data.get("ev_schedule")
     battery_state = data.get("battery_state")
     ev_state = data.get("ev_state")
+    pricing = data.get("pricing")
+    forecast = data.get("forecast")
+    calculation = data.get("calculation")
 
     cfg = coordinator._config  # noqa: SLF001
     return {
@@ -48,10 +51,6 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
             "nordpool_prices": [
                 {"start": p.start.isoformat(), "end": p.end.isoformat(), "price": p.price_eur_kwh}
                 for p in data.get("prices", [])
-            ],
-            "solar_forecast": [
-                {"start": f.start.isoformat(), "end": f.end.isoformat(), "generation_kwh": f.generation_kwh}
-                for f in data.get("solar_forecast", [])
             ],
             "battery": {
                 "soc": battery_state.soc,
@@ -70,16 +69,57 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "departure_time": ev_state.departure_time.isoformat() if ev_state.departure_time else None,
             } if ev_state is not None else None,
         },
-        "computed": {
-            "tariffs": [
-                {
-                    "hour": t.hour.isoformat(),
-                    "spot": t.spot_price,
-                    "buy": t.buy_price,
-                    "sell": t.sell_price,
-                }
-                for t in data.get("tariffs", [])
-            ],
+        "pipeline": {
+            "pricing": {
+                "slot_count": len(pricing.slots),
+                "resolution_s": int(pricing.resolution.total_seconds()),
+                "computed_at": pricing.computed_at.isoformat(),
+                "negative_sell_count": sum(1 for s in pricing.slots if not s.sell_allowed),
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "buy": round(s.buy_eur_kwh, 4),
+                        "sell": round(s.sell_eur_kwh, 4),
+                        "spot": round(s.spot_eur_kwh, 4),
+                        "sell_allowed": s.sell_allowed,
+                    }
+                    for s in pricing.slots
+                ],
+            } if pricing is not None else None,
+            "forecast": {
+                "slot_count": len(forecast.slots),
+                "primary": forecast.primary,
+                "overlays": list(forecast.overlays),
+                "computed_at": forecast.computed_at.isoformat(),
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "expected_kwh": round(s.expected_kwh, 4),
+                        "source": s.source,
+                        "confidence": s.confidence,
+                    }
+                    for s in forecast.slots
+                ],
+            } if forecast is not None else None,
+            "calculation": {
+                "slot_count": len(calculation.slots),
+                "total_negative_sale_kwh": round(calculation.total_negative_sale_kwh, 4),
+                "computed_at": calculation.computed_at.isoformat(),
+                "feed_in_lockout_windows": [
+                    {"start": w[0].isoformat(), "end": w[1].isoformat()}
+                    for w in calculation.feed_in_lockout_windows
+                ],
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "sell_allowed": s.sell_allowed,
+                        "expected_solar_kwh": round(s.expected_solar_kwh, 4),
+                        "expected_solar_negative_sale_kwh": round(s.expected_solar_negative_sale_kwh, 4),
+                        "notes": list(s.notes),
+                    }
+                    for s in calculation.slots
+                ],
+            } if calculation is not None else None,
             "degradation_cost_per_kwh": data.get("degradation_cost"),
         },
         "outputs": {
