@@ -1,0 +1,140 @@
+digraph sunsale {
+    graph [
+        label="sunSale Architecture\ncustom_components/sun_sale/"
+        labelloc=t
+        fontname="Helvetica"
+        fontsize=16
+        bgcolor="#f8f9fa"
+        pad=0.5
+        splines=spline
+        nodesep=0.6
+        ranksep=0.9
+        rankdir=TB
+    ]
+    node [fontname="Helvetica" fontsize=11 style="filled,rounded" shape=box]
+    edge [fontname="Helvetica" fontsize=9]
+
+    // ── External HA integrations ──────────────────────────────────────────
+    subgraph cluster_external {
+        label="External HA Integrations (read-only)"
+        style=dashed
+        color="#aaaaaa"
+        fontcolor="#aaaaaa"
+        fontsize=11
+
+        nordpool   [label="Nordpool\nsensor.nordpool_*" fillcolor="#e8e8e8" color="#aaaaaa" fontcolor="#555555"]
+        solar_src  [label="Solar Forecast\n(Forecast.Solar / Solcast\n/ Open Meteo)" fillcolor="#e8e8e8" color="#aaaaaa" fontcolor="#555555"]
+        inverter_hw [label="Inverter HW\n(Solis, Huawei, SolarEdge\nGoodWe, Generic)" fillcolor="#e8e8e8" color="#aaaaaa" fontcolor="#555555"]
+        ev_hw      [label="EV Charger HW\n(OpenEVSE, Easee\nWallbox, Generic)" fillcolor="#e8e8e8" color="#aaaaaa" fontcolor="#555555"]
+    }
+
+    // ── HA Integration layer ──────────────────────────────────────────────
+    subgraph cluster_ha {
+        label="HA Integration Layer"
+        style=filled
+        fillcolor="#dce8f5"
+        color="#4a90d9"
+        fontcolor="#1a5276"
+
+        init       [label="__init__.py\nasync_setup_entry()\nasync_unload_entry()\nforce_recalculate service" fillcolor="#aed6f1" color="#2980b9"]
+        config_flow [label="config_flow.py\nSunSaleConfigFlow (5 steps)\nSunSaleOptionsFlow" fillcolor="#aed6f1" color="#2980b9"]
+        debug_view [label="debug_view.py\nGET /api/sun_sale/debug" fillcolor="#aed6f1" color="#2980b9"]
+        sensor     [label="sensor.py\n13 CoordinatorEntity sensors\n(actions, prices, profit,\ncapacity, EV, dashboard)" fillcolor="#aed6f1" color="#2980b9"]
+        switch_ent [label="switch.py\nAutomationSwitch\n(RestoreEntity, defaults OFF)" fillcolor="#aed6f1" color="#2980b9"]
+    }
+
+    // ── Orchestration layer ───────────────────────────────────────────────
+    subgraph cluster_orchestration {
+        label="Orchestration Layer (HA-dependent)"
+        style=filled
+        fillcolor="#d5f5e3"
+        color="#27ae60"
+        fontcolor="#1e8449"
+
+        coordinator [label="coordinator.py\nSunSaleCoordinator\nDataUpdateCoordinator (5 min)\n─────────────────────\n1. Read HA state\n2. Compute schedules\n3. Execute actions\n4. Learn capacity\n5. Build dashboard" fillcolor="#a9dfbf" color="#1e8449" shape=box]
+        dashboard  [label="dashboard.py\nbuild_future_slots()\nbuild_solar_frozen_forecast()\n15-min slot visualization" fillcolor="#a9dfbf" color="#1e8449"]
+    }
+
+    // ── Platform abstraction layer ────────────────────────────────────────
+    subgraph cluster_adapters {
+        label="Platform Adapters (HA service calls)"
+        style=filled
+        fillcolor="#fdebd0"
+        color="#e67e22"
+        fontcolor="#784212"
+
+        inverter   [label="inverter.py\nInverterController\n─────────────────\nasync_charge_from_grid(kw)\nasync_discharge_to_grid(kw)\nasync_idle()\nget_battery_soc() → float\nget_battery_power() → float\nget_grid_power() → float" fillcolor="#fad7a0" color="#ca6f1e"]
+        ev_charger [label="ev_charger.py\nEVChargerController\n─────────────────\nasync_start_charging(kw)\nasync_stop_charging()\nis_plugged_in() → bool\nget_ev_soc() → float|None" fillcolor="#fad7a0" color="#ca6f1e"]
+    }
+
+    // ── Pure Python logic layer ───────────────────────────────────────────
+    subgraph cluster_pure {
+        label="Pure Python — No HA Dependencies"
+        style=filled
+        fillcolor="#f9ebea"
+        color="#c0392b"
+        fontcolor="#6e2417"
+
+        models     [label="models.py\nFrozen dataclasses\n─────────────────\nHourlyPrice, TariffResult\nSolarForecast, ScheduleSlot\nSchedule, BatteryConfig\nBatteryState, EVChargerConfig\nEVChargerState, EVSchedule\nCapacityObservation\nAction (Enum)" fillcolor="#f5b7b1" color="#a93226" shape=box]
+        tariff     [label="tariff.py\nbuy_price(spot, cfg) → float\nsell_price(spot, cfg) → float\ncompute_tariffs(\n  prices, cfg\n) → list[TariffResult]" fillcolor="#f5b7b1" color="#a93226"]
+        battery    [label="battery.py\ndegradation_cost_per_kwh(\n  config, state\n) → float\ntrade_profit_per_kwh(\n  buy, sell, deg, eff\n) → float\nCapacityEstimator\n  .add_observation()\n  .estimated_capacity_kwh" fillcolor="#f5b7b1" color="#a93226"]
+        optimizer  [label="optimizer.py\noptimize_schedule(\n  tariffs, solar,\n  battery_cfg, battery_state,\n  degradation_cost, now\n) → Schedule\n─────────────────\nGreedy pair-matching:\nrank (buy,sell) by profit,\nforward-simulate SoC bounds" fillcolor="#f5b7b1" color="#a93226"]
+        ev_sched   [label="ev_scheduler.py\nschedule_ev_charge(\n  tariffs, ev_cfg,\n  ev_state, now\n) → EVSchedule\n─────────────────\nCheapest N hours\nbefore departure" fillcolor="#f5b7b1" color="#a93226"]
+        const      [label="const.py\nDOMAIN, UPDATE_INTERVAL\nconf keys, defaults\nSTORAGE_KEY_CAPACITY" fillcolor="#f5b7b1" color="#a93226"]
+    }
+
+    // ── Edges: HA integration layer ───────────────────────────────────────
+    config_flow -> init        [label="triggers" style=dashed color="#888888"]
+    init -> coordinator        [label="creates" color="#2980b9" penwidth=2]
+    init -> debug_view         [label="registers" color="#2980b9"]
+    coordinator -> sensor      [label="coordinator.data" color="#27ae60" penwidth=2]
+    coordinator -> switch_ent  [label="automation_enabled" color="#27ae60"]
+
+    // ── Edges: coordinator → orchestration ───────────────────────────────
+    coordinator -> dashboard   [label="build slots" color="#27ae60"]
+
+    // ── Edges: coordinator → adapters ────────────────────────────────────
+    coordinator -> inverter    [label="execute action" color="#e67e22" penwidth=2]
+    coordinator -> ev_charger  [label="execute EV action" color="#e67e22" penwidth=2]
+
+    // ── Edges: coordinator → pure logic ──────────────────────────────────
+    coordinator -> tariff      [label="compute_tariffs()" color="#c0392b"]
+    coordinator -> battery     [label="degradation_cost()\nadd_observation()" color="#c0392b"]
+    coordinator -> optimizer   [label="optimize_schedule()" color="#c0392b" penwidth=2]
+    coordinator -> ev_sched    [label="schedule_ev_charge()" color="#c0392b"]
+
+    // ── Edges: pure logic internal ────────────────────────────────────────
+    optimizer  -> tariff       [label="trade_profit_per_kwh()" color="#c0392b" style=dashed]
+    optimizer  -> battery      [label="degradation_cost_per_kwh()" color="#c0392b" style=dashed]
+    tariff     -> models       [label="TariffResult" color="#888888"]
+    battery    -> models       [label="CapacityObservation\nBatteryState" color="#888888"]
+    optimizer  -> models       [label="Schedule\nScheduleSlot" color="#888888"]
+    ev_sched   -> models       [label="EVSchedule\nEVChargeSlot" color="#888888"]
+    dashboard  -> tariff       [label="buy/sell price" color="#888888" style=dashed]
+    dashboard  -> models       [label="data structs" color="#888888"]
+
+    // ── Edges: adapters → external ────────────────────────────────────────
+    inverter   -> inverter_hw  [label="HA service calls" color="#e67e22" style=dashed]
+    ev_charger -> ev_hw        [label="HA service calls" color="#e67e22" style=dashed]
+
+    // ── Edges: coordinator reads HA state ─────────────────────────────────
+    nordpool   -> coordinator  [label="prices" color="#aaaaaa" style=dashed]
+    solar_src  -> coordinator  [label="forecast" color="#aaaaaa" style=dashed]
+    inverter_hw -> inverter    [label="SoC, power" color="#aaaaaa" style=dashed]
+    ev_hw      -> ev_charger   [label="plug state, SoC" color="#aaaaaa" style=dashed]
+
+    // ── Config/const shared use ───────────────────────────────────────────
+    config_flow -> const       [label="" color="#cccccc" style=dotted]
+    config_flow -> models      [label="" color="#cccccc" style=dotted]
+    inverter   -> const        [label="" color="#cccccc" style=dotted]
+    ev_charger -> const        [label="" color="#cccccc" style=dotted]
+    coordinator -> const       [label="" color="#cccccc" style=dotted]
+    dashboard  -> const        [label="" color="#cccccc" style=dotted]
+
+    // ── Rank hints ────────────────────────────────────────────────────────
+    { rank=source; nordpool; solar_src; inverter_hw; ev_hw }
+    { rank=same;   inverter; ev_charger }
+    { rank=same;   tariff; battery; optimizer; ev_sched }
+    { rank=same;   sensor; switch_ent }
+    { rank=sink;   models; const }
+}
