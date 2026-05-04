@@ -21,12 +21,12 @@
 
   // ── Entity IDs ─────────────────────────────────────────────────────────────
   // Update these to match your Home Assistant instance.
-  const BUY_PRICE_ENTITY  = 'sensor.sun_sale_current_buy_price';
-  const SELL_PRICE_ENTITY = 'sensor.sun_sale_current_sell_price';
-  const PRICING_ENTITY    = 'sensor.sun_sale_pricing';
-  const CALC_ENTITY       = 'sensor.sun_sale_calculation';
+  const BUY_PRICE_ENTITY  = 'sensor.sunsale_current_buy_price';
+  const SELL_PRICE_ENTITY = 'sensor.sunsale_current_sell_price';
+  const PRICING_ENTITY    = 'sensor.sunsale_pricing';
+  const CALC_ENTITY       = 'sensor.sunsale_calculation';
   const SOLAR_ENTITY      = 'sensor.namai_inv_total_pv_power_2';
-  const DASHBOARD_ENTITY  = 'sensor.sun_sale_dashboard';
+  const DASHBOARD_ENTITY  = 'sensor.sunsale_dashboard';
   const APEXCHARTS_CDN    = 'https://cdn.jsdelivr.net/npm/apexcharts@3.54.0/dist/apexcharts.min.js';
 
   // ── Helpers ────────────────────────────────────────────────────────────────
