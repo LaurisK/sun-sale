@@ -50,7 +50,9 @@ from .const import (
     CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH,
     CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
+    CONF_INVERTER_ENTITY_SOLAR_ENERGY,
     CONF_NORDPOOL_ENTITY,
+    CONF_NORDPOOL_RESOLUTION,
     CONF_SOLAR_FORECAST_ENTITY,
     CONF_SOLAR_FORECAST_ENTITY_2,
     CONF_TARIFF_DISTRIBUTION_FEE,
@@ -65,6 +67,7 @@ from .const import (
     DEFAULT_BATTERY_RATED_CYCLE_LIFE,
     DEFAULT_BATTERY_ROUND_TRIP_EFFICIENCY,
     DEFAULT_EV_MIN_CHARGE_POWER_KW,
+    DEFAULT_NORDPOOL_RESOLUTION,
     DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     DEFAULT_SOLIS_CHARGE_CURRENT,
     DEFAULT_SOLIS_CHARGE_END_TIME_1,
@@ -191,11 +194,22 @@ def _ev_schema(d: dict) -> vol.Schema:
     })
 
 
+_NORDPOOL_RESOLUTION_SELECTOR = SelectSelector(SelectSelectorConfig(
+    options=[
+        {"value": "15min", "label": "15-minute (recommended)"},
+        {"value": "hourly", "label": "Hourly"},
+    ],
+    mode=SelectSelectorMode.LIST,
+))
+
+
 def _sources_schema(d: dict) -> vol.Schema:
     return vol.Schema({
         _req(CONF_NORDPOOL_ENTITY, d): _SENSOR,
+        _req(CONF_NORDPOOL_RESOLUTION, d, DEFAULT_NORDPOOL_RESOLUTION): _NORDPOOL_RESOLUTION_SELECTOR,
         _opt(CONF_SOLAR_FORECAST_ENTITY, d): _SENSOR_ENERGY,
         _opt(CONF_SOLAR_FORECAST_ENTITY_2, d): _SENSOR_ENERGY,
+        _opt(CONF_INVERTER_ENTITY_SOLAR_ENERGY, d): _SENSOR_ENERGY,
         _opt(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, d): _SENSOR_POWER,
     })
 

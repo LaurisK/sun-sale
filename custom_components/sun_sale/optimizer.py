@@ -58,8 +58,9 @@ def optimize_schedule(
     n = len(future_pairs)
     efficiency = battery_config.round_trip_efficiency
     capacity = battery_state.estimated_capacity_kwh
-    max_charge = battery_config.max_charge_power_kw
-    max_discharge = battery_config.max_discharge_power_kw
+    slot_hours = price_series.resolution.total_seconds() / 3600
+    max_charge = battery_config.max_charge_power_kw * slot_hours
+    max_discharge = battery_config.max_discharge_power_kw * slot_hours
 
     charge_budget = [max_charge] * n
     discharge_budget = [max_discharge] * n

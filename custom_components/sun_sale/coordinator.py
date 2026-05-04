@@ -52,6 +52,8 @@ from .const import (
     CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH,
     CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_NORDPOOL_ENTITY,
+    CONF_NORDPOOL_RESOLUTION,
+    DEFAULT_NORDPOOL_RESOLUTION,
     CONF_TARIFF_DISTRIBUTION_FEE,
     CONF_TARIFF_MARKUP,
     CONF_TARIFF_SELL_DISTRIBUTION_FEE,
@@ -321,17 +323,20 @@ class SunSaleCoordinator(DataUpdateCoordinator):
     def _read_nordpool_prices(self) -> list[HourlyPrice]:
         """Parse Nordpool sensor price attributes.
 
-        Supports both the new format (raw_today/raw_tomorrow with timestamps,
-        possibly 15-min granularity) and the legacy flat hourly lists.
+        Resolution is controlled by CONF_NORDPOOL_RESOLUTION (default "15min"):
+        - "15min": keep raw slot granularity from raw_today/raw_tomorrow
+        - "hourly": aggregate to hourly by averaging
+
+        Falls back to the legacy flat hourly list format when raw_today/raw_tomorrow
+        are absent.
         """
         entity_id = self._config.get(CONF_NORDPOOL_ENTITY, "")
+        resolution = self._config.get(CONF_NORDPOOL_RESOLUTION, DEFAULT_NORDPOOL_RESOLUTION)
         state = self.hass.states.get(entity_id)
         if state is None:
             _LOGGER.warning("Nordpool entity '%s' not found", entity_id)
             return []
 
-        # New Nordpool format: raw_today / raw_tomorrow contain dicts with
-        # explicit timestamps and may be at 15-min granularity.
         raw_entries: list[dict] = []
         for attr_key in ("raw_today", "raw_tomorrow"):
             raw = state.attributes.get(attr_key)
@@ -339,28 +344,60 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 raw_entries.extend(raw)
 
         if raw_entries:
-            hourly: dict[datetime, list[float]] = {}
+            if resolution == "hourly":
+                hourly: dict[datetime, list[float]] = {}
+                for entry in raw_entries:
+                    try:
+                        start_val = entry["start"]
+                        if isinstance(start_val, datetime):
+                            start_dt = start_val
+                        else:
+                            start_dt = datetime.fromisoformat(str(start_val))
+                        if start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=timezone.utc)
+                        start_utc = start_dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                        hourly.setdefault(start_utc, []).append(float(entry["value"]))
+                    except (KeyError, ValueError, TypeError):
+                        continue
+                return [
+                    HourlyPrice(
+                        start=h,
+                        end=h + timedelta(hours=1),
+                        price_eur_kwh=sum(vals) / len(vals),
+                    )
+                    for h, vals in sorted(hourly.items())
+                ]
+
+            # "15min" (default): keep raw slot granularity
+            parsed: list[tuple[datetime, float]] = []
             for entry in raw_entries:
                 try:
                     start_val = entry["start"]
-                    # HA state machine stores datetimes as objects; REST API returns strings.
                     if isinstance(start_val, datetime):
                         start_dt = start_val
                     else:
                         start_dt = datetime.fromisoformat(str(start_val))
                     if start_dt.tzinfo is None:
                         start_dt = start_dt.replace(tzinfo=timezone.utc)
-                    start_utc = start_dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-                    hourly.setdefault(start_utc, []).append(float(entry["value"]))
+                    start_utc = start_dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+                    parsed.append((start_utc, float(entry["value"])))
                 except (KeyError, ValueError, TypeError):
                     continue
+
+            seen: set[datetime] = set()
+            unique: list[tuple[datetime, float]] = []
+            for item in sorted(parsed):
+                if item[0] not in seen:
+                    seen.add(item[0])
+                    unique.append(item)
+
+            if not unique:
+                return []
+
+            slot_dur = (unique[1][0] - unique[0][0]) if len(unique) >= 2 else timedelta(hours=1)
             return [
-                HourlyPrice(
-                    start=h,
-                    end=h + timedelta(hours=1),
-                    price_eur_kwh=sum(vals) / len(vals),
-                )
-                for h, vals in sorted(hourly.items())
+                HourlyPrice(start=s, end=s + slot_dur, price_eur_kwh=p)
+                for s, p in unique
             ]
 
         # Legacy format: flat list of up to 24 hourly prices per day.

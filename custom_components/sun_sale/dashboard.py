@@ -130,22 +130,23 @@ def _derive_mode(
     solar_w: float,
     load_w: float,
 ) -> tuple[str, str | None, float]:
-    """Return (mode_label, grid_operation, net_battery_kw_per_15min).
+    """Return (mode_label, grid_operation, net_battery_kwh_per_15min).
 
-    net_battery_kw > 0 = charging, < 0 = discharging.
+    net_battery_kwh > 0 = charging, < 0 = discharging.
     """
     if slot is None:
         if solar_w > load_w:
             return "self_use_sell", "sell", (solar_w - load_w) / 1000.0 * _SLOT_H
         return "self_use", None, 0.0
 
-    # schedule is hourly; distribute across 4 × 15-min slots
-    power_kw = slot.power_kw / 4.0
+    # Scale per-slot energy to 15-min energy based on actual slot duration.
+    slot_h = (slot.end - slot.start).total_seconds() / 3600
+    power_kwh = slot.power_kw * _SLOT_H / slot_h if slot_h > 0 else 0.0
 
     if slot.action == Action.CHARGE_FROM_GRID:
-        return "charge_from_grid", "buy", power_kw
+        return "charge_from_grid", "buy", power_kwh
     if slot.action == Action.DISCHARGE_TO_GRID:
-        return "sell_discharge", "sell", -power_kw
+        return "sell_discharge", "sell", -power_kwh
     if slot.action == Action.CHARGE_FROM_SOLAR:
         net = max(0.0, (solar_w - load_w) / 1000.0) * _SLOT_H
         return "charge_solar", None, net
@@ -249,6 +250,7 @@ def build_future_slots(
             "buy_price": round(buy_p, 4),
             "sell_price": round(sell_p, 4),
             "solar_forecast_w": round(solar_w),
+            "solar_forecast_kwh": round(solar_w * _SLOT_H / 1000, 4),
             "battery_soc_pct": round(soc, 1),
             "inverter_mode": mode,
             "grid_operation": grid_op,
@@ -277,7 +279,7 @@ def build_solar_frozen_forecast(
 
     today = datetime.now(timezone.utc).date()
     return [
-        {"t": int(ts.timestamp() * 1000), "forecast_w": round(w)}
+        {"t": int(ts.timestamp() * 1000), "forecast_w": round(w), "forecast_kwh": round(w * _SLOT_H / 1000, 4)}
         for ts, w in sorted(solar.items())
         if ts.date() == today
     ]

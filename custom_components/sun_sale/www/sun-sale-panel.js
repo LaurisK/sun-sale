@@ -6,9 +6,17 @@
  *   Buy price   amber  solid stepline  — past history + future from pricing sensor (one continuous line)
  *   Sell price  coral  solid stepline  — past history + future from pricing sensor (one continuous line)
  *
- * Right Y axis — kW:
- *   Solar actual      green  solid area  (inverter history)
- *   Solar forecast    teal   dashed line (sensor.sun_sale_dashboard frozen + slots)
+ * Right Y axis — kWh/slot (15-min):
+ *   Solar forecast  teal   bars (semi-transparent) — dashboard sensor frozen + future slots
+ *   Solar actual    bars   color-coded per slot:
+ *                     green  = actual ≥ 105 % of forecast
+ *                     amber  = actual within 5 % of forecast
+ *                     red    = actual < 95 % of forecast
+ *                     grey   = generation prohibited (negative-sell lockout)
+ *                     teal   = actual with no forecast reference (yesterday)
+ *
+ *   Actual source: solar_energy_entity_id from dashboard sensor (cumulative kWh counter diffs)
+ *                  Falls back to SOLAR_ENTITY power sensor integration when not configured.
  *
  * Overlays:
  *   Red shaded bands  negative-sell lockout windows (sensor.sun_sale_calculation)
@@ -141,7 +149,7 @@
     async _fetchHistory(windowStartMs) {
       const start    = new Date(windowStartMs).toISOString();
       const end      = new Date().toISOString();
-      const entities = [BUY_PRICE_ENTITY, SELL_PRICE_ENTITY, SOLAR_ENTITY].join(',');
+      const entities = [BUY_PRICE_ENTITY, SELL_PRICE_ENTITY].join(',');
       const url      = `/api/history/period/${start}?end_time=${end}`
         + `&filter_entity_id=${entities}&minimal_response=true&no_attributes=true`;
       try {
@@ -161,11 +169,10 @@
         return {
           buyPrice:  indexed[BUY_PRICE_ENTITY]  || [],
           sellPrice: indexed[SELL_PRICE_ENTITY] || [],
-          solar:     indexed[SOLAR_ENTITY]       || [],
         };
       } catch (e) {
         console.warn('sunSale: history fetch failed', e);
-        return { buyPrice: [], sellPrice: [], solar: [] };
+        return { buyPrice: [], sellPrice: [] };
       }
     }
 
@@ -205,21 +212,79 @@
         .filter(Boolean);
     }
 
-    // ── Data: solar forecast from dashboard sensor ────────────────────────────
+    // ── Data: 15-min forecast kWh slots from dashboard sensor ─────────────────
 
-    _readSolarForecast(now, windowStart, windowEnd) {
-      const attrs = this._hass.states[DASHBOARD_ENTITY]?.attributes;
-      if (!attrs) return [];
+    _buildForecastSlots(dashAttrs, windowStart, windowEnd) {
+      const slots = new Map();
+      if (!dashAttrs) return slots;
+      for (const f of (dashAttrs.solar_frozen_forecast || [])) {
+        if (f.t >= windowStart && f.t <= windowEnd)
+          slots.set(f.t, f.forecast_kwh ?? f.forecast_w / 1000 * 0.25);
+      }
+      for (const s of (dashAttrs.slots || [])) {
+        if (s.t >= windowStart && s.t <= windowEnd)
+          slots.set(s.t, s.solar_forecast_kwh ?? s.solar_forecast_w / 1000 * 0.25);
+      }
+      return slots;
+    }
 
-      const frozen = (attrs.solar_frozen_forecast || [])
-        .filter(f => f.t >= windowStart && f.t <= now)
-        .map(f => [f.t, f.forecast_w / 1000]);
+    // ── Data: solar actual — energy counter (preferred) or power sensor ────────
 
-      const future = (attrs.slots || [])
-        .filter(s => s.t > now && s.t <= windowEnd)
-        .map(s => [s.t, s.solar_forecast_w / 1000]);
+    async _fetchSolarHistory(windowStartMs) {
+      const attrs        = this._hass.states[DASHBOARD_ENTITY]?.attributes;
+      const energyId     = attrs?.solar_energy_entity_id || '';
+      const entityId     = energyId || SOLAR_ENTITY;
+      const isEnergy     = Boolean(energyId);
+      const start        = new Date(windowStartMs).toISOString();
+      const end          = new Date().toISOString();
+      const url          = `/api/history/period/${start}?end_time=${end}`
+        + `&filter_entity_id=${entityId}&minimal_response=true&no_attributes=true`;
+      try {
+        const resp = await this._hass.fetchWithAuth(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const raw  = await resp.json();
+        const data = (raw[0] || [])
+          .filter(s => s.state && !['unavailable', 'unknown', 'None'].includes(s.state))
+          .map(s => [new Date(s.last_changed).getTime(), parseFloat(s.state)])
+          .filter(([, v]) => isFinite(v));
+        return { isEnergy, data };
+      } catch (e) {
+        console.warn('sunSale: solar history fetch failed', e);
+        return { isEnergy: false, data: [] };
+      }
+    }
 
-      return [...frozen, ...future].sort((a, b) => a[0] - b[0]);
+    _buildActualFromEnergy(history, windowStartMs, windowEndMs) {
+      const SLOT_MS = 15 * 60 * 1000;
+      const slots   = new Map();
+      const sorted  = [...history].sort((a, b) => a[0] - b[0]);
+      for (let i = 1; i < sorted.length; i++) {
+        const [t0, v0] = sorted[i - 1];
+        const [t1, v1] = sorted[i];
+        if (t1 < windowStartMs || t0 > windowEndMs) continue;
+        const diff = v1 - v0;
+        if (diff <= 0) continue;
+        const slotStart = Math.floor(t0 / SLOT_MS) * SLOT_MS;
+        slots.set(slotStart, (slots.get(slotStart) ?? 0) + diff);
+      }
+      return slots;
+    }
+
+    _buildActualFromPower(history, windowStartMs, windowEndMs) {
+      const SLOT_MS = 15 * 60 * 1000;
+      const buckets = new Map();
+      for (const [t, w] of history) {
+        if (t < windowStartMs || t > windowEndMs) continue;
+        const slotStart = Math.floor(t / SLOT_MS) * SLOT_MS;
+        if (!buckets.has(slotStart)) buckets.set(slotStart, []);
+        buckets.get(slotStart).push(w);
+      }
+      const slots = new Map();
+      for (const [slotStart, watts] of buckets) {
+        const avg = watts.reduce((a, b) => a + b, 0) / watts.length;
+        slots.set(slotStart, avg / 1000 * 0.25);  // W → kWh per 15 min
+      }
+      return slots;
     }
 
     // ── Render ─────────────────────────────────────────────────────────────────
@@ -228,19 +293,23 @@
       const now         = Date.now();
       const windowStart = localMidnight(-1);         // yesterday 00:00 local
       const windowEnd   = localMidnight(2) - 60_000; // tomorrow 23:59 local
+      const SLOT_MS     = 15 * 60 * 1000;
 
-      const history       = await this._fetchHistory(windowStart);
+      const [history, solarRaw] = await Promise.all([
+        this._fetchHistory(windowStart),
+        this._fetchSolarHistory(windowStart),
+      ]);
       const pricingSlots  = this._readPricingSlots(windowEnd);
       const lockouts      = this._readLockoutWindows();
-      const solarForecast = this._readSolarForecast(now, windowStart, windowEnd);
+      const dashAttrs     = this._hass.states[DASHBOARD_ENTITY]?.attributes;
+      const forecastSlots = this._buildForecastSlots(dashAttrs, windowStart, windowEnd);
+      const actualSlots   = solarRaw.isEnergy
+        ? this._buildActualFromEnergy(solarRaw.data, windowStart, now)
+        : this._buildActualFromPower(solarRaw.data, windowStart, now);
 
-      // Merge past (history) + future/present (pricing sensor) into one series each.
-      // History covers yesterday→now; pricing sensor covers its known window (typically 24–36 h ahead).
-      // We use a Set to avoid duplicating timestamps when the ranges overlap.
+      // Merge past history + future pricing sensor into continuous price lines.
       const _merge = (histPoints, pricingPoints, windowStartMs) => {
         const histFiltered = histPoints.filter(([t]) => t >= windowStartMs);
-        const pricingTimes = new Set(pricingPoints.map(([t]) => t));
-        // Drop history points that land within 30 min of a pricing point (pricing is authoritative)
         const histDeduped  = histFiltered.filter(([t]) =>
           !pricingPoints.some(([pt]) => Math.abs(pt - t) < 30 * 60 * 1000)
         );
@@ -249,13 +318,49 @@
 
       const buyData  = _merge(history.buyPrice,  pricingSlots.buy,  windowStart);
       const sellData = _merge(history.sellPrice, pricingSlots.sell, windowStart);
-      const solarPast = history.solar
-        .filter(([t]) => t >= windowStart && t <= now)
-        .map(([t, w]) => [t, w / 1000]);
 
       if (!buyData.length && !sellData.length) {
         this._setStatus('No price data — waiting for sunSale coordinator to run.');
         return;
+      }
+
+      // Per-bar color for actual solar:
+      //   grey  = in a negative-sell lockout window (generation prohibited)
+      //   green = actual ≥ 105 % of forecast
+      //   red   = actual < 95 % of forecast
+      //   amber = within 5 % of forecast
+      //   teal  = no forecast reference available
+      const computeBarColor = (tMs, actualKwh, forecastKwh) => {
+        if (lockouts.some(l => tMs >= l.x && tMs < l.x2)) return '#9e9e9e';
+        if (forecastKwh == null || forecastKwh < 0.001)   return '#80cbc4';
+        const ratio = actualKwh / forecastKwh;
+        if (ratio >= 1.05) return '#4caf50';
+        if (ratio <= 0.95) return '#f44336';
+        return '#ffb300';
+      };
+
+      // Build 15-min bar data for both forecast and actual.
+      const forecastBars = [];
+      const actualBars   = [];
+      let t = Math.floor(windowStart / SLOT_MS) * SLOT_MS;
+      while (t <= windowEnd) {
+        const fKwh = forecastSlots.get(t);
+        if (fKwh != null && fKwh > 0.001) {
+          forecastBars.push({ x: t, y: fKwh });
+        }
+        if (t <= now) {
+          const aKwh = actualSlots.get(t);
+          if (fKwh != null && fKwh > 0.001) {
+            // Daylight slot: compare actual vs forecast (0 if no data = full red bar)
+            const kwh   = aKwh ?? 0;
+            const color = computeBarColor(t, kwh, fKwh);
+            actualBars.push({ x: t, y: kwh, fillColor: color, strokeColor: color });
+          } else if (aKwh != null && aKwh > 0.001) {
+            // Generation without forecast context (e.g. yesterday before frozen forecast)
+            actualBars.push({ x: t, y: aKwh, fillColor: '#80cbc4', strokeColor: '#80cbc4' });
+          }
+        }
+        t += SLOT_MS;
       }
 
       this._clearStatus();
@@ -280,12 +385,12 @@
         },
       }));
 
-      // Series order must match yaxis[] and stroke/fill/colors arrays below
+      // Series: 0=buy(line) 1=sell(line) 2=forecast(bar) 3=actual(bar)
       const series = [
-        { name: 'Buy price',      data: buyData       }, // 0 price axis amber
-        { name: 'Sell price',     data: sellData      }, // 1 price axis coral
-        { name: 'Solar actual',   data: solarPast     }, // 2 solar axis green
-        { name: 'Solar forecast', data: solarForecast }, // 3 solar axis teal
+        { name: 'Buy price',      type: 'line', data: buyData      },
+        { name: 'Sell price',     type: 'line', data: sellData     },
+        { name: 'Solar forecast', type: 'bar',  data: forecastBars },
+        { name: 'Solar actual',   type: 'bar',  data: actualBars   },
       ];
 
       const options = {
@@ -309,26 +414,23 @@
 
         theme: { mode: 'dark' },
 
+        plotOptions: {
+          bar: { columnWidth: '90%' },
+        },
+
         stroke: {
           show:      true,
           curve:     ['stepline', 'stepline', 'smooth', 'smooth'],
-          width:     [2,          2,          2,        1.5],
-          dashArray: [0,          0,          0,        5],
+          width:     [2,          2,          0,         0],
+          dashArray: [0,          0,          0,         0],
         },
 
-        // 0:amber  1:coral  2:green  3:teal
-        colors: ['#ffb300', '#ff7043', '#4caf50', '#80cbc4'],
+        // 0:amber 1:coral 2:teal(forecast) 3:green(actual default, overridden per-point)
+        colors: ['#ffb300', '#ff7043', '#80cbc4', '#4caf50'],
 
         fill: {
-          type: ['solid', 'solid', 'gradient', 'solid'],
-          gradient: {
-            // only series 2 (Solar actual) uses gradient fill
-            type:           'vertical',
-            shadeIntensity: 0,
-            opacityFrom:    0.35,
-            opacityTo:      0.02,
-            stops:          [0, 100],
-          },
+          type:    ['solid', 'solid', 'solid', 'solid'],
+          opacity: [1,       1,       0.5,     1],
         },
 
         xaxis: {
@@ -345,53 +447,49 @@
           axisTicks:  { show: false },
         },
 
-        // Four yaxis entries — one per series (ApexCharts requirement).
+        // yaxis[n] matches series[n]; shared axes use seriesName + show: false.
         // Series 1 (Sell price) shares the price axis (series 0).
-        // Series 3 (Solar forecast) shares the solar axis (series 2).
+        // Series 3 (Solar actual) shares the solar axis (series 2).
         yaxis: [
           {
-            // 0 — Buy price → price axis (left)
             seriesName: 'Buy price',
             title: {
               text:  'EUR / kWh',
               style: { color: '#ffb300', fontSize: '11px' },
             },
-            forceNiceScale: true,
+            forceNiceScale:  true,
             decimalsInFloat: 3,
             labels: {
               style: { colors: '#ffb300', fontSize: '10px' },
               formatter: v => (v != null ? v.toFixed(3) : ''),
             },
           },
-          { seriesName: 'Buy price', show: false }, // 1 sell price — shares price axis
+          { seriesName: 'Buy price', show: false },
           {
-            // 2 — Solar actual → solar axis (right)
-            seriesName: 'Solar actual',
+            seriesName: 'Solar forecast',
             opposite:   true,
             title: {
-              text:  'kW',
-              style: { color: '#4caf50', fontSize: '11px' },
+              text:  'kWh / slot',
+              style: { color: '#80cbc4', fontSize: '11px' },
             },
-            min: 0,
+            min:             0,
             forceNiceScale:  true,
-            decimalsInFloat: 1,
+            decimalsInFloat: 3,
             labels: {
-              style: { colors: '#4caf50', fontSize: '10px' },
-              formatter: v => (v != null ? v.toFixed(1) : ''),
+              style: { colors: '#80cbc4', fontSize: '10px' },
+              formatter: v => (v != null ? v.toFixed(3) : ''),
             },
           },
-          { seriesName: 'Solar actual', opposite: true, show: false }, // 3 solar forecast — shares solar axis
+          { seriesName: 'Solar forecast', opposite: true, show: false },
         ],
 
         annotations: {
-          // Horizontal reference at zero so negative sell prices are obvious
           yaxis: [{
             y:               0,
             borderColor:     'rgba(255,255,255,0.20)',
             strokeDashArray: 3,
           }],
           xaxis: [
-            // "Now" divider
             {
               x:               now,
               borderColor:     'rgba(255,255,255,0.55)',
@@ -407,7 +505,6 @@
                 },
               },
             },
-            // Negative-sell lockout bands
             ...lockoutAnnotations,
           ],
         },
@@ -422,7 +519,7 @@
               if (val == null) return null;
               return seriesIndex < 2
                 ? val.toFixed(4) + ' €/kWh'
-                : val.toFixed(2) + ' kW';
+                : val.toFixed(3) + ' kWh';
             },
           },
         },

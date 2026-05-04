@@ -50,22 +50,37 @@ def build_generation_series(
                     continue
 
     if combined_watts:
-        # Aggregate 15-min watts → hourly kWh (W × 0.25 h / 1000)
-        hourly: dict[datetime, float] = {}
-        for slot_utc, w in combined_watts.items():
-            hour = slot_utc.replace(minute=0)
-            hourly[hour] = hourly.get(hour, 0.0) + w * 0.25 / 1000
+        slot_dur = price_series.resolution
+        slot_h   = slot_dur.total_seconds() / 3600
 
-        slots = tuple(
-            GenerationSlot(
-                start=h,
-                end=h + timedelta(hours=1),
-                expected_kwh=round(kwh, 4),
-                source="open_meteo",
-                confidence=None,
+        if slot_h >= 1.0:
+            # Aggregate 15-min watts → hourly kWh (W × 0.25 h / 1000)
+            bucketed: dict[datetime, float] = {}
+            for slot_utc, w in combined_watts.items():
+                hour = slot_utc.replace(minute=0)
+                bucketed[hour] = bucketed.get(hour, 0.0) + w * 0.25 / 1000
+            slots = tuple(
+                GenerationSlot(
+                    start=h,
+                    end=h + slot_dur,
+                    expected_kwh=round(kwh, 4),
+                    source="open_meteo",
+                    confidence=None,
+                )
+                for h, kwh in sorted(bucketed.items())
             )
-            for h, kwh in sorted(hourly.items())
-        )
+        else:
+            # Keep raw 15-min slots; convert W → kWh per slot
+            slots = tuple(
+                GenerationSlot(
+                    start=s,
+                    end=s + slot_dur,
+                    expected_kwh=round(w * slot_h / 1000, 4),
+                    source="open_meteo",
+                    confidence=None,
+                )
+                for s, w in sorted(combined_watts.items())
+            )
         return GenerationSeries(slots=slots, primary="open_meteo", overlays=(), computed_at=now)
 
     # Fallback: Forecast.Solar / Solcast "forecast" attribute

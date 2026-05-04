@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_INVERTER_ENTITY_SOLAR_ENERGY, DOMAIN
 from .coordinator import SunSaleCoordinator
 from .models import Action, CalculationResult, EVSchedule, GenerationSeries, PriceSeries, PriceSlot, Schedule
 
@@ -355,12 +355,14 @@ class DashboardSensor(_BaseSensor):
             return {}
         now = datetime.now(timezone.utc)
         bc = self.coordinator.battery_config
+        config = {**self._entry.data, **self._entry.options}
         return {
             "generated_at": now.isoformat(),
             "now_ts": int(now.timestamp() * 1000),
             "slots": self.coordinator.data.get("dashboard_slots", []),
             "solar_frozen_forecast": self.coordinator.data.get("solar_frozen_forecast", []),
             "battery_capacity_kwh": round(bc.nominal_capacity_kwh, 2) if bc else None,
+            "solar_energy_entity_id": config.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
         }
 
 

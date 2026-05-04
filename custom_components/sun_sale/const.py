@@ -53,9 +53,11 @@ CONF_EV_ENTITY_CHARGER_SWITCH = "ev_entity_charger_switch"
 
 # Config entry keys — data sources
 CONF_NORDPOOL_ENTITY = "nordpool_entity"
+CONF_NORDPOOL_RESOLUTION = "nordpool_resolution"
 CONF_SOLAR_FORECAST_ENTITY = "solar_forecast_entity"
 CONF_SOLAR_FORECAST_ENTITY_2 = "solar_forecast_entity_2"
 CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD = "inverter_entity_household_load"
+CONF_INVERTER_ENTITY_SOLAR_ENERGY = "inverter_entity_solar_energy"
 
 # Persistent storage
 STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"
@@ -68,6 +70,8 @@ UPDATE_INTERVAL_MINUTES = 5
 CAPACITY_OBS_MIN_SOC_DELTA = 0.05
 
 # Defaults
+DEFAULT_NORDPOOL_RESOLUTION = "15min"
+
 DEFAULT_BATTERY_MIN_SOC = 10
 DEFAULT_BATTERY_MAX_SOC = 95
 DEFAULT_BATTERY_ROUND_TRIP_EFFICIENCY = 90
