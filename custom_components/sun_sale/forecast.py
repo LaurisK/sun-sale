@@ -1,119 +1,91 @@
-"""Forecast stage: normalise solar generation data into GenerationSeries."""
+"""Forecast stage: normalise RawSolarData into GenerationSeries.
+
+Pure Python — no Home Assistant imports.
+Called by GenerationNode (Tier 2 DAG node).
+"""
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
-from .models import GenerationSlot, GenerationSeries, PriceSeries
-
-_LOGGER = logging.getLogger(__name__)
+from .models import GenerationSlot, GenerationSeries, PriceSeries, RawSolarData
 
 
 def build_generation_series(
-    hass: Any,
-    config: dict,
+    raw: RawSolarData,
     price_series: PriceSeries,
     now: datetime | None = None,
 ) -> GenerationSeries:
-    """Read solar forecast from HA state machine and normalise into GenerationSeries."""
-    from .const import CONF_SOLAR_FORECAST_ENTITY, CONF_SOLAR_FORECAST_ENTITY_2
-
+    """Convert RawSolarData + PriceSeries resolution into a GenerationSeries."""
     if now is None:
         now = datetime.now(timezone.utc)
 
-    entity_1: str = config.get(CONF_SOLAR_FORECAST_ENTITY, "")
-    entity_2: str = config.get(CONF_SOLAR_FORECAST_ENTITY_2, "")
+    if raw.watts:
+        return _build_from_watts(raw.watts, price_series, now)
 
-    # Try Open Meteo (watts attribute at 15-min resolution) first
-    combined_watts: dict[datetime, float] = {}
-    for base_eid in (entity_1, entity_2):
-        if not base_eid:
-            continue
-        for eid in (base_eid, _tomorrow_entity(base_eid)):
-            if not eid:
-                continue
-            state = hass.states.get(eid)
-            if state is None:
-                continue
-            watts = state.attributes.get("watts")
-            if not isinstance(watts, dict):
-                continue
-            for ts_str, w in watts.items():
-                try:
-                    dt = datetime.fromisoformat(str(ts_str))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    slot_utc = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
-                    combined_watts[slot_utc] = combined_watts.get(slot_utc, 0.0) + float(w)
-                except (ValueError, TypeError):
-                    continue
-
-    if combined_watts:
-        slot_dur = price_series.resolution
-        slot_h   = slot_dur.total_seconds() / 3600
-
-        if slot_h >= 1.0:
-            # Aggregate 15-min watts → hourly kWh (W × 0.25 h / 1000)
-            bucketed: dict[datetime, float] = {}
-            for slot_utc, w in combined_watts.items():
-                hour = slot_utc.replace(minute=0)
-                bucketed[hour] = bucketed.get(hour, 0.0) + w * 0.25 / 1000
-            slots = tuple(
-                GenerationSlot(
-                    start=h,
-                    end=h + slot_dur,
-                    expected_kwh=round(kwh, 4),
-                    source="open_meteo",
-                    confidence=None,
-                )
-                for h, kwh in sorted(bucketed.items())
-            )
-        else:
-            # Keep raw 15-min slots; convert W → kWh per slot
-            slots = tuple(
-                GenerationSlot(
-                    start=s,
-                    end=s + slot_dur,
-                    expected_kwh=round(w * slot_h / 1000, 4),
-                    source="open_meteo",
-                    confidence=None,
-                )
-                for s, w in sorted(combined_watts.items())
-            )
-        return GenerationSeries(slots=slots, primary="open_meteo", overlays=(), computed_at=now)
-
-    # Fallback: Forecast.Solar / Solcast "forecast" attribute
-    if entity_1:
-        state = hass.states.get(entity_1)
-        if state is not None:
-            slots_list: list[GenerationSlot] = []
-            for entry in state.attributes.get("forecast", []):
-                try:
-                    start = datetime.fromisoformat(entry["time"]).replace(tzinfo=timezone.utc)
-                    kwh = float(entry.get("pv_estimate", entry.get("energy", 0.0)))
-                    slots_list.append(GenerationSlot(
-                        start=start,
-                        end=start + timedelta(hours=1),
-                        expected_kwh=kwh,
-                        source="forecast_solar",
-                        confidence=None,
-                    ))
-                except (KeyError, ValueError):
-                    continue
-            if slots_list:
-                return GenerationSeries(
-                    slots=tuple(slots_list),
-                    primary="forecast_solar",
-                    overlays=(),
-                    computed_at=now,
-                )
+    if raw.forecast_slots:
+        return _build_from_forecast(raw.forecast_slots, now)
 
     return GenerationSeries(slots=(), primary="none", overlays=(), computed_at=now)
 
 
-def _tomorrow_entity(entity_id: str) -> str:
-    for pattern in ("_today_", "_today"):
-        if pattern in entity_id:
-            return entity_id.replace(pattern, pattern.replace("today", "tomorrow"), 1)
-    return ""
+def _build_from_watts(
+    watts: dict[datetime, float],
+    price_series: PriceSeries,
+    now: datetime,
+) -> GenerationSeries:
+    slot_dur = price_series.resolution
+    slot_h = slot_dur.total_seconds() / 3600
+
+    if slot_h >= 1.0:
+        bucketed: dict[datetime, float] = {}
+        for slot_utc, w in watts.items():
+            hour = slot_utc.replace(minute=0)
+            bucketed[hour] = bucketed.get(hour, 0.0) + w * 0.25 / 1000
+        slots = tuple(
+            GenerationSlot(
+                start=h,
+                end=h + slot_dur,
+                expected_kwh=round(kwh, 4),
+                source="open_meteo",
+                confidence=None,
+            )
+            for h, kwh in sorted(bucketed.items())
+        )
+    else:
+        slots = tuple(
+            GenerationSlot(
+                start=s,
+                end=s + slot_dur,
+                expected_kwh=round(w * slot_h / 1000, 4),
+                source="open_meteo",
+                confidence=None,
+            )
+            for s, w in sorted(watts.items())
+        )
+
+    return GenerationSeries(slots=slots, primary="open_meteo", overlays=(), computed_at=now)
+
+
+def _build_from_forecast(forecast_slots: list[dict], now: datetime) -> GenerationSeries:
+    slots_list: list[GenerationSlot] = []
+    for entry in forecast_slots:
+        try:
+            start = datetime.fromisoformat(entry["time"]).replace(tzinfo=timezone.utc)
+            kwh = float(entry.get("pv_estimate", entry.get("energy", 0.0)))
+            slots_list.append(GenerationSlot(
+                start=start,
+                end=start + timedelta(hours=1),
+                expected_kwh=kwh,
+                source="forecast_solar",
+                confidence=None,
+            ))
+        except (KeyError, ValueError):
+            continue
+    if not slots_list:
+        return GenerationSeries(slots=(), primary="none", overlays=(), computed_at=now)
+    return GenerationSeries(
+        slots=tuple(slots_list),
+        primary="forecast_solar",
+        overlays=(),
+        computed_at=now,
+    )

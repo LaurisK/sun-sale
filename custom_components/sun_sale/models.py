@@ -219,3 +219,65 @@ class CalculationResult:
     feed_in_lockout_windows: tuple[tuple[datetime, datetime], ...]
     total_negative_sale_kwh: float  # sum across locked-out slots — reported, no decision
     computed_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Translation-layer primary types (HA state → domain, produced by translators)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NordpoolPrices:
+    """Primary data: Nordpool prices at configured resolution + raw 15-min dict."""
+    slots: list[HourlyPrice]            # at configured resolution (for PricingNode)
+    raw_15min: dict[datetime, float]    # always 15-min spot prices EUR/kWh (for DashboardNode)
+
+
+@dataclass
+class RawSolarData:
+    """Primary data: raw solar forecast from HA entities."""
+    watts: dict[datetime, float]        # Open Meteo: {slot_utc: W}
+    forecast_slots: list[dict]          # Forecast.Solar: [{time, pv_estimate/energy, ...}]
+
+
+@dataclass(frozen=True)
+class BatteryReading:
+    """Primary data: raw inverter telemetry for one cycle."""
+    soc: float                  # 0.0–1.0
+    power_kw: float             # positive = charging, negative = discharging
+    grid_power_kw: float        # positive = importing
+    household_load_kw: float    # current load in kW (0.2 kW default if unavailable)
+
+
+@dataclass(frozen=True)
+class EstimatedCapacity:
+    """Primary data: current CapacityEstimator result, set by coordinator pre-DAG."""
+    value_kwh: float
+
+
+# ---------------------------------------------------------------------------
+# DAG secondary output wrapper types
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DegradationCost:
+    """Cost per kWh of cycling the battery (secondary output of DegradationNode)."""
+    value_kwh: float
+
+
+@dataclass
+class DashboardData:
+    """Presentation data produced by DashboardNode (sink output)."""
+    future_slots: list[dict]
+    solar_frozen_forecast: list[dict]
+
+
+# ---------------------------------------------------------------------------
+# Structured integration config (used by DAG engine and nodes)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SunSaleConfig:
+    """All user configuration, structured for DAG nodes."""
+    tariff: TariffConfig
+    battery: BatteryConfig
+    ev: EVChargerConfig | None

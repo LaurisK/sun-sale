@@ -229,7 +229,42 @@ ruff check custom_components/sun_sale/
 mypy custom_components/sun_sale/
 ```
 
-The optimisation core (`optimizer.py`, `tariff.py`, `battery.py`, `ev_scheduler.py`, `models.py`) is pure Python with no Home Assistant imports, so it runs fully under plain `pytest` without an HA test harness.
+The computation core (`dag_engine.py`, `nodes.py`, `events.py`, `event_router.py`, `pricing.py`, `forecast.py`, `calculator.py`, `optimizer.py`, `ev_scheduler.py`, `tariff.py`, `battery.py`, `dashboard.py`, `models.py`) is pure Python with no Home Assistant imports, so it runs fully under plain `pytest` without an HA test harness.
+
+### Architecture
+
+sunSale is structured as a **tiered observer DAG** with a strict translation boundary:
+
+```
+HA state machine
+      │  (read once per cycle, in parallel)
+      ▼
+┌─────────────────────────────────────────┐
+│  Translation Layer  (translators.py)    │
+│  NordpoolTranslator · SolarTranslator   │
+│  BatteryTranslator  · EVTranslator      │
+└─────────────────────────────────────────┘
+      │  typed primary data
+      ▼
+┌─────────────────────────────────────────┐
+│         DAG Engine  (dag_engine.py)     │
+│                                         │
+│  T1  PricingNode   BatteryStateNode     │
+│  T2  GenerationNode  DegradationNode    │
+│      EVSchedulerNode (opt.)             │
+│  T3  LockoutNode                        │
+│  T4  OptimizerNode                      │
+│  T5  DashboardNode                      │
+└─────────────────────────────────────────┘
+      │  ControlEvents
+      ▼
+┌─────────────────────────────────────────┐
+│  EventRouter  (event_router.py)         │
+│  → InverterController / EVChargerCtrl   │
+└─────────────────────────────────────────┘
+```
+
+Each DAG node declares its `tier`, `output_type`, and `consumes` list. The engine auto-wires observer relationships and enforces that a node may only consume outputs from nodes in a strictly lower tier (prevents cycles). Within each tier all ready nodes run concurrently via `asyncio.gather`. Nodes emit typed `ControlEvent` objects; the `EventRouter` deduplicates and dispatches to the inverter/EV-charger output adapters.
 
 ### Layout
 
@@ -237,27 +272,37 @@ The optimisation core (`optimizer.py`, `tariff.py`, `battery.py`, `ev_scheduler.
 .
 ├── hacs.json            # HACS custom-repository metadata
 ├── README.md
+├── docs/
+│   └── ARCHITECTURE.md  # tiered observer DAG architecture reference
 └── custom_components/sun_sale/
-├── __init__.py          # entry setup, force_recalculate service
-├── manifest.json
-├── const.py
-├── config_flow.py       # 5-step UI flow + options flow
-├── coordinator.py       # 5-minute refresh, reads HA state, runs optimiser, executes commands
-├── models.py            # dataclasses (no HA deps)
-├── tariff.py            # spot → effective buy/sell price
-├── battery.py           # degradation cost + capacity learner
-├── optimizer.py         # greedy pair-matching schedule
-├── ev_scheduler.py      # cheapest-hours EV plan
-├── inverter.py          # platform abstraction
-├── ev_charger.py        # platform abstraction
-├── sensor.py            # 13 sensor entities
-├── switch.py            # automation kill-switch
-├── debug_view.py        # /api/sun_sale/debug JSON snapshot view
-├── dashboard.py         # 15-min future slot builder for the side-panel chart
-├── www/sun-sale-panel.js # custom HA sidebar panel
-├── services.yaml        # force_recalculate
-├── strings.json
-└── translations/en.json
+    ├── __init__.py          # entry setup, force_recalculate service
+    ├── manifest.json
+    ├── const.py
+    ├── config_flow.py       # 5-step UI flow + options flow
+    ├── coordinator.py       # orchestrator: translators → DAG engine → event router
+    ├── models.py            # all dataclasses and SunSaleConfig (no HA deps)
+    ├── dag_engine.py        # DagNode ABC, DagEngine, NodeContext, tier enforcement
+    ├── nodes.py             # all 8 DAG computation nodes (pure Python)
+    ├── translators.py       # HA state → typed primary data (only file with HA reads)
+    ├── events.py            # ControlEvent hierarchy (InverterActionEvent, EVActionEvent)
+    ├── event_router.py      # routes ControlEvents to output adapters with deduplication
+    ├── pricing.py           # build_price_series — applies tariff formulas to Nordpool slots
+    ├── forecast.py          # build_generation_series — Open Meteo / Forecast.Solar parser
+    ├── calculator.py        # feed-in lockout detection → CalculationResult
+    ├── tariff.py            # spot → effective buy/sell price formula
+    ├── battery.py           # degradation cost + capacity learner
+    ├── optimizer.py         # greedy pair-matching schedule
+    ├── ev_scheduler.py      # cheapest-hours EV charging plan
+    ├── inverter.py          # inverter platform abstraction (Huawei, Solis, generic)
+    ├── ev_charger.py        # EV charger platform abstraction
+    ├── sensor.py            # HA sensor entities
+    ├── switch.py            # automation kill-switch
+    ├── debug_view.py        # /api/sun_sale/debug JSON snapshot view
+    ├── dashboard.py         # 15-min future slot builder for the side-panel chart
+    ├── www/sun-sale-panel.js # custom HA sidebar panel
+    ├── services.yaml        # force_recalculate
+    ├── strings.json
+    └── translations/en.json
 ```
 
 ---

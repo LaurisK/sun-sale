@@ -1,7 +1,11 @@
-"""sunSale DataUpdateCoordinator.
+"""sunSale DataUpdateCoordinator — thin orchestrator for the DAG pipeline.
 
-Reads all HA state, runs the optimizer, executes inverter/EV commands,
-and feeds the capacity estimator.
+Responsibilities:
+  1. Build translators, DAG nodes, engine, and event router from config.
+  2. Manage CapacityEstimator state across cycles (pre-DAG update + persistence).
+  3. Run translators (parallel) → deposit EstimatedCapacity → run engine.
+  4. Route emitted ControlEvents to output adapters when automation is enabled.
+  5. Map typed DAG outputs to the string-keyed coordinator.data dict for sensors.
 """
 from __future__ import annotations
 
@@ -13,9 +17,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from . import battery as battery_module
-from . import calculator, dashboard as dashboard_module
-from . import ev_scheduler, forecast as forecast_module, optimizer, pricing as pricing_module
 from .battery import CapacityEstimator
 from .const import (
     CONF_BATTERY_MAX_CHARGE_POWER,
@@ -41,6 +42,7 @@ from .const import (
     CONF_INVERTER_ENTITY_BATTERY_SOC,
     CONF_INVERTER_ENTITY_CHARGE_CONTROL,
     CONF_INVERTER_ENTITY_GRID_POWER,
+    CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
     CONF_INVERTER_PLATFORM,
     CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     CONF_INVERTER_SOLIS_CHARGE_CURRENT,
@@ -53,16 +55,18 @@ from .const import (
     CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_NORDPOOL_ENTITY,
     CONF_NORDPOOL_RESOLUTION,
-    DEFAULT_NORDPOOL_RESOLUTION,
+    CONF_SOLAR_FORECAST_ENTITY,
+    CONF_SOLAR_FORECAST_ENTITY_2,
     CONF_TARIFF_DISTRIBUTION_FEE,
     CONF_TARIFF_MARKUP,
     CONF_TARIFF_SELL_DISTRIBUTION_FEE,
     CONF_TARIFF_SELL_MARKUP,
     CONF_TARIFF_SELL_TAX_RATE,
     CONF_TARIFF_TAX_RATE,
+    CAPACITY_OBS_MIN_SOC_DELTA,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
     DEFAULT_EV_MIN_CHARGE_POWER_KW,
-    DEFAULT_EV_TARGET_SOC,
+    DEFAULT_NORDPOOL_RESOLUTION,
     DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     DEFAULT_SOLIS_CHARGE_CURRENT,
     DEFAULT_SOLIS_CHARGE_END_TIME_1,
@@ -77,26 +81,52 @@ from .const import (
     STORAGE_VERSION,
     UPDATE_INTERVAL_MINUTES,
 )
+from .dag_engine import DagEngine, SunSaleConfig, run_translators
+from .event_router import EventRouter
 from .ev_charger import EVChargerController, EVChargerPlatform
 from .inverter import InverterController, InverterPlatform
 from .models import (
-    Action,
     BatteryConfig,
+    BatteryReading,
     BatteryState,
+    CalculationResult,
     CapacityObservation,
+    DashboardData,
+    DegradationCost,
+    EstimatedCapacity,
     EVChargerConfig,
     EVChargerState,
     EVSchedule,
-    HourlyPrice,
+    GenerationSeries,
+    NordpoolPrices,
+    PriceSeries,
+    RawSolarData,
     Schedule,
     TariffConfig,
+)
+from .nodes import (
+    BatteryStateNode,
+    DashboardNode,
+    DegradationNode,
+    EVSchedulerNode,
+    GenerationNode,
+    LockoutNode,
+    OptimizerNode,
+    PricingNode,
+    make_last_ref,
+)
+from .translators import (
+    BatteryTranslator,
+    EVTranslator,
+    NordpoolTranslator,
+    SolarTranslator,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class SunSaleCoordinator(DataUpdateCoordinator):
-    """Central coordinator: reads HA state, runs optimizer, executes commands."""
+    """Thin orchestrator: translators → capacity update → DAG → event routing."""
 
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
         super().__init__(
@@ -107,34 +137,31 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         )
         self._entry = config_entry
         self._config: dict = {}
+        self._sun_sale_config: SunSaleConfig | None = None
         self._store: Store | None = None
-        self._inverter: InverterController | None = None
-        self._ev_charger: EVChargerController | None = None
-        self._tariff_config: TariffConfig | None = None
-        self._battery_config: BatteryConfig | None = None
-        self._ev_config: EVChargerConfig | None = None
         self._capacity_estimator: CapacityEstimator | None = None
-        self._last_action: str | None = None
-        self._last_battery_soc: float | None = None
-        self._last_battery_power: float | None = None
+        self._engine: DagEngine | None = None
+        self._translators: list = []
+        self._event_router: EventRouter | None = None
+        self._last_battery_reading: BatteryReading | None = None
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
 
     @property
-    def battery_config(self) -> "BatteryConfig | None":
-        return self._battery_config
+    def battery_config(self) -> BatteryConfig | None:
+        return self._sun_sale_config.battery if self._sun_sale_config else None
 
     @property
-    def tariff_config(self) -> "TariffConfig | None":
-        return self._tariff_config
+    def tariff_config(self) -> TariffConfig | None:
+        return self._sun_sale_config.tariff if self._sun_sale_config else None
 
     async def async_setup(self) -> None:
-        """Initialise from config entry data."""
+        """Build config objects, translators, DAG nodes, engine, and event router."""
         data = {**self._entry.data, **self._entry.options}
         self._config = data
 
-        self._tariff_config = TariffConfig(
+        tariff_config = TariffConfig(
             distribution_fee=data[CONF_TARIFF_DISTRIBUTION_FEE],
             tax_rate=data[CONF_TARIFF_TAX_RATE] / 100.0,
             markup=data[CONF_TARIFF_MARKUP],
@@ -143,7 +170,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             sell_markup=data[CONF_TARIFF_SELL_MARKUP],
         )
 
-        self._battery_config = BatteryConfig(
+        battery_config = BatteryConfig(
             nominal_capacity_kwh=data[CONF_BATTERY_NOMINAL_CAPACITY],
             purchase_price_eur=data[CONF_BATTERY_PURCHASE_PRICE],
             rated_cycle_life=data[CONF_BATTERY_RATED_CYCLE_LIFE],
@@ -157,7 +184,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
 
         inverter_platform = InverterPlatform(data[CONF_INVERTER_PLATFORM])
         if inverter_platform == InverterPlatform.SOLIS:
-            entity_ids = {
+            inverter_entity_ids = {
                 "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
                 "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
                 "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
@@ -172,356 +199,161 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 "solis_self_use_mode_switch": data.get(CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH, DEFAULT_SOLIS_SELF_USE_MODE_SWITCH),
             }
         else:
-            entity_ids = {
+            inverter_entity_ids = {
                 "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
                 "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
                 "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
                 "charge_control": data[CONF_INVERTER_ENTITY_CHARGE_CONTROL],
             }
-        self._inverter = InverterController(
-            self.hass,
-            inverter_platform,
-            entity_ids,
-            self._battery_config,
-        )
+        inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
+
+        ev_config: EVChargerConfig | None = None
+        ev_charger: EVChargerController | None = None
+        ev_translator: EVTranslator | None = None
+        ev_scheduler_node: EVSchedulerNode | None = None
 
         if data.get(CONF_EV_ENABLED, False):
             ev_platform = EVChargerPlatform(data[CONF_EV_PLATFORM])
-            self._ev_config = EVChargerConfig(
+            ev_config = EVChargerConfig(
                 max_charge_power_kw=data[CONF_EV_MAX_CHARGE_POWER],
                 min_charge_power_kw=data.get(CONF_EV_MIN_CHARGE_POWER, DEFAULT_EV_MIN_CHARGE_POWER_KW),
                 battery_capacity_kwh=data[CONF_EV_BATTERY_CAPACITY],
             )
-            self._ev_charger = EVChargerController(
-                self.hass,
-                ev_platform,
+            ev_charger = EVChargerController(
+                self.hass, ev_platform,
                 {
                     "plug_state": data.get(CONF_EV_ENTITY_PLUG_STATE, ""),
                     "soc": data.get(CONF_EV_ENTITY_SOC, ""),
                     "charger_switch": data.get(CONF_EV_ENTITY_CHARGER_SWITCH, ""),
                 },
             )
+            ev_translator = EVTranslator(
+                ev_charger=ev_charger,
+                target_soc_entity=data.get(CONF_EV_ENTITY_TARGET_SOC, ""),
+                departure_entity=data.get(CONF_EV_ENTITY_DEPARTURE_TIME, ""),
+            )
+            ev_scheduler_node = EVSchedulerNode(last_ev_action_ref=make_last_ref())
+
+        self._sun_sale_config = SunSaleConfig(tariff=tariff_config, battery=battery_config, ev=ev_config)
+
+        self._translators = [
+            NordpoolTranslator(
+                entity_id=data.get(CONF_NORDPOOL_ENTITY, ""),
+                resolution=data.get(CONF_NORDPOOL_RESOLUTION, DEFAULT_NORDPOOL_RESOLUTION),
+            ),
+            SolarTranslator(
+                entity_1=data.get(CONF_SOLAR_FORECAST_ENTITY, ""),
+                entity_2=data.get(CONF_SOLAR_FORECAST_ENTITY_2, ""),
+            ),
+            BatteryTranslator(
+                inverter=inverter,
+                household_load_entity=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
+            ),
+        ]
+        if ev_translator is not None:
+            self._translators.append(ev_translator)
+
+        inverter_last_ref = make_last_ref()
+        nodes = [
+            PricingNode(),
+            BatteryStateNode(),
+            GenerationNode(),
+            DegradationNode(),
+            LockoutNode(),
+            OptimizerNode(last_inverter_action_ref=inverter_last_ref),
+            DashboardNode(),
+        ]
+        if ev_scheduler_node is not None:
+            nodes.append(ev_scheduler_node)
+
+        self._engine = DagEngine(nodes)
+        self._event_router = EventRouter(inverter=inverter, ev_charger=ev_charger)
 
         self._store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_CAPACITY)
         stored = await self._store.async_load()
-        if stored:
-            self._capacity_estimator = CapacityEstimator.from_dict(stored)
-        else:
-            self._capacity_estimator = CapacityEstimator(
-                self._battery_config.nominal_capacity_kwh
-            )
+        self._capacity_estimator = (
+            CapacityEstimator.from_dict(stored)
+            if stored
+            else CapacityEstimator(battery_config.nominal_capacity_kwh)
+        )
 
     async def _async_update_data(self) -> dict:
-        """Main 5-minute update cycle — four-stage pipeline."""
+        """One DAG cycle: translate → capacity update → DAG → event routing."""
         now = datetime.now(timezone.utc)
 
         try:
-            # -- Inputs --
-            prices = self._read_nordpool_prices()
-            soc = self._inverter.get_battery_soc()
-            battery_power = self._inverter.get_battery_power()
-            grid_power = self._inverter.get_grid_power()
-
-            battery_state = BatteryState(
-                soc=soc,
-                estimated_capacity_kwh=self._capacity_estimator.estimated_capacity_kwh,
-            )
-            deg_cost = battery_module.degradation_cost_per_kwh(
-                self._battery_config, battery_state
+            primary = await run_translators(
+                self._translators, self.hass, self._sun_sale_config, self._config, now
             )
 
-            config = {**self._entry.data, **self._entry.options}
+            current_reading: BatteryReading | None = primary.get(BatteryReading)
+            if current_reading is not None:
+                obs = self._build_capacity_observation(current_reading, now)
+                if obs is not None:
+                    self._capacity_estimator.add_observation(obs)
+                    if self._store is not None:
+                        await self._store.async_save(self._capacity_estimator.to_dict())
+                self._last_battery_reading = current_reading
 
-            ev_state = None
-            if self._ev_charger is not None and self._ev_config is not None:
-                ev_state = self._read_ev_state()
-
-            # -- Stage 1: Pricing --
-            price_series = pricing_module.build_price_series(
-                prices, self._tariff_config, now=now
+            primary[EstimatedCapacity] = EstimatedCapacity(
+                value_kwh=self._capacity_estimator.estimated_capacity_kwh
             )
 
-            # -- Stage 2: Forecast --
-            generation_series = forecast_module.build_generation_series(
-                self.hass, config, price_series, now=now
-            )
+            secondary, events = await self._engine.run(primary, self._sun_sale_config, now)
 
-            # -- Stage 3: Calculator --
-            calculation = calculator.calculate(
-                price_series, generation_series, battery_state, ev_state, now
-            )
+            if self.automation_enabled and self._event_router is not None:
+                for event in events:
+                    await self._event_router.handle(event)
+                if self._event_router.last_dispatched_action:
+                    self.last_dispatched_action = self._event_router.last_dispatched_action
+                    self.last_dispatched_at = now
 
-            # -- Stage 4: Schedule --
-            schedule: Schedule = optimizer.optimize_schedule(
-                price_series=price_series,
-                calc=calculation,
-                battery_config=self._battery_config,
-                battery_state=battery_state,
-                degradation_cost=deg_cost,
-                now=now,
-            )
-
-            ev_schedule: EVSchedule | None = None
-            if self._ev_charger is not None and self._ev_config is not None and ev_state is not None:
-                ev_schedule = ev_scheduler.schedule_ev_charge(
-                    price_series=price_series,
-                    ev_config=self._ev_config,
-                    ev_state=ev_state,
-                    now=now,
-                )
-
-            if self.automation_enabled:
-                await self._execute_current_action(schedule, now)
-                if ev_schedule is not None:
-                    await self._execute_current_ev_action(ev_schedule, now)
-
-            obs = self._build_capacity_observation(soc, battery_power, now)
-            if obs is not None:
-                self._capacity_estimator.add_observation(obs)
-                if self._store is not None:
-                    await self._store.async_save(self._capacity_estimator.to_dict())
-
-            self._last_battery_soc = soc
-            self._last_battery_power = battery_power
-
-            partial_data = {
-                # pipeline outputs
-                "pricing": price_series,
-                "forecast": generation_series,
-                "calculation": calculation,
-                "schedule": schedule,
-                "ev_schedule": ev_schedule,
-                # supporting data
-                "battery_state": battery_state,
-                "degradation_cost": deg_cost,
-                "estimated_capacity": self._capacity_estimator.estimated_capacity_kwh,
-                "prices": prices,
-                "grid_power_kw": grid_power,
-                "battery_power_kw": battery_power,
-                "ev_state": ev_state,
-            }
-
-            dashboard_slots = dashboard_module.build_future_slots(
-                self.hass, config, partial_data,
-                self._battery_config, self._tariff_config,
-            )
-            solar_frozen = dashboard_module.build_solar_frozen_forecast(self.hass, config)
-
-            return {
-                **partial_data,
-                "dashboard_slots": dashboard_slots,
-                "solar_frozen_forecast": solar_frozen,
-            }
+            return self._build_sensor_dict(primary, secondary)
 
         except Exception as exc:
             raise UpdateFailed(f"Error updating sunSale data: {exc}") from exc
 
-    # ------------------------------------------------------------------ #
-    # State readers                                                        #
-    # ------------------------------------------------------------------ #
+    def _build_sensor_dict(self, primary: dict, secondary: dict) -> dict:
+        """Map typed DAG outputs to the string-keyed dict that sensors read."""
+        reading: BatteryReading | None = primary.get(BatteryReading)
+        nordpool: NordpoolPrices | None = primary.get(NordpoolPrices)
+        dashboard: DashboardData | None = secondary.get(DashboardData)
+        deg: DegradationCost | None = secondary.get(DegradationCost)
 
-    def _read_nordpool_prices(self) -> list[HourlyPrice]:
-        """Parse Nordpool sensor price attributes.
-
-        Resolution is controlled by CONF_NORDPOOL_RESOLUTION (default "15min"):
-        - "15min": keep raw slot granularity from raw_today/raw_tomorrow
-        - "hourly": aggregate to hourly by averaging
-
-        Falls back to the legacy flat hourly list format when raw_today/raw_tomorrow
-        are absent.
-        """
-        entity_id = self._config.get(CONF_NORDPOOL_ENTITY, "")
-        resolution = self._config.get(CONF_NORDPOOL_RESOLUTION, DEFAULT_NORDPOOL_RESOLUTION)
-        state = self.hass.states.get(entity_id)
-        if state is None:
-            _LOGGER.warning("Nordpool entity '%s' not found", entity_id)
-            return []
-
-        raw_entries: list[dict] = []
-        for attr_key in ("raw_today", "raw_tomorrow"):
-            raw = state.attributes.get(attr_key)
-            if isinstance(raw, list):
-                raw_entries.extend(raw)
-
-        if raw_entries:
-            if resolution == "hourly":
-                hourly: dict[datetime, list[float]] = {}
-                for entry in raw_entries:
-                    try:
-                        start_val = entry["start"]
-                        if isinstance(start_val, datetime):
-                            start_dt = start_val
-                        else:
-                            start_dt = datetime.fromisoformat(str(start_val))
-                        if start_dt.tzinfo is None:
-                            start_dt = start_dt.replace(tzinfo=timezone.utc)
-                        start_utc = start_dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-                        hourly.setdefault(start_utc, []).append(float(entry["value"]))
-                    except (KeyError, ValueError, TypeError):
-                        continue
-                return [
-                    HourlyPrice(
-                        start=h,
-                        end=h + timedelta(hours=1),
-                        price_eur_kwh=sum(vals) / len(vals),
-                    )
-                    for h, vals in sorted(hourly.items())
-                ]
-
-            # "15min" (default): keep raw slot granularity
-            parsed: list[tuple[datetime, float]] = []
-            for entry in raw_entries:
-                try:
-                    start_val = entry["start"]
-                    if isinstance(start_val, datetime):
-                        start_dt = start_val
-                    else:
-                        start_dt = datetime.fromisoformat(str(start_val))
-                    if start_dt.tzinfo is None:
-                        start_dt = start_dt.replace(tzinfo=timezone.utc)
-                    start_utc = start_dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
-                    parsed.append((start_utc, float(entry["value"])))
-                except (KeyError, ValueError, TypeError):
-                    continue
-
-            seen: set[datetime] = set()
-            unique: list[tuple[datetime, float]] = []
-            for item in sorted(parsed):
-                if item[0] not in seen:
-                    seen.add(item[0])
-                    unique.append(item)
-
-            if not unique:
-                return []
-
-            slot_dur = (unique[1][0] - unique[0][0]) if len(unique) >= 2 else timedelta(hours=1)
-            return [
-                HourlyPrice(start=s, end=s + slot_dur, price_eur_kwh=p)
-                for s, p in unique
-            ]
-
-        # Legacy format: flat list of up to 24 hourly prices per day.
-        now = datetime.now(timezone.utc)
-        prices: list[HourlyPrice] = []
-        for offset, attr_key in enumerate(("today", "tomorrow")):
-            raw = state.attributes.get(attr_key)
-            if not isinstance(raw, list):
-                continue
-            base_date = (now + timedelta(days=offset)).date()
-            for hour_idx, price in enumerate(raw):
-                if price is None or hour_idx >= 24:
-                    continue
-                start = datetime(
-                    base_date.year, base_date.month, base_date.day,
-                    hour_idx, 0, 0, tzinfo=timezone.utc,
-                )
-                prices.append(HourlyPrice(
-                    start=start,
-                    end=start + timedelta(hours=1),
-                    price_eur_kwh=float(price),
-                ))
-        return prices
-
-    def _read_ev_state(self) -> EVChargerState:
-        """Build EVChargerState from HA entity states."""
-        is_plugged = self._ev_charger.is_plugged_in()
-        soc = self._ev_charger.get_ev_soc()
-
-        target_soc = DEFAULT_EV_TARGET_SOC
-        target_entity = self._config.get(CONF_EV_ENTITY_TARGET_SOC, "")
-        if target_entity:
-            ts = self.hass.states.get(target_entity)
-            if ts and ts.state not in ("unavailable", "unknown", ""):
-                try:
-                    val = float(ts.state)
-                    target_soc = val / 100.0 if val > 1.0 else val
-                except ValueError:
-                    pass
-
-        departure_time: datetime | None = None
-        dep_entity = self._config.get(CONF_EV_ENTITY_DEPARTURE_TIME, "")
-        if dep_entity:
-            ds = self.hass.states.get(dep_entity)
-            if ds and ds.state not in ("unavailable", "unknown", ""):
-                try:
-                    departure_time = datetime.fromisoformat(ds.state).replace(
-                        tzinfo=timezone.utc
-                    )
-                except ValueError:
-                    pass
-
-        return EVChargerState(
-            is_plugged_in=is_plugged,
-            soc=soc if soc is not None else 0.5,
-            target_soc=target_soc,
-            departure_time=departure_time,
-        )
-
-    # ------------------------------------------------------------------ #
-    # Command executors                                                    #
-    # ------------------------------------------------------------------ #
-
-    async def _execute_current_action(self, schedule: Schedule, now: datetime) -> None:
-        """Execute the action for the current hour (with deduplication)."""
-        if not schedule.slots:
-            return
-
-        current_slot = next(
-            (s for s in schedule.slots if s.start <= now < s.end),
-            schedule.slots[0],
-        )
-        action_key = f"{current_slot.action.value}:{current_slot.power_kw:.3f}"
-        if action_key == self._last_action:
-            return
-
-        if current_slot.action == Action.CHARGE_FROM_GRID:
-            await self._inverter.async_charge_from_grid(current_slot.power_kw)
-        elif current_slot.action == Action.DISCHARGE_TO_GRID:
-            await self._inverter.async_discharge_to_grid(current_slot.power_kw)
-        else:
-            await self._inverter.async_idle()
-
-        self._last_action = action_key
-        self.last_dispatched_action = current_slot.action.value
-        self.last_dispatched_at = now
-        _LOGGER.info("sunSale: %s", current_slot.reason)
-
-    async def _execute_current_ev_action(
-        self, ev_schedule: EVSchedule, now: datetime
-    ) -> None:
-        """Execute EV charging action for the current hour."""
-        if not ev_schedule.slots:
-            return
-        current_slot = next(
-            (s for s in ev_schedule.slots if s.start <= now < s.end),
-            None,
-        )
-        if current_slot is None:
-            return
-        if current_slot.charge_power_kw > 0:
-            await self._ev_charger.async_start_charging(current_slot.charge_power_kw)
-        else:
-            await self._ev_charger.async_stop_charging()
+        return {
+            "pricing": secondary.get(PriceSeries),
+            "forecast": secondary.get(GenerationSeries),
+            "calculation": secondary.get(CalculationResult),
+            "schedule": secondary.get(Schedule),
+            "ev_schedule": secondary.get(EVSchedule),
+            "battery_state": secondary.get(BatteryState),
+            "degradation_cost": deg.value_kwh if deg else 0.0,
+            "estimated_capacity": self._capacity_estimator.estimated_capacity_kwh,
+            "prices": nordpool.slots if nordpool else [],
+            "grid_power_kw": reading.grid_power_kw if reading else 0.0,
+            "battery_power_kw": reading.power_kw if reading else 0.0,
+            "ev_state": primary.get(EVChargerState),
+            "dashboard_slots": dashboard.future_slots if dashboard else [],
+            "solar_frozen_forecast": dashboard.solar_frozen_forecast if dashboard else [],
+        }
 
     def _build_capacity_observation(
         self,
-        current_soc: float,
-        current_power_kw: float,
+        current: BatteryReading,
         now: datetime,
     ) -> CapacityObservation | None:
-        """Build a capacity observation from SoC change, if significant enough."""
-        if self._last_battery_soc is None or self._last_battery_power is None:
+        if self._last_battery_reading is None:
             return None
-        soc_delta = abs(current_soc - self._last_battery_soc)
-        if soc_delta < 0.05:
+        soc_delta = abs(current.soc - self._last_battery_reading.soc)
+        if soc_delta < CAPACITY_OBS_MIN_SOC_DELTA:
             return None
-        avg_power = (abs(self._last_battery_power) + abs(current_power_kw)) / 2.0
+        avg_power = (abs(self._last_battery_reading.power_kw) + abs(current.power_kw)) / 2.0
         energy_kwh = avg_power * (UPDATE_INTERVAL_MINUTES / 60.0)
-        direction = "charge" if current_soc > self._last_battery_soc else "discharge"
+        direction = "charge" if current.soc > self._last_battery_reading.soc else "discharge"
         return CapacityObservation(
             timestamp=now,
-            soc_start=self._last_battery_soc,
-            soc_end=current_soc,
+            soc_start=self._last_battery_reading.soc,
+            soc_end=current.soc,
             energy_kwh=energy_kwh,
             direction=direction,
         )

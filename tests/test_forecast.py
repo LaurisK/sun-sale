@@ -1,22 +1,13 @@
-"""Tests for forecast.py — reads from HA state machine via mocked hass."""
+"""Tests for forecast.py — pure Python, no HA mocking needed."""
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
 
-from custom_components.sun_sale.forecast import build_generation_series, _tomorrow_entity
-from custom_components.sun_sale.models import PriceSeries
+from custom_components.sun_sale.forecast import build_generation_series
+from custom_components.sun_sale.models import PriceSeries, RawSolarData
 from custom_components.sun_sale.pricing import build_price_series
+from custom_components.sun_sale.translators import _tomorrow_entity
 from tests.conftest import BASE_DT, default_tariff_config, make_price
 
 NOW = BASE_DT
-SOLAR_ENTITY = "sensor.solar_today"
-SOLAR_ENTITY_2 = "sensor.solar2_today"
-
-
-def _make_config(entity_1=SOLAR_ENTITY, entity_2=""):
-    return {
-        "solar_forecast_entity": entity_1,
-        "solar_forecast_entity_2": entity_2,
-    }
 
 
 def _empty_price_series() -> PriceSeries:
@@ -24,50 +15,44 @@ def _empty_price_series() -> PriceSeries:
     return build_price_series(prices, default_tariff_config(), now=NOW)
 
 
-def _hass_with_state(entity_id: str, attrs: dict) -> MagicMock:
-    hass = MagicMock()
-    state = MagicMock()
-    state.attributes = attrs
-    hass.states.get.side_effect = lambda eid: state if eid == entity_id else None
-    return hass
+def _raw_watts(watts_by_iso: dict[str, float]) -> RawSolarData:
+    """Build RawSolarData from {iso_str: watts} dict."""
+    parsed = {}
+    for ts_str, w in watts_by_iso.items():
+        dt = datetime.fromisoformat(ts_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        parsed[dt.astimezone(timezone.utc).replace(second=0, microsecond=0)] = w
+    return RawSolarData(watts=parsed, forecast_slots=[])
 
 
 # ---------------------------------------------------------------------------
 # Empty / missing cases
 # ---------------------------------------------------------------------------
 
-def test_empty_when_no_entity_configured():
-    hass = MagicMock()
-    gen = build_generation_series(hass, _make_config(entity_1=""), _empty_price_series(), now=NOW)
+def test_empty_when_no_data():
+    raw = RawSolarData(watts={}, forecast_slots=[])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     assert gen.slots == ()
     assert gen.primary == "none"
 
 
-def test_empty_when_entity_missing():
-    hass = MagicMock()
-    hass.states.get.return_value = None
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+def test_empty_when_empty_forecast_slots():
+    raw = RawSolarData(watts={}, forecast_slots=[])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     assert gen.slots == ()
 
 
 # ---------------------------------------------------------------------------
-# Open Meteo (watts attribute)
+# Open Meteo (watts dict)
 # ---------------------------------------------------------------------------
 
-def _make_watts_state(watts_dict: dict) -> MagicMock:
-    s = MagicMock()
-    s.attributes = {"watts": watts_dict}
-    return s
-
-
 def test_open_meteo_watts_parsed():
-    ts_1 = "2024-01-15T10:00:00+00:00"
-    ts_2 = "2024-01-15T11:00:00+00:00"
-    hass = MagicMock()
-    hass.states.get.side_effect = lambda eid: (
-        _make_watts_state({ts_1: 2000.0, ts_2: 3000.0}) if eid == SOLAR_ENTITY else None
-    )
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+    raw = _raw_watts({
+        "2024-01-15T10:00:00+00:00": 2000.0,
+        "2024-01-15T11:00:00+00:00": 3000.0,
+    })
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     assert gen.primary == "open_meteo"
     starts = {s.start.hour for s in gen.slots}
     assert 10 in starts
@@ -75,30 +60,26 @@ def test_open_meteo_watts_parsed():
 
 
 def test_open_meteo_15min_aggregated_to_hourly():
-    # Four 15-min slots at 1000 W each → 1.0 kWh per hour
-    base = "2024-01-15T10:"
-    watts = {f"{base}{m:02d}:00+00:00": 1000.0 for m in (0, 15, 30, 45)}
-    hass = MagicMock()
-    hass.states.get.side_effect = lambda eid: (
-        _make_watts_state(watts) if eid == SOLAR_ENTITY else None
-    )
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+    # Four 15-min slots at 1000 W → 1.0 kWh per hour
+    raw = _raw_watts({
+        "2024-01-15T10:00:00+00:00": 1000.0,
+        "2024-01-15T10:15:00+00:00": 1000.0,
+        "2024-01-15T10:30:00+00:00": 1000.0,
+        "2024-01-15T10:45:00+00:00": 1000.0,
+    })
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     slot_10 = next(s for s in gen.slots if s.start.hour == 10)
     assert abs(slot_10.expected_kwh - 1.0) < 1e-6
 
 
 def test_open_meteo_two_arrays_summed():
-    ts = "2024-01-15T10:00:00+00:00"
-    hass = MagicMock()
-    hass.states.get.side_effect = lambda eid: (
-        _make_watts_state({ts: 1000.0}) if eid in (SOLAR_ENTITY, SOLAR_ENTITY_2) else None
-    )
-    gen = build_generation_series(
-        hass, _make_config(entity_1=SOLAR_ENTITY, entity_2=SOLAR_ENTITY_2),
-        _empty_price_series(), now=NOW,
-    )
+    # Simulate two arrays combined in RawSolarData.watts (translator already sums them)
+    ts = datetime(2024, 1, 15, 10, 0, tzinfo=timezone.utc)
+    # Two arrays at 1000 W each → 500 W avg → translator already summed → 2000 W total
+    raw = RawSolarData(watts={ts: 2000.0}, forecast_slots=[])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     slot_10 = next(s for s in gen.slots if s.start.hour == 10)
-    # Each array contributes 1000 W × 0.25 h / 1000 = 0.25 kWh → total 0.5 kWh
+    # 2000 W × 0.25 h / 1000 = 0.5 kWh
     assert abs(slot_10.expected_kwh - 0.5) < 1e-6
 
 
@@ -107,13 +88,11 @@ def test_open_meteo_two_arrays_summed():
 # ---------------------------------------------------------------------------
 
 def test_forecast_solar_pv_estimate_parsed():
-    hass = _hass_with_state(SOLAR_ENTITY, {
-        "forecast": [
-            {"time": "2024-01-15T10:00:00", "pv_estimate": 1.5},
-            {"time": "2024-01-15T11:00:00", "pv_estimate": 2.0},
-        ]
-    })
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+    raw = RawSolarData(watts={}, forecast_slots=[
+        {"time": "2024-01-15T10:00:00", "pv_estimate": 1.5},
+        {"time": "2024-01-15T11:00:00", "pv_estimate": 2.0},
+    ])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     assert gen.primary == "forecast_solar"
     assert len(gen.slots) == 2
     assert abs(gen.slots[0].expected_kwh - 1.5) < 1e-9
@@ -121,34 +100,39 @@ def test_forecast_solar_pv_estimate_parsed():
 
 
 def test_forecast_solar_energy_fallback():
-    hass = _hass_with_state(SOLAR_ENTITY, {
-        "forecast": [{"time": "2024-01-15T10:00:00", "energy": 1.2}]
-    })
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+    raw = RawSolarData(watts={}, forecast_slots=[
+        {"time": "2024-01-15T10:00:00", "energy": 1.2},
+    ])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     assert abs(gen.slots[0].expected_kwh - 1.2) < 1e-9
 
 
 def test_forecast_solar_skips_bad_entries():
-    hass = _hass_with_state(SOLAR_ENTITY, {
-        "forecast": [
-            {"time": "bad-date", "pv_estimate": 1.0},
-            {"time": "2024-01-15T10:00:00", "pv_estimate": 2.0},
-        ]
-    })
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+    raw = RawSolarData(watts={}, forecast_slots=[
+        {"time": "bad-date", "pv_estimate": 1.0},
+        {"time": "2024-01-15T10:00:00", "pv_estimate": 2.0},
+    ])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     assert len(gen.slots) == 1
 
 
 # ---------------------------------------------------------------------------
-# multi-source: primary selection and overlays
+# primary selection
 # ---------------------------------------------------------------------------
 
-def test_primary_is_set():
-    hass = _hass_with_state(SOLAR_ENTITY, {
-        "forecast": [{"time": "2024-01-15T10:00:00", "pv_estimate": 1.0}]
-    })
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
-    assert gen.primary in ("open_meteo", "forecast_solar")
+def test_primary_is_set_for_forecast_solar():
+    raw = RawSolarData(watts={}, forecast_slots=[
+        {"time": "2024-01-15T10:00:00", "pv_estimate": 1.0},
+    ])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
+    assert gen.primary == "forecast_solar"
+
+
+def test_primary_is_open_meteo_when_watts_present():
+    ts = datetime(2024, 1, 15, 10, 0, tzinfo=timezone.utc)
+    raw = RawSolarData(watts={ts: 1000.0}, forecast_slots=[])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
+    assert gen.primary == "open_meteo"
 
 
 # ---------------------------------------------------------------------------
@@ -156,38 +140,37 @@ def test_primary_is_set():
 # ---------------------------------------------------------------------------
 
 def test_energy_between_full_slot():
-    hass = _hass_with_state(SOLAR_ENTITY, {
-        "forecast": [{"time": "2024-01-15T10:00:00", "pv_estimate": 3.0}]
-    })
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+    raw = RawSolarData(watts={}, forecast_slots=[
+        {"time": "2024-01-15T10:00:00", "pv_estimate": 3.0},
+    ])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     t1 = NOW.replace(hour=10)
     t2 = NOW.replace(hour=11)
     assert abs(gen.energy_between(t1, t2) - 3.0) < 1e-9
 
 
 def test_energy_between_partial_slot():
-    hass = _hass_with_state(SOLAR_ENTITY, {
-        "forecast": [{"time": "2024-01-15T10:00:00", "pv_estimate": 4.0}]
-    })
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+    raw = RawSolarData(watts={}, forecast_slots=[
+        {"time": "2024-01-15T10:00:00", "pv_estimate": 4.0},
+    ])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     t1 = NOW.replace(hour=10, minute=30)
     t2 = NOW.replace(hour=11)
-    # 30 min of a 60-min slot → 50%
     assert abs(gen.energy_between(t1, t2) - 2.0) < 1e-6
 
 
 def test_energy_between_no_overlap():
-    hass = _hass_with_state(SOLAR_ENTITY, {
-        "forecast": [{"time": "2024-01-15T10:00:00", "pv_estimate": 3.0}]
-    })
-    gen = build_generation_series(hass, _make_config(), _empty_price_series(), now=NOW)
+    raw = RawSolarData(watts={}, forecast_slots=[
+        {"time": "2024-01-15T10:00:00", "pv_estimate": 3.0},
+    ])
+    gen = build_generation_series(raw, _empty_price_series(), now=NOW)
     t1 = NOW.replace(hour=12)
     t2 = NOW.replace(hour=13)
     assert gen.energy_between(t1, t2) == 0.0
 
 
 # ---------------------------------------------------------------------------
-# _tomorrow_entity helper
+# _tomorrow_entity helper (now in translators.py)
 # ---------------------------------------------------------------------------
 
 def test_tomorrow_entity_today_suffix():
