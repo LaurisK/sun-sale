@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from ..contract.events import ControlEvent, EVActionEvent, InverterActionEvent
-from .ev_charger import EVChargerController
+from ..contract.events import ControlEvent, InverterActionEvent
 from .inverter import InverterController
 from ..contract.models import Action
 
@@ -16,27 +15,20 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class EventRouter:
-    """Routes DAG ControlEvents to inverter / EV charger output adapters.
+    """Routes DAG ControlEvents to the inverter output adapter.
 
     Deduplication: inverter commands are keyed by (action, power_kw); repeated
     identical commands within a cycle are suppressed.
     """
 
-    def __init__(
-        self,
-        inverter: InverterController,
-        ev_charger: EVChargerController | None,
-    ) -> None:
+    def __init__(self, inverter: InverterController) -> None:
         self._inverter = inverter
-        self._ev_charger = ev_charger
         self._last_inverter_key: str | None = None
         self.last_dispatched_action: str | None = None
 
     async def handle(self, event: ControlEvent) -> None:
         if isinstance(event, InverterActionEvent):
             await self._handle_inverter(event)
-        elif isinstance(event, EVActionEvent) and self._ev_charger is not None:
-            await self._handle_ev(event)
 
     async def _handle_inverter(self, event: InverterActionEvent) -> None:
         key = f"{event.action.value}:{event.power_kw:.3f}"
@@ -51,9 +43,3 @@ class EventRouter:
         self._last_inverter_key = key
         self.last_dispatched_action = event.action.value
         _LOGGER.info("sunSale dispatch: %s @ %.3f kW", event.action.value, event.power_kw)
-
-    async def _handle_ev(self, event: EVActionEvent) -> None:
-        if event.charge_power_kw > 0:
-            await self._ev_charger.async_start_charging(event.charge_power_kw)
-        else:
-            await self._ev_charger.async_stop_charging()

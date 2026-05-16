@@ -11,7 +11,6 @@ from custom_components.sun_sale.contract.models import (
     Action,
     BatteryState,
     CalculationResult,
-    EVChargerState,
     GenerationSeries,
     PriceSeries,
     PriceSlot,
@@ -73,7 +72,6 @@ def make_coordinator(
     *,
     automation_enabled: bool = True,
     include_schedule: bool = True,
-    include_ev: bool = False,
     last_dispatched_action: str | None = "idle",
     last_dispatched_at: datetime | None = None,
 ) -> MagicMock:
@@ -99,13 +97,6 @@ def make_coordinator(
         computed_at=BASE,
     ) if include_schedule else None
 
-    ev_state = EVChargerState(
-        is_plugged_in=True,
-        soc=0.4,
-        target_soc=0.8,
-        departure_time=BASE + timedelta(hours=6),
-    ) if include_ev else None
-
     ps = _make_price_series()
     gs = _make_gen_series()
     calc = _make_calculation(ps)
@@ -115,13 +106,11 @@ def make_coordinator(
         "forecast": gs,
         "calculation": calc,
         "schedule": schedule,
-        "ev_schedule": None,
         "battery_state": BatteryState(soc=0.62, estimated_capacity_kwh=9.8),
         "degradation_cost": 0.018,
         "estimated_capacity": 9.8,
         "prices": [],
         "grid_power_kw": 0.1,
-        "ev_state": ev_state,
     }
     return coord
 
@@ -239,22 +228,6 @@ def test_last_dispatched_at_none_is_null():
     coord.last_dispatched_at = None
     result = _coordinator_to_dict("e", coord)
     assert result["last_dispatched_at"] is None
-
-
-def test_ev_state_none_gives_null_ev_inputs():
-    coord = make_coordinator(include_ev=False)
-    result = _coordinator_to_dict("e", coord)
-    assert result["inputs"]["ev"] is None
-
-
-def test_ev_state_serialised_when_present():
-    coord = make_coordinator(include_ev=True)
-    result = _coordinator_to_dict("e", coord)
-    ev = result["inputs"]["ev"]
-    assert ev is not None
-    assert ev["plugged_in"] is True
-    assert abs(ev["soc"] - 0.4) < 1e-9
-    assert ev["departure_time"] is not None
 
 
 # ---------------------------------------------------------------------------

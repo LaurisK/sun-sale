@@ -204,7 +204,7 @@ def _make_pipeline_data() -> dict:
     ps = build_price_series(prices, default_tariff_config(), now=now)
     gen = GenerationSeries(slots=(), primary="none", overlays=(), computed_at=now)
     bs = default_battery_state()
-    calc = calculate(ps, gen, bs, None, now)
+    calc = calculate(ps, gen, bs, now)
     bc = default_battery_config()
     deg = degradation_cost_per_kwh(bc, bs)
     schedule = optimize_schedule(ps, calc, bc, bs, deg, now)

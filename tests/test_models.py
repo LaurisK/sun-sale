@@ -3,8 +3,7 @@ from datetime import datetime, timezone, timedelta
 import pytest
 from custom_components.sun_sale.contract.models import (
     Action, PriceEntry, TariffConfig, BatteryConfig, BatteryState,
-    SolarForecast, ScheduleSlot, Schedule, EVChargerConfig, EVChargerState,
-    EVChargeSlot, EVSchedule, CapacityObservation,
+    SolarForecast, ScheduleSlot, Schedule, CapacityObservation,
 )
 
 
@@ -71,8 +70,3 @@ def test_capacity_observation_frozen():
     )
     with pytest.raises((AttributeError, TypeError)):
         obs.energy_kwh = 6.0  # type: ignore[misc]
-
-
-def test_ev_charger_state_optional_departure():
-    ev = EVChargerState(is_plugged_in=True, soc=0.3, target_soc=0.8)
-    assert ev.departure_time is None

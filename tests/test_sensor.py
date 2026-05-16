@@ -6,8 +6,6 @@ from unittest.mock import MagicMock
 
 from custom_components.sun_sale.contract.models import (
     Action,
-    EVChargeSlot,
-    EVSchedule,
     Schedule,
     ScheduleSlot,
     TariffResult,
@@ -19,8 +17,6 @@ from custom_components.sun_sale.sensor import (
     CurrentSellPriceSensor,
     DegradationCostSensor,
     EstimatedCapacitySensor,
-    EVChargeCostSensor,
-    EVChargingSensor,
     ExpectedProfitSensor,
     NextActionSensor,
 )
@@ -48,25 +44,6 @@ def make_schedule(slots: list[ScheduleSlot]) -> Schedule:
         total_expected_profit_eur=sum(s.expected_profit_eur for s in slots),
         degradation_cost_per_kwh=0.02,
         computed_at=BASE,
-    )
-
-
-def make_ev_schedule(slots: list[EVChargeSlot]) -> EVSchedule:
-    return EVSchedule(
-        slots=slots,
-        total_cost_eur=sum(s.cost_eur for s in slots),
-        total_energy_kwh=sum(s.charge_power_kw for s in slots),
-        computed_at=BASE,
-    )
-
-
-def make_ev_slot(hour: int, power: float, cost: float) -> EVChargeSlot:
-    start = BASE.replace(hour=hour)
-    return EVChargeSlot(
-        start=start,
-        end=start + timedelta(hours=1),
-        charge_power_kw=power,
-        cost_eur=cost,
     )
 
 
@@ -213,30 +190,3 @@ def test_sell_price_none_when_no_data():
     assert sensor.native_value is None
 
 
-# ---------------------------------------------------------------------------
-# EVChargingSensor
-# ---------------------------------------------------------------------------
-
-def test_ev_charging_off_when_no_ev_schedule():
-    sensor = EVChargingSensor(make_coord({"ev_schedule": None}), make_entry())
-    assert sensor.native_value == "off"
-
-
-def test_ev_charging_off_when_no_data():
-    sensor = EVChargingSensor(make_coord(None), make_entry())
-    assert sensor.native_value == "off"
-
-
-# ---------------------------------------------------------------------------
-# EVChargeCostSensor
-# ---------------------------------------------------------------------------
-
-def test_ev_charge_cost_zero_when_no_ev_schedule():
-    sensor = EVChargeCostSensor(make_coord({"ev_schedule": None}), make_entry())
-    assert sensor.native_value == 0.0
-
-
-def test_ev_charge_cost_returns_total():
-    ev_schedule = make_ev_schedule([make_ev_slot(10, 7.4, 0.85), make_ev_slot(11, 7.4, 0.82)])
-    sensor = EVChargeCostSensor(make_coord({"ev_schedule": ev_schedule}), make_entry())
-    assert abs(sensor.native_value - 1.67) < 1e-4

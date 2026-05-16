@@ -1,4 +1,4 @@
-"""sunSale – electricity buy/sell and EV charging optimiser for Home Assistant."""
+"""sunSale – electricity buy/sell optimiser for Home Assistant."""
 from __future__ import annotations
 
 import hashlib

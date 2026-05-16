@@ -12,6 +12,11 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:    # pragma: no cover — Python < 3.9 fallback
+    from backports.zoneinfo import ZoneInfo    # type: ignore[no-redef]
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -28,21 +33,12 @@ from ..contract.const import (
     CONF_BATTERY_PURCHASE_PRICE,
     CONF_BATTERY_RATED_CYCLE_LIFE,
     CONF_BATTERY_ROUND_TRIP_EFFICIENCY,
-    CONF_EV_BATTERY_CAPACITY,
-    CONF_EV_ENABLED,
-    CONF_EV_ENTITY_CHARGER_SWITCH,
-    CONF_EV_ENTITY_DEPARTURE_TIME,
-    CONF_EV_ENTITY_PLUG_STATE,
-    CONF_EV_ENTITY_SOC,
-    CONF_EV_ENTITY_TARGET_SOC,
-    CONF_EV_MAX_CHARGE_POWER,
-    CONF_EV_MIN_CHARGE_POWER,
-    CONF_EV_PLATFORM,
     CONF_INVERTER_ENTITY_BATTERY_POWER,
     CONF_INVERTER_ENTITY_BATTERY_SOC,
     CONF_INVERTER_ENTITY_CHARGE_CONTROL,
     CONF_INVERTER_ENTITY_GRID_POWER,
     CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
+    CONF_INVERTER_ENTITY_SOLAR_ENERGY,
     CONF_INVERTER_PLATFORM,
     CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     CONF_INVERTER_SOLIS_CHARGE_CURRENT,
@@ -64,7 +60,7 @@ from ..contract.const import (
     CONF_TARIFF_TAX_RATE,
     CAPACITY_OBS_MIN_SOC_DELTA,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
-    DEFAULT_EV_MIN_CHARGE_POWER_KW,
+    HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS,
     DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     DEFAULT_SOLIS_CHARGE_CURRENT,
     DEFAULT_SOLIS_CHARGE_END_TIME_1,
@@ -75,29 +71,38 @@ from ..contract.const import (
     DEFAULT_SOLIS_SELF_USE_MODE_SWITCH,
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
     DOMAIN,
+    GENERATION_HISTORY_RETENTION_DAYS,
     STORAGE_KEY_CAPACITY,
+    STORAGE_KEY_GENERATION,
+    STORAGE_KEY_HOUSEHOLD_LOAD,
     STORAGE_KEY_YESTERDAY,
     STORAGE_VERSION,
     UPDATE_INTERVAL_MINUTES,
 )
 from ..pipeline.dag_engine import DagEngine, run_translators
 from ..outbound.event_router import EventRouter
-from ..outbound.ev_charger import EVChargerController, EVChargerPlatform
 from ..outbound.inverter import InverterController, InverterPlatform
 from ..contract.models import (
+    BaseLoadProfile,
     BatteryConfig,
     BatteryReading,
+    BatteryRuntimeEstimate,
     BatteryState,
+    BatteryStatus,
     CalculationResult,
+    ChargingProfile,
     CapacityObservation,
     DashboardData,
     DegradationCost,
     EstimatedCapacity,
-    EVChargerConfig,
-    EVChargerState,
-    EVSchedule,
+    GenerationHistory,
+    GenerationReading,
     GenerationSeries,
+    HouseholdLoadHistory,
+    HouseholdLoadReading,
+    HouseholdLoadSample,
     NordpoolData,
+    ObservedGenerationSeries,
     PriceEntry,
     PriceSeries,
     SolarData,
@@ -108,19 +113,24 @@ from ..contract.models import (
     YesterdayPrices,
 )
 from ..pipeline.nodes import (
+    BaseLoadProfileNode,
+    BatteryRuntimeNode,
     BatteryStateNode,
+    BatteryStatusNode,
+    ChargingProfileNode,
     DashboardNode,
     DegradationNode,
-    EVSchedulerNode,
     GenerationNode,
     LockoutNode,
+    ObservedGenerationNode,
     OptimizerNode,
     PricingNode,
     make_last_ref,
 )
+from ..inbound.household_load import HouseholdLoadTranslator
 from ..inbound.translators import (
     BatteryTranslator,
-    EVTranslator,
+    GenerationTranslator,
     NordpoolTranslator,
     SolarTranslator,
 )
@@ -151,6 +161,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._yesterday_nordpool: list[PriceEntry] = []
         self._yesterday_solar: list[SolarEntry] = []
         self._yesterday_stored_date: str | None = None  # date string the stored entries represent
+        self._generation_store: Store | None = None
+        self._generation_samples: list[GenerationReading] = []
+        self._household_load_store: Store | None = None
+        self._household_load_samples: list[HouseholdLoadSample] = []
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
@@ -214,34 +228,11 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             }
         inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
 
-        ev_config: EVChargerConfig | None = None
-        ev_charger: EVChargerController | None = None
-        ev_translator: EVTranslator | None = None
-        ev_scheduler_node: EVSchedulerNode | None = None
-
-        if data.get(CONF_EV_ENABLED, False):
-            ev_platform = EVChargerPlatform(data[CONF_EV_PLATFORM])
-            ev_config = EVChargerConfig(
-                max_charge_power_kw=data[CONF_EV_MAX_CHARGE_POWER],
-                min_charge_power_kw=data.get(CONF_EV_MIN_CHARGE_POWER, DEFAULT_EV_MIN_CHARGE_POWER_KW),
-                battery_capacity_kwh=data[CONF_EV_BATTERY_CAPACITY],
-            )
-            ev_charger = EVChargerController(
-                self.hass, ev_platform,
-                {
-                    "plug_state": data.get(CONF_EV_ENTITY_PLUG_STATE, ""),
-                    "soc": data.get(CONF_EV_ENTITY_SOC, ""),
-                    "charger_switch": data.get(CONF_EV_ENTITY_CHARGER_SWITCH, ""),
-                },
-            )
-            ev_translator = EVTranslator(
-                ev_charger=ev_charger,
-                target_soc_entity=data.get(CONF_EV_ENTITY_TARGET_SOC, ""),
-                departure_entity=data.get(CONF_EV_ENTITY_DEPARTURE_TIME, ""),
-            )
-            ev_scheduler_node = EVSchedulerNode(last_ev_action_ref=make_last_ref())
-
-        self._sun_sale_config = SunSaleConfig(tariff=tariff_config, battery=battery_config, ev=ev_config)
+        local_tz = self._resolve_local_tz()
+        self._sun_sale_config = SunSaleConfig(
+            tariff=tariff_config, battery=battery_config,
+            local_tz=local_tz,
+        )
 
         self._translators = [
             NordpoolTranslator(
@@ -255,25 +246,32 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 inverter=inverter,
                 household_load_entity=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
             ),
+            GenerationTranslator(
+                entity_id=data.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
+            ),
+            HouseholdLoadTranslator(
+                entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
+            ),
         ]
-        if ev_translator is not None:
-            self._translators.append(ev_translator)
 
         inverter_last_ref = make_last_ref()
         nodes = [
             PricingNode(),
             BatteryStateNode(),
+            BatteryStatusNode(),
+            BaseLoadProfileNode(),
             GenerationNode(),
+            ObservedGenerationNode(),
             DegradationNode(),
+            ChargingProfileNode(),
+            BatteryRuntimeNode(),
             LockoutNode(),
             OptimizerNode(last_inverter_action_ref=inverter_last_ref),
             DashboardNode(),
         ]
-        if ev_scheduler_node is not None:
-            nodes.append(ev_scheduler_node)
 
         self._engine = DagEngine(nodes)
-        self._event_router = EventRouter(inverter=inverter, ev_charger=ev_charger)
+        self._event_router = EventRouter(inverter=inverter)
 
         self._store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_CAPACITY)
         stored = await self._store.async_load()
@@ -282,6 +280,30 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             if stored
             else CapacityEstimator(battery_config.nominal_capacity_kwh)
         )
+
+        self._generation_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_GENERATION)
+        generation_stored = await self._generation_store.async_load()
+        if generation_stored:
+            self._generation_samples = [
+                GenerationReading(
+                    today_total_kwh=s["kwh"],
+                    timestamp=datetime.fromisoformat(s["ts"]),
+                )
+                for s in generation_stored.get("samples", [])
+            ]
+
+        self._household_load_store = Store(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_HOUSEHOLD_LOAD,
+        )
+        household_stored = await self._household_load_store.async_load()
+        if household_stored:
+            self._household_load_samples = [
+                HouseholdLoadSample(
+                    timestamp=datetime.fromisoformat(s["ts"]),
+                    load_kw=s["kw"],
+                )
+                for s in household_stored.get("samples", [])
+            ]
 
         self._yesterday_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_YESTERDAY)
         yesterday_stored = await self._yesterday_store.async_load()
@@ -352,6 +374,18 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 self._yesterday_nordpool = today_nordpool
                 self._yesterday_solar = today_solar
 
+            current_generation: GenerationReading | None = primary.get(GenerationReading)
+            if current_generation is not None:
+                await self._append_generation_sample(current_generation, now)
+            primary[GenerationHistory] = GenerationHistory(samples=tuple(self._generation_samples))
+
+            current_load: HouseholdLoadReading | None = primary.get(HouseholdLoadReading)
+            if current_load is not None:
+                await self._append_household_load_sample(current_load, now)
+            primary[HouseholdLoadHistory] = HouseholdLoadHistory(
+                samples=tuple(self._household_load_samples),
+            )
+
             current_reading: BatteryReading | None = primary.get(BatteryReading)
             if current_reading is not None:
                 obs = self._build_capacity_observation(current_reading, now)
@@ -379,6 +413,53 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         except Exception as exc:
             raise UpdateFailed(f"Error updating sunSale data: {exc}") from exc
 
+    async def _append_generation_sample(
+        self, reading: GenerationReading, now: datetime
+    ) -> None:
+        """Append a new sample, trim history older than retention, persist."""
+        cutoff = now - timedelta(days=GENERATION_HISTORY_RETENTION_DAYS)
+        kept = [s for s in self._generation_samples if s.timestamp >= cutoff]
+        kept.append(reading)
+        self._generation_samples = kept
+        if self._generation_store is not None:
+            await self._generation_store.async_save({
+                "samples": [
+                    {"ts": s.timestamp.isoformat(), "kwh": s.today_total_kwh}
+                    for s in self._generation_samples
+                ],
+            })
+
+    async def _append_household_load_sample(
+        self, reading: HouseholdLoadReading, now: datetime
+    ) -> None:
+        """Append a new sample, trim by retention, persist."""
+        cutoff = now - timedelta(days=HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS)
+        kept = [s for s in self._household_load_samples if s.timestamp >= cutoff]
+        kept.append(HouseholdLoadSample(timestamp=now, load_kw=reading.load_kw))
+        self._household_load_samples = kept
+        if self._household_load_store is not None:
+            await self._household_load_store.async_save({
+                "samples": [
+                    {"ts": s.timestamp.isoformat(), "kw": s.load_kw}
+                    for s in self._household_load_samples
+                ],
+            })
+
+    def _resolve_local_tz(self):
+        """Return the local timezone for the integration.
+
+        Reads `hass.config.time_zone` (e.g. "Europe/Riga"); falls back to UTC
+        when unset, unknown, or unparseable. Baseload bucketing depends on
+        this — see docs/base_load_missing.md §9.
+        """
+        tz_name = getattr(self.hass.config, "time_zone", None)
+        if not tz_name:
+            return timezone.utc
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:    # ZoneInfoNotFoundError + anything weird from HA mocks
+            return timezone.utc
+
     def _build_sensor_dict(self, primary: dict, secondary: dict) -> dict:
         """Map typed DAG outputs to the string-keyed dict that sensors read."""
         reading: BatteryReading | None = primary.get(BatteryReading)
@@ -389,18 +470,21 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         return {
             "pricing": secondary.get(PriceSeries),
             "forecast": secondary.get(GenerationSeries),
+            "observed_generation": secondary.get(ObservedGenerationSeries),
             "calculation": secondary.get(CalculationResult),
             "schedule": secondary.get(Schedule),
-            "ev_schedule": secondary.get(EVSchedule),
             "battery_state": secondary.get(BatteryState),
+            "battery_status": secondary.get(BatteryStatus),
+            "charging_profile": secondary.get(ChargingProfile),
             "degradation_cost": deg.value_kwh if deg else 0.0,
             "estimated_capacity": self._capacity_estimator.estimated_capacity_kwh,
             "prices": nordpool.entries if nordpool else [],
             "grid_power_kw": reading.grid_power_kw if reading else 0.0,
             "battery_power_kw": reading.power_kw if reading else 0.0,
-            "ev_state": primary.get(EVChargerState),
             "dashboard_slots": dashboard.future_slots if dashboard else [],
             "solar_frozen_forecast": dashboard.solar_frozen_forecast if dashboard else [],
+            "base_load_profile": secondary.get(BaseLoadProfile),
+            "battery_runtime": secondary.get(BatteryRuntimeEstimate),
         }
 
     def _build_capacity_observation(

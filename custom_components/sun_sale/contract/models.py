@@ -1,8 +1,8 @@
 """Shared data structures for sunSale. No logic, no HA imports."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
 
 
@@ -64,6 +64,21 @@ class BatteryState:
 
 
 @dataclass(frozen=True)
+class BatteryStatus:
+    """Normalised battery snapshot: configured limits + current telemetry.
+
+    Produced by `inbound/battery.py` from BatteryConfig + BatteryReading.
+    Total capacity is the configured nominal value; remaining capacity is
+    derived from the observed SoC.
+    """
+    total_capacity_kwh: float
+    max_charge_power_kw: float
+    max_discharge_power_kw: float
+    soc: float                       # 0.0–1.0
+    remaining_capacity_kwh: float    # soc * total_capacity_kwh
+
+
+@dataclass(frozen=True)
 class SolarForecast:
     """Predicted solar generation for one hour."""
     start: datetime
@@ -92,38 +107,33 @@ class Schedule:
     computed_at: datetime
 
 
-@dataclass(frozen=True)
-class EVChargerConfig:
-    """User-configured EV charger parameters."""
-    max_charge_power_kw: float
-    min_charge_power_kw: float
-    battery_capacity_kwh: float   # EV battery size
-
-
-@dataclass
-class EVChargerState:
-    """Current observed EV charger state."""
-    is_plugged_in: bool
-    soc: float                         # 0.0–1.0, current EV SoC
-    target_soc: float                  # 0.0–1.0, desired SoC by departure
-    departure_time: datetime | None = None
+class ChargeMode(Enum):
+    """Per-slot disposition of today's remaining solar generation."""
+    SOLAR_CHARGE = "solar_charge"   # store solar in battery
+    SELL = "sell"                    # export to grid (sell_eur_kwh > 0)
+    NO_EXPORT = "no_export"          # excess solar but sell_eur_kwh <= 0 → curtail
+    IDLE = "idle"                    # no generation this slot
 
 
 @dataclass(frozen=True)
-class EVChargeSlot:
-    """One hour of EV charge schedule."""
+class ChargingProfileSlot:
+    """One slot of today's charging profile."""
     start: datetime
     end: datetime
-    charge_power_kw: float   # 0 = don't charge this hour
-    cost_eur: float
+    mode: ChargeMode
+    expected_kwh: float
+    sell_eur_kwh: float          # for traceability
 
 
-@dataclass
-class EVSchedule:
-    """Complete EV charge plan."""
-    slots: list[EVChargeSlot]
-    total_cost_eur: float
-    total_energy_kwh: float
+@dataclass(frozen=True)
+class ChargingProfile:
+    """Today's solar disposition: which slots go to battery, sell, or curtail."""
+    slots: tuple[ChargingProfileSlot, ...]   # today's remaining slots only
+    free_capacity_kwh: float                  # (max_soc - soc) * total_capacity_kwh
+    today_remaining_generation_kwh: float
+    solar_exceeds_capacity: bool              # case 1 (False) vs case 2 (True)
+    allocated_solar_kwh: float                # sum of SOLAR_CHARGE slot kWh
+    total_no_export_kwh: float                # sum of NO_EXPORT slot kWh
     computed_at: datetime
 
 
@@ -188,11 +198,19 @@ class SolarEntry:
 
 @dataclass(frozen=True)
 class GenerationSeries:
-    """Normalised generation forecast from one or more sources."""
+    """Normalised generation forecast from one or more sources.
+
+    Slots are resampled onto PriceSeries.resolution so the grid matches the
+    pricing slots 1:1. Per-day totals are bucketed by slot.start date (UTC).
+    """
     slots: tuple[GenerationSlot, ...]
     primary: str          # which source the calculator should consume by default
     overlays: tuple[str, ...]  # other sources kept for chart overlay
     computed_at: datetime
+    total_yesterday_kwh: float = 0.0
+    total_today_kwh: float = 0.0
+    total_tomorrow_kwh: float = 0.0
+    today_remaining_kwh: float = 0.0    # slots with start >= now on today's date
 
     def energy_between(self, t1: datetime, t2: datetime) -> float:
         """Return expected kWh from the primary source between t1 and t2."""
@@ -208,6 +226,28 @@ class GenerationSeries:
             overlap_secs = (overlap_end - overlap_start).total_seconds()
             total += s.expected_kwh * (overlap_secs / slot_secs)
         return total
+
+
+@dataclass(frozen=True)
+class ObservedGenerationSlot:
+    """Observed (measured) solar generation for one time slot."""
+    start: datetime
+    end: datetime
+    generated_kwh: float
+    source: str           # "inverter"
+
+
+@dataclass(frozen=True)
+class ObservedGenerationSeries:
+    """Per-slot observed generation aligned to PriceSeries resolution.
+
+    Covers yesterday 00:00 → now. Slots whose start is in the future of the
+    last sample are simply absent (or zero where partial overlap occurs).
+    """
+    slots: tuple[ObservedGenerationSlot, ...]
+    computed_at: datetime
+    total_yesterday_kwh: float = 0.0
+    total_today_so_far_kwh: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -269,9 +309,101 @@ class BatteryReading:
 
 
 @dataclass(frozen=True)
+class GenerationReading:
+    """Primary data: one snapshot of the inverter's today-total kWh counter.
+
+    The counter is cumulative and resets at local midnight; per-slot energy is
+    derived by differencing consecutive samples in `GenerationHistory`.
+    """
+    today_total_kwh: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class GenerationHistory:
+    """Primary data: ordered samples of the inverter today-total counter.
+
+    Coordinator appends each cycle's `GenerationReading` and persists the
+    rolling list (≥ 2 days) so the inbound module can difference samples
+    across yesterday → now.
+    """
+    samples: tuple[GenerationReading, ...]   # sorted by timestamp ascending
+
+
+@dataclass(frozen=True)
 class EstimatedCapacity:
     """Primary data: current CapacityEstimator result, set by coordinator pre-DAG."""
     value_kwh: float
+
+
+@dataclass(frozen=True)
+class HouseholdLoadReading:
+    """Primary data: one snapshot of measured household load (per cycle).
+
+    Distinct from `BatteryReading.household_load_kw`: that field carries a
+    0.2 kW stub when the sensor is unavailable, so downstream calculator/
+    dashboard always have a number. This reading returns None on absence
+    so the persisted history isn't polluted (see docs/base_load_missing.md §8).
+    """
+    timestamp: datetime
+    load_kw: float
+
+
+@dataclass(frozen=True)
+class HouseholdLoadSample:
+    """One persisted sample of measured household load (in HouseholdLoadHistory).
+
+    Same shape as HouseholdLoadReading; separate type so the persisted-storage
+    schema can evolve independently of the per-cycle primary type.
+    """
+    timestamp: datetime
+    load_kw: float
+
+
+@dataclass(frozen=True)
+class HouseholdLoadHistory:
+    """Primary data: rolling history of household-load samples.
+
+    Coordinator appends each cycle (when the sensor was available) and
+    persists ~45 days. Consumed by `BaseLoadProfileNode`.
+    """
+    samples: tuple[HouseholdLoadSample, ...]   # sorted by timestamp ascending
+
+
+class DayClass(Enum):
+    """Bucket for daily peak prices, ordered cheapest → most expensive on average."""
+    WEEKEND = "weekend"     # Sat/Sun (and any holiday falling on these)
+    HOLIDAY = "holiday"     # weekday public holiday
+    WEEKDAY = "weekday"     # normal working day
+
+
+@dataclass(frozen=True)
+class DailyPeak:
+    """One day's peak Nordpool spot price + its day-class bucket."""
+    day: date
+    peak_eur_kwh: float
+    day_class: DayClass
+
+
+@dataclass(frozen=True)
+class PriceHistory:
+    """Primary data: rolling history of daily peaks (≤ ~90 days)."""
+    peaks: tuple[DailyPeak, ...]    # sorted by day ascending
+
+
+@dataclass(frozen=True)
+class ProfitabilityScore:
+    """Secondary data: today's profitability relative to recent history.
+
+    `score` is None when history is too sparse to be meaningful
+    (< MIN_HISTORY_DAYS days in the rolling window).
+    """
+    score: float | None             # 0.0–1.0, percentile rank; None when sparse
+    today_peak_eur_kwh: float
+    today_class: DayClass
+    class_medians: dict             # DayClass → median peak in long window
+    window_days: int                # days actually used for percentile rank
+    computed_at: datetime
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +414,59 @@ class EstimatedCapacity:
 class DegradationCost:
     """Cost per kWh of cycling the battery (secondary output of DegradationNode)."""
     value_kwh: float
+
+
+@dataclass(frozen=True)
+class BaseLoadSlot:
+    """Per-hour baseload floor for one local hour-of-day bucket.
+
+    `is_fallback` is True when the bucket had fewer than MIN_BUCKET_SAMPLES
+    observations and the value came from the profile's cross-bucket fallback.
+    """
+    hour: int                    # 0..23 in local time
+    baseload_kw: float
+    sample_count: int
+    is_fallback: bool
+
+
+@dataclass(frozen=True)
+class BaseLoadProfile:
+    """24-hour (local time) profile of estimated minimum household draw.
+
+    Indexed by local hour 0..23. `slots` is always length 24 — sparse buckets
+    receive `fallback_kw` so callers never have to handle None. `confidence`
+    is None when total history covers fewer than MIN_HISTORY_DAYS local days.
+    """
+    slots: tuple[BaseLoadSlot, ...]    # length 24, indexed by hour
+    fallback_kw: float                  # used for sparse buckets and as a stub
+    overall_p10_kw: float               # diagnostic: P10 of all samples
+    overall_median_kw: float            # diagnostic
+    confidence: float | None            # 0..1, distinct_days / window_days; None when sparse
+    sample_count: int                   # total samples in window
+    distinct_days: int                  # distinct local-date days in window
+    computed_at: datetime
+
+    def at(self, t: datetime, local_tz) -> float:
+        """Lookup the baseload floor for time `t` (any tz-aware datetime)."""
+        return self.slots[t.astimezone(local_tz).hour].baseload_kw
+
+
+@dataclass(frozen=True)
+class BatteryRuntimeEstimate:
+    """How long the battery can sustain household baseload before hitting min_soc.
+
+    Forward-simulates net drain (baseload − forecast solar) from `now` over
+    `horizon_hours`. Intentionally does NOT account for the optimizer's
+    scheduled discharge/charge — the output is a "baseload-only reserve".
+    `runtime_minutes` and `until` are None when the battery never drains
+    within the horizon (e.g. forecast solar covers baseload).
+    """
+    remaining_kwh_usable: float         # max(0, (soc − min_soc) * total_capacity)
+    avg_drain_kw_next_hour: float       # mean net_drain over the first simulated hour
+    runtime_minutes: float | None
+    until: datetime | None              # now + runtime_minutes, tz-aware
+    horizon_hours: int
+    computed_at: datetime
 
 
 @dataclass
@@ -297,7 +482,11 @@ class DashboardData:
 
 @dataclass(frozen=True)
 class SunSaleConfig:
-    """All user configuration, structured for DAG nodes."""
+    """All user configuration, structured for DAG nodes.
+
+    `local_tz` defaults to UTC for tests / installs without HA's timezone
+    set; the coordinator populates it from `hass.config.time_zone` at setup.
+    """
     tariff: TariffConfig
     battery: BatteryConfig
-    ev: EVChargerConfig | None
+    local_tz: tzinfo = field(default=timezone.utc)

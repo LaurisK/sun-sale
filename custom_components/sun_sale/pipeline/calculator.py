@@ -10,7 +10,6 @@ from datetime import datetime
 from ..contract.models import (
     BatteryState,
     CalculationResult,
-    EVChargerState,
     GenerationSeries,
     PriceSeries,
     SlotDecision,
@@ -21,7 +20,6 @@ def calculate(
     prices: PriceSeries,
     generation: GenerationSeries,
     battery_state: BatteryState,
-    ev_state: EVChargerState | None,
     now: datetime,
 ) -> CalculationResult:
     """Produce a CalculationResult from price and generation data.

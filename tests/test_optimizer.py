@@ -35,7 +35,7 @@ def run(prices, solar=None, soc=0.50, battery_config=None, tariff_config=None):
     deg = degradation_cost_per_kwh(bc, state)
     price_series = build_price_series(prices, tc, now=NOW)
     gen_series = _make_gen_series(solar or [])
-    calc = calculate(price_series, gen_series, state, None, NOW)
+    calc = calculate(price_series, gen_series, state, NOW)
     return optimize_schedule(price_series, calc, bc, state, deg, NOW)
 
 
@@ -223,7 +223,7 @@ def _run_with_negative_sell_window(locked_hours: list[int]) -> "Schedule":
 
     ps = build_price_series(prices, tc, now=NOW)
     gen = _make_gen_series([])
-    calc = calculate(ps, gen, state, None, NOW)
+    calc = calculate(ps, gen, state, NOW)
     return optimize_schedule(ps, calc, bc, state, deg, NOW)
 
 
@@ -265,7 +265,7 @@ def test_discharge_allowed_outside_lockout_window():
 
     ps = build_price_series(prices, tc, now=NOW)
     gen = _make_gen_series([])
-    calc = calculate(ps, gen, state, None, NOW)
+    calc = calculate(ps, gen, state, NOW)
     result = optimize_schedule(ps, calc, bc, state, deg, NOW)
 
     discharge_slots = [s for s in result.slots if s.action == Action.DISCHARGE_TO_GRID]

@@ -1,0 +1,185 @@
+@startuml sunSale_modules
+title sunSale — Module map with refactor status
+
+skinparam packageStyle rectangle
+skinparam defaultFontSize 11
+skinparam nodesep 10
+skinparam ranksep 35
+skinparam shadowing false
+
+skinparam rectangle {
+  FontSize 11
+  BorderColor #333
+}
+skinparam package {
+  BorderColor #444
+  FontSize 12
+  FontStyle bold
+}
+skinparam note {
+  BackgroundColor #FFFDE7
+  BorderColor #888
+  FontSize 10
+}
+skinparam ArrowColor #555
+
+' Status palette
+!define REFACTORED  #C8E6C9
+!define MISSING     #FFCDD2
+!define OLD         #ECEFF1
+!define EXTERNAL    #BBDEFB
+
+' ─────────────── Legend ───────────────
+legend top left
+  | Colour | Status | Meaning |
+  |<#C8E6C9>| refactored | dedicated reference doc under docs/ |
+  |<#FFCDD2>| missing | partial integration; *_missing.md exists or needed |
+  |<#ECEFF1>| old | pre-refactor, no doc, behaviour read from code |
+  |<#BBDEFB>| external | Home Assistant runtime |
+endlegend
+
+' ══════════════════════════════════════════════════════════════
+' EXTERNAL
+' ══════════════════════════════════════════════════════════════
+rectangle "Home Assistant\n(hass.states / services)" as HA EXTERNAL
+
+' ══════════════════════════════════════════════════════════════
+' CONTRACT LAYER
+' ══════════════════════════════════════════════════════════════
+package "contract/  (pure data — no internal deps)" {
+  rectangle "const.py"  as C_const  OLD
+  rectangle "events.py" as C_events OLD
+  rectangle "models.py" as C_models OLD
+}
+
+' ══════════════════════════════════════════════════════════════
+' INBOUND LAYER
+' ══════════════════════════════════════════════════════════════
+package "inbound/  (HA-read + normalise)" {
+  rectangle "translators.py"        as I_trans OLD
+  rectangle "pricing.py\n[refactored]"     as I_price   REFACTORED
+  rectangle "forecast.py\n[refactored]"    as I_fc      REFACTORED
+  rectangle "generation.py\n[refactored]"  as I_gen     REFACTORED
+  rectangle "battery.py\n[refactored]"     as I_bat     REFACTORED
+}
+
+' ══════════════════════════════════════════════════════════════
+' PIPELINE LAYER
+' ══════════════════════════════════════════════════════════════
+package "pipeline/  (pure-Python DAG)" {
+  rectangle "dag_engine.py"      as P_engine  OLD
+  rectangle "nodes.py"           as P_nodes   OLD
+  rectangle "tariff.py"          as P_tariff  OLD
+  rectangle "battery.py"         as P_bat     OLD
+  rectangle "calculator.py"      as P_calc    OLD
+  rectangle "optimizer.py"       as P_opt     OLD
+  rectangle "ev_scheduler.py"    as P_ev      OLD
+  rectangle "charging_profile.py\n[refactored]" as P_cp  REFACTORED
+  rectangle "base_load.py\n[refactored]"        as P_bl  REFACTORED
+  rectangle "profitability.py\n[missing — not wired]" as P_prof MISSING
+}
+
+' ══════════════════════════════════════════════════════════════
+' OUTBOUND LAYER
+' ══════════════════════════════════════════════════════════════
+package "outbound/  (HA-write + presentation)" {
+  rectangle "event_router.py" as O_router OLD
+  rectangle "inverter.py"     as O_inv    OLD
+  rectangle "ev_charger.py"   as O_ev     OLD
+  rectangle "dashboard.py"    as O_dash   OLD
+}
+
+' ══════════════════════════════════════════════════════════════
+' ORCHESTRATION LAYER
+' ══════════════════════════════════════════════════════════════
+package "orchestration/  (glue)" {
+  rectangle "coordinator.py" as ORCH_coord OLD
+  rectangle "debug_view.py"  as ORCH_dbg   OLD
+}
+
+' ══════════════════════════════════════════════════════════════
+' HA ROOT ENTRY POINTS
+' ══════════════════════════════════════════════════════════════
+package "HA root entry points" {
+  rectangle "__init__.py"   as R_init   OLD
+  rectangle "config_flow.py" as R_cfg   OLD
+  rectangle "sensor.py"     as R_sens   OLD
+  rectangle "switch.py"     as R_sw     OLD
+}
+
+' ══════════════════════════════════════════════════════════════
+' EDGES
+' ══════════════════════════════════════════════════════════════
+
+' HA boundary
+HA --> I_trans
+HA --> O_inv
+HA --> O_ev
+R_init --> HA
+R_cfg  --> HA
+R_sens --> HA
+R_sw   --> HA
+
+' Contract is consumed everywhere — show one representative edge per layer
+C_models <.. I_trans
+C_models <.. P_nodes
+C_models <.. O_router
+C_models <.. ORCH_coord
+C_const  <.. ORCH_coord
+C_events <.. P_nodes
+C_events <.. O_router
+
+' Inbound helpers consumed by translators / nodes
+I_trans  --> I_price : "PriceEntry stream"
+I_price  --> P_nodes  : "PriceSeries via PricingNode"
+I_fc     --> P_nodes  : "GenerationSeries via GenerationNode"
+I_gen    --> P_nodes  : "ObservedGenerationSeries"
+I_bat    --> P_nodes  : "BatteryStatus via BatteryStatusNode"
+
+' DAG engine wiring
+P_engine <.. P_nodes
+P_nodes  --> P_tariff
+P_nodes  --> P_bat
+P_nodes  --> P_calc
+P_nodes  --> P_opt
+P_nodes  --> P_ev
+P_nodes  --> P_cp
+P_nodes  --> P_bl
+
+' Profitability — NOT wired (dashed red)
+P_prof ..> P_nodes #FF5252 : "**MISSING**\nno ProfitabilityNode,\nno coordinator hookup"
+
+' Pipeline → Outbound via events
+P_nodes --> O_router : "ControlEvent list"
+O_router --> O_inv
+O_router --> O_ev
+P_nodes --> O_dash    : "DashboardData (pure builder)"
+
+' Orchestration owns translators + engine + router
+ORCH_coord --> I_trans
+ORCH_coord --> P_engine
+ORCH_coord --> O_router
+ORCH_coord --> O_inv
+ORCH_coord --> O_ev
+ORCH_dbg   <.. ORCH_coord : "primary/secondary snapshot"
+
+' Root entries → orchestration
+R_init  --> ORCH_coord
+R_init  --> ORCH_dbg
+R_sens  --> ORCH_coord
+R_sw    --> ORCH_coord
+R_cfg   --> ORCH_coord
+
+note bottom of P_prof
+  Implemented as pure helpers; types in contract/models.py;
+  exercised only by tests/test_profitability.py.
+  See docs/MODULES.md §9 for the integration tail.
+end note
+
+note bottom of P_bl
+  base_load_missing.md items are merged
+  (translator, persistence, nodes, sensors).
+  Doc retained for 0.2 kW stub + local-tz rationale.
+end note
+
+@enduml

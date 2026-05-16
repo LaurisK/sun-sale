@@ -6,7 +6,7 @@ Observer wiring is auto-built by DagEngine._wire() based on these declarations.
 
 Tier map:
   T1: PricingNode, BatteryStateNode
-  T2: GenerationNode, DegradationNode, EVSchedulerNode (optional)
+  T2: GenerationNode, DegradationNode
   T3: LockoutNode
   T4: OptimizerNode
   T5: DashboardNode (sink)
@@ -16,27 +16,34 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from . import base_load as base_load_module
 from . import battery as battery_module
-from . import calculator, ev_scheduler, optimizer
+from . import calculator, charging_profile as charging_profile_module, optimizer
+from ..inbound import battery as battery_inbound
 from ..inbound import forecast as forecast_module
+from ..inbound import generation as generation_module
 from ..inbound import pricing as pricing_module
 from ..outbound import dashboard as dashboard_module
 from .dag_engine import DagNode, NodeContext
-from ..contract.events import ControlEvent, EVActionEvent, InverterActionEvent
+from ..contract.events import ControlEvent, InverterActionEvent
 from ..contract.models import (
     Action,
+    BaseLoadProfile,
     BatteryConfig,
     BatteryReading,
+    BatteryRuntimeEstimate,
     BatteryState,
+    BatteryStatus,
     CalculationResult,
+    ChargingProfile,
     DashboardData,
     DegradationCost,
     EstimatedCapacity,
-    EVChargerConfig,
-    EVChargerState,
-    EVSchedule,
+    GenerationHistory,
     GenerationSeries,
+    HouseholdLoadHistory,
     NordpoolData,
+    ObservedGenerationSeries,
     PriceSeries,
     SolarData,
     Schedule,
@@ -79,6 +86,36 @@ class BatteryStateNode(DagNode):
         return BatteryState(soc=reading.soc, estimated_capacity_kwh=cap.value_kwh), []
 
 
+class BatteryStatusNode(DagNode):
+    """Snapshot configured limits + live SoC into BatteryStatus."""
+
+    tier = 1
+    output_type = BatteryStatus
+    consumes = [BatteryReading]
+
+    async def _compute(self, ctx: NodeContext) -> tuple[BatteryStatus, list[ControlEvent]]:
+        reading = ctx.require(BatteryReading)
+        status = battery_inbound.build_battery_status(reading, ctx.config.battery)
+        return status, []
+
+
+class BaseLoadProfileNode(DagNode):
+    """24h hour-of-day baseload profile from rolling household-load history."""
+
+    tier = 1
+    output_type = BaseLoadProfile
+    consumes = [HouseholdLoadHistory]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[BaseLoadProfile, list[ControlEvent]]:
+        history = ctx.require(HouseholdLoadHistory)
+        profile = base_load_module.build_base_load_profile(
+            history, ctx.config.local_tz, now=ctx.now,
+        )
+        return profile, []
+
+
 # ---------------------------------------------------------------------------
 # Tier 2 nodes — consume Tier 1 secondary + primary
 # ---------------------------------------------------------------------------
@@ -99,6 +136,29 @@ class GenerationNode(DagNode):
         return gen, []
 
 
+class ObservedGenerationNode(DagNode):
+    """Difference inverter today-total samples → ObservedGenerationSeries.
+
+    Tier 2 because it depends on `PriceSeries` (T1 secondary) for the grid;
+    `GenerationHistory` is primary, deposited by the coordinator from the
+    persistent sample store.
+    """
+
+    tier = 2
+    output_type = ObservedGenerationSeries
+    consumes = [GenerationHistory, PriceSeries]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[ObservedGenerationSeries, list[ControlEvent]]:
+        history = ctx.require(GenerationHistory)
+        price_series = ctx.require(PriceSeries)
+        series = generation_module.build_observed_generation_series(
+            history, price_series, now=ctx.now
+        )
+        return series, []
+
+
 class DegradationNode(DagNode):
     """Compute battery degradation cost per kWh from BatteryState + BatteryConfig."""
 
@@ -114,50 +174,57 @@ class DegradationNode(DagNode):
         return DegradationCost(value_kwh=cost), []
 
 
-class EVSchedulerNode(DagNode):
-    """Schedule EV charging into cheapest hours → EVSchedule + optional EVActionEvent.
-
-    Only registered by the coordinator when EV is enabled.
-    """
-
-    tier = 2
-    output_type = EVSchedule
-    consumes = [PriceSeries, EVChargerState]
-
-    def __init__(self, last_ev_action_ref: _LastActionRef) -> None:
-        super().__init__()
-        self._last = last_ev_action_ref
-
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[EVSchedule | None, list[ControlEvent]]:
-        price_series = ctx.require(PriceSeries)
-        ev_state = ctx.require(EVChargerState)
-        ev_config = ctx.config.ev
-        if ev_config is None:
-            return None, []
-
-        ev_sched = ev_scheduler.schedule_ev_charge(
-            price_series=price_series,
-            ev_config=ev_config,
-            ev_state=ev_state,
-            now=ctx.now,
-        )
-
-        events: list[ControlEvent] = []
-        current = _current_ev_slot(ev_sched, ctx.now)
-        if current is not None:
-            key = f"{current.charge_power_kw:.3f}"
-            if key != self._last.value:
-                self._last.value = key
-                events.append(EVActionEvent(charge_power_kw=current.charge_power_kw))
-
-        return ev_sched, events
-
-
 # ---------------------------------------------------------------------------
 # Tier 3 nodes — consume Tier 1–2 secondary
 # ---------------------------------------------------------------------------
+
+class ChargingProfileNode(DagNode):
+    """Decide per-slot disposition of today's remaining solar → ChargingProfile."""
+
+    tier = 3
+    output_type = ChargingProfile
+    consumes = [BatteryStatus, GenerationSeries, PriceSeries]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[ChargingProfile, list[ControlEvent]]:
+        status = ctx.require(BatteryStatus)
+        generation = ctx.require(GenerationSeries)
+        prices = ctx.require(PriceSeries)
+        profile = charging_profile_module.build_charging_profile(
+            battery_status=status,
+            generation=generation,
+            prices=prices,
+            battery_config=ctx.config.battery,
+            now=ctx.now,
+        )
+        return profile, []
+
+
+class BatteryRuntimeNode(DagNode):
+    """Forward-simulate pure baseload drain → BatteryRuntimeEstimate.
+
+    Ignores solar generation and the optimizer schedule by design: this is a
+    worst-case "household-only depletion" reserve, comparable across cycles.
+    See docs/base_load_missing.md.
+    """
+
+    tier = 2
+    output_type = BatteryRuntimeEstimate
+    consumes = [BatteryStatus, BaseLoadProfile]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[BatteryRuntimeEstimate, list[ControlEvent]]:
+        estimate = base_load_module.estimate_battery_runtime(
+            battery_status=ctx.require(BatteryStatus),
+            battery_config=ctx.config.battery,
+            profile=ctx.require(BaseLoadProfile),
+            local_tz=ctx.config.local_tz,
+            now=ctx.now,
+        )
+        return estimate, []
+
 
 class LockoutNode(DagNode):
     """Detect feed-in lockout windows and per-slot flags → CalculationResult."""
@@ -172,13 +239,11 @@ class LockoutNode(DagNode):
         price_series = ctx.require(PriceSeries)
         generation = ctx.require(GenerationSeries)
         battery_state = ctx.require(BatteryState)
-        ev_state: EVChargerState | None = ctx.get(EVChargerState)
 
         result = calculator.calculate(
             prices=price_series,
             generation=generation,
             battery_state=battery_state,
-            ev_state=ev_state,
             now=ctx.now,
         )
         return result, []
@@ -282,9 +347,3 @@ def _current_schedule_slot(schedule: Schedule, now: datetime):
     if not schedule.slots:
         return None
     return next((s for s in schedule.slots if s.start <= now < s.end), schedule.slots[0])
-
-
-def _current_ev_slot(ev_sched: EVSchedule, now: datetime):
-    if not ev_sched.slots:
-        return None
-    return next((s for s in ev_sched.slots if s.start <= now < s.end), None)

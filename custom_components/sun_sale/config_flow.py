@@ -25,16 +25,6 @@ from .contract.const import (
     CONF_BATTERY_PURCHASE_PRICE,
     CONF_BATTERY_RATED_CYCLE_LIFE,
     CONF_BATTERY_ROUND_TRIP_EFFICIENCY,
-    CONF_EV_BATTERY_CAPACITY,
-    CONF_EV_ENABLED,
-    CONF_EV_ENTITY_CHARGER_SWITCH,
-    CONF_EV_ENTITY_DEPARTURE_TIME,
-    CONF_EV_ENTITY_PLUG_STATE,
-    CONF_EV_ENTITY_SOC,
-    CONF_EV_ENTITY_TARGET_SOC,
-    CONF_EV_MAX_CHARGE_POWER,
-    CONF_EV_MIN_CHARGE_POWER,
-    CONF_EV_PLATFORM,
     CONF_INVERTER_ENTITY_BATTERY_POWER,
     CONF_INVERTER_ENTITY_BATTERY_SOC,
     CONF_INVERTER_ENTITY_CHARGE_CONTROL,
@@ -66,7 +56,6 @@ from .contract.const import (
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
     DEFAULT_BATTERY_RATED_CYCLE_LIFE,
     DEFAULT_BATTERY_ROUND_TRIP_EFFICIENCY,
-    DEFAULT_EV_MIN_CHARGE_POWER_KW,
     DEFAULT_NORDPOOL_RESOLUTION,
     DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     DEFAULT_SOLIS_CHARGE_CURRENT,
@@ -79,7 +68,6 @@ from .contract.const import (
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
     DOMAIN,
 )
-from .outbound.ev_charger import EVChargerPlatform
 from .outbound.inverter import InverterPlatform
 
 INVERTER_PLATFORMS = [
@@ -89,13 +77,10 @@ INVERTER_PLATFORMS = [
     {"value": InverterPlatform.GOODWE.value, "label": "GoodWe (not tested)"},
     {"value": InverterPlatform.GENERIC.value, "label": "Generic (not tested)"},
 ]
-EV_PLATFORMS = [p.value for p in EVChargerPlatform]
-
 _SENSOR = EntitySelector(EntitySelectorConfig(domain="sensor"))
 _SENSOR_POWER = EntitySelector(EntitySelectorConfig(domain="sensor", device_class="power"))
 _SENSOR_SOC = EntitySelector(EntitySelectorConfig(domain="sensor", device_class="battery"))
 _SENSOR_ENERGY = EntitySelector(EntitySelectorConfig(domain="sensor", device_class=["energy", "power"]))
-_BINARY_SENSOR_PLUG = EntitySelector(EntitySelectorConfig(domain="binary_sensor", device_class="plug"))
 _SWITCH = EntitySelector(EntitySelectorConfig(domain="switch"))
 _NUMBER = EntitySelector(EntitySelectorConfig(domain="number"))
 _TIME = EntitySelector(EntitySelectorConfig(domain="time"))
@@ -179,21 +164,6 @@ def _inverter_solis_schema(d: dict) -> vol.Schema:
     })
 
 
-def _ev_schema(d: dict) -> vol.Schema:
-    return vol.Schema({
-        _req(CONF_EV_ENABLED, d, False): bool,
-        _opt(CONF_EV_PLATFORM, d, EVChargerPlatform.GENERIC.value): _platform_selector(EV_PLATFORMS),
-        _opt(CONF_EV_BATTERY_CAPACITY, d): vol.Coerce(float),
-        _opt(CONF_EV_MAX_CHARGE_POWER, d): vol.Coerce(float),
-        _opt(CONF_EV_MIN_CHARGE_POWER, d, DEFAULT_EV_MIN_CHARGE_POWER_KW): vol.Coerce(float),
-        _opt(CONF_EV_ENTITY_PLUG_STATE, d): _BINARY_SENSOR_PLUG,
-        _opt(CONF_EV_ENTITY_SOC, d): _SENSOR_SOC,
-        _opt(CONF_EV_ENTITY_TARGET_SOC, d): _ANY_ENTITY,
-        _opt(CONF_EV_ENTITY_DEPARTURE_TIME, d): _ANY_ENTITY,
-        _opt(CONF_EV_ENTITY_CHARGER_SWITCH, d): _SWITCH,
-    })
-
-
 _NORDPOOL_RESOLUTION_SELECTOR = SelectSelector(SelectSelectorConfig(
     options=[
         {"value": "15min", "label": "15-minute (recommended)"},
@@ -219,7 +189,7 @@ def _sources_schema(d: dict) -> vol.Schema:
 # ---------------------------------------------------------------------------
 
 class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Multi-step config flow: tariff → battery → inverter platform → inverter entities → EV → sources."""
+    """Multi-step config flow: tariff → battery → inverter platform → inverter entities → sources."""
 
     VERSION = 1
 
@@ -283,7 +253,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 3b: Standard inverter entity mapping (non-Solis platforms)."""
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_ev()
+            return await self.async_step_sources()
 
         return self.async_show_form(
             step_id="inverter_entities",
@@ -294,26 +264,15 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 3b (Solis): TOU-model entity mapping for solis_modbus."""
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_ev()
+            return await self.async_step_sources()
 
         return self.async_show_form(
             step_id="inverter_solis",
             data_schema=_inverter_solis_schema({}),
         )
 
-    async def async_step_ev(self, user_input: dict | None = None) -> FlowResult:
-        """Step 4: EV charger (optional)."""
-        if user_input is not None:
-            self._data.update(user_input)
-            return await self.async_step_sources()
-
-        return self.async_show_form(
-            step_id="ev",
-            data_schema=_ev_schema({}),
-        )
-
     async def async_step_sources(self, user_input: dict | None = None) -> FlowResult:
-        """Step 5: Nordpool and solar forecast entity selection."""
+        """Step 4: Nordpool and solar forecast entity selection."""
         if user_input is not None:
             self._data.update(user_input)
             return self.async_create_entry(title="sunSale", data=self._data)
@@ -402,7 +361,7 @@ class SunSaleOptionsFlow(config_entries.OptionsFlow):
         """Step 3b: Standard inverter entity mapping."""
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_ev()
+            return await self.async_step_sources()
 
         return self.async_show_form(
             step_id="inverter_entities",
@@ -413,26 +372,15 @@ class SunSaleOptionsFlow(config_entries.OptionsFlow):
         """Step 3b (Solis): TOU-model entity mapping."""
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_ev()
+            return await self.async_step_sources()
 
         return self.async_show_form(
             step_id="inverter_solis",
             data_schema=_inverter_solis_schema(self._defaults()),
         )
 
-    async def async_step_ev(self, user_input: dict | None = None) -> FlowResult:
-        """Step 4: EV charger (optional)."""
-        if user_input is not None:
-            self._data.update(user_input)
-            return await self.async_step_sources()
-
-        return self.async_show_form(
-            step_id="ev",
-            data_schema=_ev_schema(self._defaults()),
-        )
-
     async def async_step_sources(self, user_input: dict | None = None) -> FlowResult:
-        """Step 5: Nordpool and solar forecast entities."""
+        """Step 4: Nordpool and solar forecast entities."""
         if user_input is not None:
             self._data.update(user_input)
             return self.async_create_entry(title="", data=self._data)

@@ -39,18 +39,6 @@ CONF_INVERTER_SOLIS_TOU_MODE_SWITCH = "inverter_solis_tou_mode_switch"
 CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH = "inverter_solis_allow_grid_charge_switch"
 CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH = "inverter_solis_self_use_mode_switch"
 
-# Config entry keys — EV charger
-CONF_EV_ENABLED = "ev_enabled"
-CONF_EV_PLATFORM = "ev_platform"
-CONF_EV_BATTERY_CAPACITY = "ev_battery_capacity_kwh"
-CONF_EV_MAX_CHARGE_POWER = "ev_max_charge_power_kw"
-CONF_EV_MIN_CHARGE_POWER = "ev_min_charge_power_kw"
-CONF_EV_ENTITY_PLUG_STATE = "ev_entity_plug_state"
-CONF_EV_ENTITY_SOC = "ev_entity_soc"
-CONF_EV_ENTITY_TARGET_SOC = "ev_entity_target_soc"
-CONF_EV_ENTITY_DEPARTURE_TIME = "ev_entity_departure_time"
-CONF_EV_ENTITY_CHARGER_SWITCH = "ev_entity_charger_switch"
-
 # Config entry keys — data sources
 CONF_NORDPOOL_ENTITY = "nordpool_entity"
 CONF_NORDPOOL_RESOLUTION = "nordpool_resolution"
@@ -62,7 +50,18 @@ CONF_INVERTER_ENTITY_SOLAR_ENERGY = "inverter_entity_solar_energy"
 # Persistent storage
 STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"
 STORAGE_KEY_YESTERDAY = f"{DOMAIN}_yesterday"
+STORAGE_KEY_GENERATION = f"{DOMAIN}_generation"
+STORAGE_KEY_HOUSEHOLD_LOAD = f"{DOMAIN}_household_load"
 STORAGE_VERSION = 1
+
+# Rolling generation-sample retention (days). Anything older than this is
+# trimmed before persistence each cycle.
+GENERATION_HISTORY_RETENTION_DAYS = 2
+
+# Rolling household-load retention (days). Sized at ~1.5× the baseload
+# profile window (30d) so a few stale samples at the tail don't strand
+# entries that just left the window.
+HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS = 45
 
 # Update interval (minutes)
 UPDATE_INTERVAL_MINUTES = 5
@@ -78,8 +77,6 @@ DEFAULT_BATTERY_MAX_SOC = 95
 DEFAULT_BATTERY_ROUND_TRIP_EFFICIENCY = 90
 DEFAULT_BATTERY_RATED_CYCLE_LIFE = 6000
 DEFAULT_BATTERY_NOMINAL_VOLTAGE = 48.0
-DEFAULT_EV_MIN_CHARGE_POWER_KW = 1.4
-DEFAULT_EV_TARGET_SOC = 0.80
 
 # Default Solis entity IDs (canonical names from the solis_modbus integration)
 DEFAULT_SOLIS_CHARGE_CURRENT = "number.solis_time_charging_charge_current"

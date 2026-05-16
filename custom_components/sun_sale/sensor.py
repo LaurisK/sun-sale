@@ -17,7 +17,16 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .contract.const import CONF_INVERTER_ENTITY_SOLAR_ENERGY, DOMAIN
 from .orchestration.coordinator import SunSaleCoordinator
-from .contract.models import Action, CalculationResult, EVSchedule, GenerationSeries, PriceSeries, PriceSlot, Schedule
+from .contract.models import (
+    Action,
+    BaseLoadProfile,
+    BatteryRuntimeEstimate,
+    CalculationResult,
+    GenerationSeries,
+    PriceSeries,
+    PriceSlot,
+    Schedule,
+)
 
 
 async def async_setup_entry(
@@ -35,14 +44,16 @@ async def async_setup_entry(
         EstimatedCapacitySensor(coordinator, entry),
         CurrentBuyPriceSensor(coordinator, entry),
         CurrentSellPriceSensor(coordinator, entry),
-        EVChargingSensor(coordinator, entry),
-        EVChargeCostSensor(coordinator, entry),
         ScheduleSensor(coordinator, entry),
         DashboardSensor(coordinator, entry),
         InverterModeSensor(coordinator, entry),
         PricingPipelineSensor(coordinator, entry),
         ForecastPipelineSensor(coordinator, entry),
         CalculationPipelineSensor(coordinator, entry),
+        CurrentBaseloadSensor(coordinator, entry),
+        BatteryRuntimeMinutesSensor(coordinator, entry),
+        BatteryDrainUntilSensor(coordinator, entry),
+        BaseloadConfidenceSensor(coordinator, entry),
     ])
 
 
@@ -67,12 +78,6 @@ class _BaseSensor(CoordinatorEntity, SensorEntity):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("schedule")
-
-    @property
-    def _ev_schedule(self) -> EVSchedule | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("ev_schedule")
 
     def _current_slot(self):
         schedule = self._schedule
@@ -232,41 +237,6 @@ class CurrentSellPriceSensor(_BaseSensor):
     def native_value(self) -> float | None:
         slot = self._current_price_slot()
         return round(slot.sell_eur_kwh, 4) if slot else None
-
-
-class EVChargingSensor(_BaseSensor):
-    _attr_name = "sunSale EV Charging"
-    _attr_icon = "mdi:ev-station"
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "ev_charging")
-
-    @property
-    def native_value(self) -> str:
-        ev_schedule = self._ev_schedule
-        if not ev_schedule or not ev_schedule.slots:
-            return "off"
-        now = datetime.now(timezone.utc)
-        current = next(
-            (s for s in ev_schedule.slots if s.start <= now < s.end),
-            None,
-        )
-        return "on" if current and current.charge_power_kw > 0 else "off"
-
-
-class EVChargeCostSensor(_BaseSensor):
-    _attr_name = "sunSale EV Charge Cost"
-    _attr_native_unit_of_measurement = "EUR"
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:cash"
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "ev_charge_cost")
-
-    @property
-    def native_value(self) -> float:
-        ev_schedule = self._ev_schedule
-        return round(ev_schedule.total_cost_eur, 4) if ev_schedule else 0.0
 
 
 class ScheduleSensor(_BaseSensor):
@@ -496,3 +466,118 @@ class CalculationPipelineSensor(_BaseSensor):
                 for s in calc.slots
             ],
         }
+
+
+class _BaseloadSensor(_BaseSensor):
+    """Mixin: pull BaseLoadProfile / BatteryRuntimeEstimate from coordinator data."""
+
+    @property
+    def _profile(self) -> BaseLoadProfile | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("base_load_profile")
+
+    @property
+    def _runtime(self) -> BatteryRuntimeEstimate | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("battery_runtime")
+
+
+class CurrentBaseloadSensor(_BaseloadSensor):
+    _attr_name = "sunSale Current Baseload"
+    _attr_native_unit_of_measurement = "kW"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:home-lightning-bolt"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "current_baseload")
+
+    @property
+    def native_value(self) -> float | None:
+        profile = self._profile
+        if profile is None:
+            return None
+        local_tz = self.coordinator._sun_sale_config.local_tz
+        return round(profile.at(datetime.now(timezone.utc), local_tz), 3)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        profile = self._profile
+        if profile is None:
+            return {}
+        return {
+            "fallback_kw": round(profile.fallback_kw, 3),
+            "overall_p10_kw": round(profile.overall_p10_kw, 3),
+            "overall_median_kw": round(profile.overall_median_kw, 3),
+            "confidence": profile.confidence,
+            "sample_count": profile.sample_count,
+            "distinct_days": profile.distinct_days,
+            "slots": [
+                {
+                    "hour": s.hour,
+                    "baseload_kw": round(s.baseload_kw, 3),
+                    "sample_count": s.sample_count,
+                    "is_fallback": s.is_fallback,
+                }
+                for s in profile.slots
+            ],
+        }
+
+
+class BatteryRuntimeMinutesSensor(_BaseloadSensor):
+    _attr_name = "sunSale Battery Runtime"
+    _attr_native_unit_of_measurement = "min"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:timer-sand"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "battery_runtime_minutes")
+
+    @property
+    def native_value(self) -> float | None:
+        runtime = self._runtime
+        if runtime is None or runtime.runtime_minutes is None:
+            return None
+        return round(runtime.runtime_minutes, 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        runtime = self._runtime
+        if runtime is None:
+            return {}
+        return {
+            "remaining_kwh_usable": round(runtime.remaining_kwh_usable, 3),
+            "avg_drain_kw_next_hour": round(runtime.avg_drain_kw_next_hour, 3),
+            "horizon_hours": runtime.horizon_hours,
+            "computed_at": runtime.computed_at.isoformat(),
+        }
+
+
+class BatteryDrainUntilSensor(_BaseloadSensor):
+    _attr_name = "sunSale Battery Drain Until"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "battery_drain_until")
+
+    @property
+    def native_value(self) -> datetime | None:
+        runtime = self._runtime
+        return runtime.until if runtime else None
+
+
+class BaseloadConfidenceSensor(_BaseloadSensor):
+    _attr_name = "sunSale Baseload Confidence"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:gauge"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "baseload_confidence")
+
+    @property
+    def native_value(self) -> float | None:
+        profile = self._profile
+        if profile is None or profile.confidence is None:
+            return None
+        return round(profile.confidence, 3)

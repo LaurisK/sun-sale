@@ -30,9 +30,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     data = coordinator.data or {}
 
     schedule = data.get("schedule")
-    ev_schedule = data.get("ev_schedule")
     battery_state = data.get("battery_state")
-    ev_state = data.get("ev_state")
     pricing = data.get("pricing")
     forecast = data.get("forecast")
     calculation = data.get("calculation")
@@ -62,12 +60,6 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 dataclasses.asdict(coordinator.tariff_config)
                 if coordinator.tariff_config is not None else None
             ),
-            "ev": {
-                "plugged_in": ev_state.is_plugged_in,
-                "soc": ev_state.soc,
-                "target_soc": ev_state.target_soc,
-                "departure_time": ev_state.departure_time.isoformat() if ev_state.departure_time else None,
-            } if ev_state is not None else None,
         },
         "pipeline": {
             "pricing": {
@@ -137,19 +129,6 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 ],
                 "total_expected_profit_eur": schedule.total_expected_profit_eur,
             } if schedule is not None else None,
-            "ev_schedule": {
-                "slots": [
-                    {
-                        "start": s.start.isoformat(),
-                        "end": s.end.isoformat(),
-                        "charge_power_kw": s.charge_power_kw,
-                        "cost_eur": s.cost_eur,
-                    }
-                    for s in ev_schedule.slots
-                ],
-                "total_cost_eur": ev_schedule.total_cost_eur,
-                "total_energy_kwh": ev_schedule.total_energy_kwh,
-            } if ev_schedule is not None else None,
         },
         "last_dispatched_action": coordinator.last_dispatched_action,
         "last_dispatched_at": (

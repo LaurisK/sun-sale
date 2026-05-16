@@ -33,7 +33,7 @@ def run(prices, gen=None, battery_state=None):
     ps = build_price_series(prices, default_tariff_config(), now=NOW)
     g = gen or _empty_gen()
     bs = battery_state or default_battery_state()
-    return calculate(ps, g, bs, None, NOW)
+    return calculate(ps, g, bs, NOW)
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ def test_negative_sell_window_flagged():
     prices = [make_price(h, 0.05 if 10 <= h < 14 else 0.30) for h in range(24)]
     ps = build_price_series(prices, tc, now=NOW)
     gen = _gen_series({h: 2.0 for h in range(10, 14)})
-    result = calculate(ps, gen, default_battery_state(), None, NOW)
+    result = calculate(ps, gen, default_battery_state(), NOW)
 
     locked = [s for s in result.slots if not s.sell_allowed]
     assert len(locked) == 4
@@ -88,7 +88,7 @@ def test_negative_sell_window_production_reported():
     prices = [make_price(h, 0.05 if 10 <= h < 12 else 0.30) for h in range(24)]
     ps = build_price_series(prices, tc, now=NOW)
     gen = _gen_series({10: 1.5, 11: 2.5})
-    result = calculate(ps, gen, default_battery_state(), None, NOW)
+    result = calculate(ps, gen, default_battery_state(), NOW)
 
     neg_slots = [s for s in result.slots if s.expected_solar_negative_sale_kwh > 0]
     assert len(neg_slots) == 2
@@ -100,7 +100,7 @@ def test_lockout_windows_coalesced():
     tc = _make_negative_sell_config()
     prices = [make_price(h, 0.05 if 10 <= h < 13 else 0.30) for h in range(24)]
     ps = build_price_series(prices, tc, now=NOW)
-    result = calculate(ps, _empty_gen(), default_battery_state(), None, NOW)
+    result = calculate(ps, _empty_gen(), default_battery_state(), NOW)
     assert len(result.feed_in_lockout_windows) == 1
     w = result.feed_in_lockout_windows[0]
     assert w[0].hour == 10
@@ -116,7 +116,7 @@ def test_non_contiguous_lockouts_separate_windows():
         for h in range(24)
     ]
     ps = build_price_series(prices, tc, now=NOW)
-    result = calculate(ps, _empty_gen(), default_battery_state(), None, NOW)
+    result = calculate(ps, _empty_gen(), default_battery_state(), NOW)
     assert len(result.feed_in_lockout_windows) == 2
 
 
@@ -133,7 +133,7 @@ def test_battery_full_during_lockout_note():
     bs = BatteryState(soc=0.95, estimated_capacity_kwh=10.0)
     # Solar produces 2 kWh > 0.5 kWh headroom
     gen = _gen_series({10: 2.0})
-    result = calculate(ps, gen, bs, None, NOW)
+    result = calculate(ps, gen, bs, NOW)
     slot_10 = next(s for s in result.slots if s.start.hour == 10)
     assert "battery_full_during_lockout" in slot_10.notes
 
@@ -145,7 +145,7 @@ def test_no_battery_full_note_when_headroom_sufficient():
     ps = build_price_series(prices, tc, now=NOW)
     bs = BatteryState(soc=0.50, estimated_capacity_kwh=10.0)  # 5 kWh headroom
     gen = _gen_series({10: 2.0})  # well within headroom
-    result = calculate(ps, gen, bs, None, NOW)
+    result = calculate(ps, gen, bs, NOW)
     slot_10 = next(s for s in result.slots if s.start.hour == 10)
     assert "battery_full_during_lockout" not in slot_10.notes
 
@@ -163,7 +163,7 @@ def test_paid_to_charge_note_on_negative_buy():
     )
     prices = [make_price(5, -0.05), make_price(6, 0.10)]
     ps = build_price_series(prices, tc, now=NOW)
-    result = calculate(ps, _empty_gen(), default_battery_state(), None, NOW)
+    result = calculate(ps, _empty_gen(), default_battery_state(), NOW)
     slot_5 = next(s for s in result.slots if s.start.hour == 5)
     assert "paid_to_charge" in slot_5.notes
 
@@ -185,7 +185,7 @@ def test_expected_solar_kwh_always_reported():
     prices = [make_price(10, 0.05)]  # locked out
     ps = build_price_series(prices, tc, now=NOW)
     gen = _gen_series({10: 3.0})
-    result = calculate(ps, gen, default_battery_state(), None, NOW)
+    result = calculate(ps, gen, default_battery_state(), NOW)
     slot_10 = next(s for s in result.slots if s.start.hour == 10)
     assert abs(slot_10.expected_solar_kwh - 3.0) < 1e-9
     assert abs(slot_10.expected_solar_negative_sale_kwh - 3.0) < 1e-9

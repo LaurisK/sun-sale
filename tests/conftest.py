@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ---------------------------------------------------------------------------
 # Stub the homeassistant package so HA-dependent modules can be imported
 # without a real HA installation. Pure-Python modules (models, tariff, battery,
-# optimizer, ev_scheduler) never touch these stubs at runtime.
+# optimizer) never touch these stubs at runtime.
 # ---------------------------------------------------------------------------
 
 class _AutoMockModule(ModuleType):
@@ -192,8 +192,6 @@ from custom_components.sun_sale.contract.models import (
     Action,
     BatteryConfig,
     BatteryState,
-    EVChargerConfig,
-    EVChargerState,
     PriceEntry,
     SolarForecast,
     TariffConfig,
@@ -248,11 +246,3 @@ def default_battery_config() -> BatteryConfig:
 
 def default_battery_state(soc: float = 0.50) -> BatteryState:
     return BatteryState(soc=soc, estimated_capacity_kwh=10.0)
-
-
-def default_ev_config() -> EVChargerConfig:
-    return EVChargerConfig(
-        max_charge_power_kw=7.4,
-        min_charge_power_kw=1.4,
-        battery_capacity_kwh=60.0,
-    )

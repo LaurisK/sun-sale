@@ -19,9 +19,3 @@ class InverterActionEvent(ControlEvent):
     """Emitted by OptimizerNode when the current-slot action changes."""
     action: Action
     power_kw: float
-
-
-@dataclass(frozen=True)
-class EVActionEvent(ControlEvent):
-    """Emitted by EVSchedulerNode when the current EV charge action changes."""
-    charge_power_kw: float  # 0.0 = stop charging

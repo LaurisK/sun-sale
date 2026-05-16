@@ -2,7 +2,7 @@
 
 Each translator is independent; they run in parallel before the DAG starts.
 All HA reads are isolated here; no other module reads hass.states directly
-(except output adapters in inverter.py / ev_charger.py).
+(except output adapters in inverter.py).
 """
 from __future__ import annotations
 
@@ -10,20 +10,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..contract.const import (
-    CONF_EV_ENTITY_DEPARTURE_TIME,
-    CONF_EV_ENTITY_TARGET_SOC,
-    CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
-    CONF_NORDPOOL_ENTITY,
-    CONF_SOLAR_FORECAST_ENTITY,
-    CONF_SOLAR_FORECAST_ENTITY_2,
-    DEFAULT_EV_TARGET_SOC,
-)
-from ..outbound.ev_charger import EVChargerController
 from ..outbound.inverter import InverterController
 from ..contract.models import (
     BatteryReading,
-    EVChargerState,
+    GenerationReading,
     NordpoolData,
     PriceEntry,
     SolarData,
@@ -329,57 +319,40 @@ def _read_household_load(hass: Any, entity_id: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# EV translator
+# Generation translator
 # ---------------------------------------------------------------------------
 
-class EVTranslator:
-    """Reads EV charger state from HA; produces EVChargerState.
+class GenerationTranslator:
+    """Reads the inverter today-total generation sensor; produces GenerationReading.
 
-    Only registered when EV is enabled. Returns None (skipped) when EV unavailable.
+    The sensor is a cumulative kWh counter that resets at local midnight; this
+    translator only takes a snapshot. Differencing across samples is done by
+    the inbound/generation.py assembly after the coordinator stitches the
+    persisted history.
     """
 
-    output_type = EVChargerState
+    output_type = GenerationReading
 
-    def __init__(
-        self,
-        ev_charger: EVChargerController,
-        target_soc_entity: str,
-        departure_entity: str,
-    ) -> None:
-        self._ev_charger = ev_charger
-        self._target_soc_entity = target_soc_entity
-        self._departure_entity = departure_entity
+    def __init__(self, entity_id: str) -> None:
+        self._entity_id = entity_id
+
+    def parse(self, hass: Any, now: datetime | None = None) -> GenerationReading | None:
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if not self._entity_id:
+            return None
+        state = hass.states.get(self._entity_id)
+        if state is None or state.state in ("unavailable", "unknown", ""):
+            return None
+        try:
+            value = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        return GenerationReading(today_total_kwh=value, timestamp=now)
 
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
-    ) -> EVChargerState:
-        is_plugged = self._ev_charger.is_plugged_in()
-        soc = self._ev_charger.get_ev_soc()
+    ) -> GenerationReading | None:
+        return self.parse(hass, now)
 
-        target_soc = DEFAULT_EV_TARGET_SOC
-        if self._target_soc_entity:
-            ts = hass.states.get(self._target_soc_entity)
-            if ts and ts.state not in ("unavailable", "unknown", ""):
-                try:
-                    val = float(ts.state)
-                    target_soc = val / 100.0 if val > 1.0 else val
-                except ValueError:
-                    pass
 
-        departure_time: datetime | None = None
-        if self._departure_entity:
-            ds = hass.states.get(self._departure_entity)
-            if ds and ds.state not in ("unavailable", "unknown", ""):
-                try:
-                    departure_time = datetime.fromisoformat(ds.state).replace(
-                        tzinfo=timezone.utc
-                    )
-                except ValueError:
-                    pass
-
-        return EVChargerState(
-            is_plugged_in=is_plugged,
-            soc=soc if soc is not None else 0.5,
-            target_soc=target_soc,
-            departure_time=departure_time,
-        )
