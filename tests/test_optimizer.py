@@ -1,11 +1,11 @@
 """Tests for optimizer.py — pure Python, no HA required."""
 from datetime import datetime, timedelta, timezone
 import pytest
-from custom_components.sun_sale.battery import degradation_cost_per_kwh
-from custom_components.sun_sale.calculator import calculate
-from custom_components.sun_sale.models import Action, GenerationSeries, GenerationSlot, SolarForecast
-from custom_components.sun_sale.optimizer import _simulate_soc, optimize_schedule
-from custom_components.sun_sale.pricing import build_price_series
+from custom_components.sun_sale.pipeline.battery import degradation_cost_per_kwh
+from custom_components.sun_sale.pipeline.calculator import calculate
+from custom_components.sun_sale.contract.models import Action, GenerationSeries, GenerationSlot, SolarForecast
+from custom_components.sun_sale.pipeline.optimizer import _simulate_soc, optimize_schedule
+from custom_components.sun_sale.inbound.pricing import build_price_series
 from tests.conftest import (
     BASE_DT,
     default_battery_config,
@@ -204,9 +204,9 @@ def test_simulate_soc_returns_none_on_underflow():
 
 def _run_with_negative_sell_window(locked_hours: list[int]) -> "Schedule":
     """Run optimizer with some hours marked sell_allowed=False."""
-    from custom_components.sun_sale.models import TariffConfig
-    from custom_components.sun_sale.calculator import calculate
-    from custom_components.sun_sale.pricing import build_price_series
+    from custom_components.sun_sale.contract.models import TariffConfig
+    from custom_components.sun_sale.pipeline.calculator import calculate
+    from custom_components.sun_sale.inbound.pricing import build_price_series
 
     # High sell fee makes sell_eur_kwh negative for hours with low spot price
     tc = TariffConfig(
@@ -218,7 +218,7 @@ def _run_with_negative_sell_window(locked_hours: list[int]) -> "Schedule":
     bc = default_battery_config()
     state = default_battery_state(0.50)
     state.estimated_capacity_kwh = bc.nominal_capacity_kwh
-    from custom_components.sun_sale.battery import degradation_cost_per_kwh
+    from custom_components.sun_sale.pipeline.battery import degradation_cost_per_kwh
     deg = degradation_cost_per_kwh(bc, state)
 
     ps = build_price_series(prices, tc, now=NOW)
@@ -239,10 +239,10 @@ def test_no_discharge_inside_lockout_window():
 
 def test_discharge_allowed_outside_lockout_window():
     """Only hour 12 locked; a profitable trade can still occur at other hours."""
-    from custom_components.sun_sale.models import TariffConfig
-    from custom_components.sun_sale.calculator import calculate
-    from custom_components.sun_sale.pricing import build_price_series
-    from custom_components.sun_sale.battery import degradation_cost_per_kwh
+    from custom_components.sun_sale.contract.models import TariffConfig
+    from custom_components.sun_sale.pipeline.calculator import calculate
+    from custom_components.sun_sale.inbound.pricing import build_price_series
+    from custom_components.sun_sale.pipeline.battery import degradation_cost_per_kwh
 
     # Zero fees so buy ≈ spot, sell ≈ spot; gives large spread
     tc = TariffConfig(

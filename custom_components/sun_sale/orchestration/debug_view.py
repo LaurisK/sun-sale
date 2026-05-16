@@ -8,7 +8,7 @@ from typing import Any
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 
-from .const import CONF_SOLAR_FORECAST_ENTITY, CONF_SOLAR_FORECAST_ENTITY_2, CONF_NORDPOOL_ENTITY, DOMAIN
+from ..contract.const import CONF_SOLAR_FORECAST_ENTITY, CONF_SOLAR_FORECAST_ENTITY_2, CONF_NORDPOOL_ENTITY, DOMAIN
 
 
 class SunSaleDebugView(HomeAssistantView):

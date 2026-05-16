@@ -18,12 +18,12 @@ from datetime import datetime
 
 from . import battery as battery_module
 from . import calculator, ev_scheduler, optimizer
-from . import forecast as forecast_module
-from . import pricing as pricing_module
-from . import dashboard as dashboard_module
+from ..inbound import forecast as forecast_module
+from ..inbound import pricing as pricing_module
+from ..outbound import dashboard as dashboard_module
 from .dag_engine import DagNode, NodeContext
-from .events import ControlEvent, EVActionEvent, InverterActionEvent
-from .models import (
+from ..contract.events import ControlEvent, EVActionEvent, InverterActionEvent
+from ..contract.models import (
     Action,
     BatteryConfig,
     BatteryReading,
@@ -36,10 +36,11 @@ from .models import (
     EVChargerState,
     EVSchedule,
     GenerationSeries,
-    NordpoolPrices,
+    NordpoolData,
     PriceSeries,
-    RawSolarData,
+    SolarData,
     Schedule,
+    YesterdayPrices,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,16 +51,17 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class PricingNode(DagNode):
-    """Apply tariff formulas to Nordpool raw prices → PriceSeries."""
+    """Assemble 72h yesterday→today→tomorrow PriceSeries with tariff applied."""
 
     tier = 1
     output_type = PriceSeries
-    consumes = [NordpoolPrices]
+    consumes = [NordpoolData, YesterdayPrices]
 
     async def _compute(self, ctx: NodeContext) -> tuple[PriceSeries, list[ControlEvent]]:
-        nordpool = ctx.require(NordpoolPrices)
-        series = pricing_module.build_price_series(
-            nordpool.slots, ctx.config.tariff, now=ctx.now
+        nordpool = ctx.require(NordpoolData)
+        yesterday = ctx.require(YesterdayPrices)
+        series = pricing_module.build_price_series_72h(
+            nordpool, yesterday, ctx.config.tariff, now=ctx.now
         )
         return series, []
 
@@ -82,18 +84,18 @@ class BatteryStateNode(DagNode):
 # ---------------------------------------------------------------------------
 
 class GenerationNode(DagNode):
-    """Normalise RawSolarData into GenerationSeries aligned to PriceSeries resolution."""
+    """Normalise SolarData into GenerationSeries aligned to PriceSeries resolution."""
 
     tier = 2
     output_type = GenerationSeries
-    consumes = [RawSolarData, PriceSeries]
+    consumes = [SolarData, PriceSeries]
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[GenerationSeries, list[ControlEvent]]:
-        raw = ctx.require(RawSolarData)
+        solar = ctx.require(SolarData)
         price_series = ctx.require(PriceSeries)
-        gen = forecast_module.build_generation_series(raw, price_series, now=ctx.now)
+        gen = forecast_module.build_generation_series(solar, price_series, now=ctx.now)
         return gen, []
 
 
@@ -235,13 +237,13 @@ class DashboardNode(DagNode):
 
     tier = 5
     output_type = DashboardData
-    consumes = [NordpoolPrices, RawSolarData, BatteryReading, PriceSeries, GenerationSeries, Schedule]
+    consumes = [NordpoolData, SolarData, BatteryReading, PriceSeries, GenerationSeries, Schedule]
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[DashboardData, list[ControlEvent]]:
-        nordpool = ctx.require(NordpoolPrices)
-        solar = ctx.require(RawSolarData)
+        nordpool = ctx.require(NordpoolData)
+        solar = ctx.require(SolarData)
         reading = ctx.require(BatteryReading)
         schedule: Schedule | None = ctx.get(Schedule)
 

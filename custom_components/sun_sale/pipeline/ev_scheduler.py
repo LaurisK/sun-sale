@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from .models import EVChargeSlot, EVChargerConfig, EVChargerState, EVSchedule, PriceSeries, PriceSlot
+from ..contract.models import EVChargeSlot, EVChargerConfig, EVChargerState, EVSchedule, PriceSeries, PriceSlot
 
 
 def schedule_ev_charge(

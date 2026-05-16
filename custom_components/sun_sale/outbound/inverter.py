@@ -10,7 +10,7 @@ from enum import Enum
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .models import BatteryConfig
+from ..contract.models import BatteryConfig
 
 
 class InverterPlatform(Enum):

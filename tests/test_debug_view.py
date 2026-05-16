@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from custom_components.sun_sale.debug_view import SunSaleDebugView, _coordinator_to_dict
-from custom_components.sun_sale.models import (
+from custom_components.sun_sale.orchestration.debug_view import SunSaleDebugView, _coordinator_to_dict
+from custom_components.sun_sale.contract.models import (
     Action,
     BatteryState,
     CalculationResult,
@@ -20,7 +20,7 @@ from custom_components.sun_sale.models import (
     SlotDecision,
     TariffConfig,
 )
-from custom_components.sun_sale.pricing import build_price_series
+from custom_components.sun_sale.inbound.pricing import build_price_series
 from tests.conftest import BASE_DT, default_tariff_config, make_price
 
 BASE = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)

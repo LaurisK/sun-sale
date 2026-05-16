@@ -4,7 +4,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.sun_sale import async_setup_entry, async_unload_entry
-from custom_components.sun_sale.const import DOMAIN
+from custom_components.sun_sale.contract.const import DOMAIN
 
 
 def make_hass(domain_data: dict | None = None) -> MagicMock:

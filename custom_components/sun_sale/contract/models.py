@@ -15,8 +15,8 @@ class Action(Enum):
 
 
 @dataclass(frozen=True)
-class HourlyPrice:
-    """Nordpool spot price for one hour."""
+class PriceEntry:
+    """Nordpool spot price for one time slot."""
     start: datetime
     end: datetime
     price_eur_kwh: float
@@ -178,6 +178,15 @@ class GenerationSlot:
 
 
 @dataclass(frozen=True)
+class SolarEntry:
+    """Solar generation for one time slot, any source."""
+    start: datetime
+    end: datetime
+    expected_kwh: float
+    source: str    # "open_meteo" | "forecast_solar"
+
+
+@dataclass(frozen=True)
 class GenerationSeries:
     """Normalised generation forecast from one or more sources."""
     slots: tuple[GenerationSlot, ...]
@@ -226,17 +235,28 @@ class CalculationResult:
 # ---------------------------------------------------------------------------
 
 @dataclass
-class NordpoolPrices:
-    """Primary data: Nordpool prices at configured resolution + raw 15-min dict."""
-    slots: list[HourlyPrice]            # at configured resolution (for PricingNode)
-    raw_15min: dict[datetime, float]    # always 15-min spot prices EUR/kWh (for DashboardNode)
+class NordpoolData:
+    """Primary data: Nordpool prices for today + tomorrow as read from HA."""
+    entries: list[PriceEntry]    # sorted by start; auto-detected resolution
+    resolution: timedelta        # 15min or 1h, detected from data
+
+
+@dataclass(frozen=True)
+class YesterdayPrices:
+    """Primary data: yesterday's Nordpool prices loaded from persistent storage.
+
+    Combined with NordpoolData by inbound/pricing to form the 72h PriceSeries.
+    """
+    entries: tuple[PriceEntry, ...]  # sorted by start; empty on first cycle
 
 
 @dataclass
-class RawSolarData:
-    """Primary data: raw solar forecast from HA entities."""
-    watts: dict[datetime, float]        # Open Meteo: {slot_utc: W}
-    forecast_slots: list[dict]          # Forecast.Solar: [{time, pv_estimate/energy, ...}]
+class SolarData:
+    """Primary data: unified solar forecast for yesterday + today + tomorrow."""
+    entries: list[SolarEntry]        # sorted by start, all panels combined
+    total_today_kwh: float           # sum of expected_kwh for today's slots
+    today_remaining_kwh: float       # sum of today's slots with start >= now
+    primary_source: str              # "open_meteo" | "forecast_solar" | "none"
 
 
 @dataclass(frozen=True)

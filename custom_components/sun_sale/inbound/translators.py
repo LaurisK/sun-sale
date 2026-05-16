@@ -10,25 +10,24 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .const import (
+from ..contract.const import (
     CONF_EV_ENTITY_DEPARTURE_TIME,
     CONF_EV_ENTITY_TARGET_SOC,
     CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
     CONF_NORDPOOL_ENTITY,
-    CONF_NORDPOOL_RESOLUTION,
     CONF_SOLAR_FORECAST_ENTITY,
     CONF_SOLAR_FORECAST_ENTITY_2,
     DEFAULT_EV_TARGET_SOC,
-    DEFAULT_NORDPOOL_RESOLUTION,
 )
-from .ev_charger import EVChargerController
-from .inverter import InverterController
-from .models import (
+from ..outbound.ev_charger import EVChargerController
+from ..outbound.inverter import InverterController
+from ..contract.models import (
     BatteryReading,
     EVChargerState,
-    HourlyPrice,
-    NordpoolPrices,
-    RawSolarData,
+    NordpoolData,
+    PriceEntry,
+    SolarData,
+    SolarEntry,
     SunSaleConfig,
 )
 
@@ -38,29 +37,90 @@ _DEFAULT_HOUSEHOLD_LOAD_KW = 0.2
 
 
 # ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+def _zero_fill_tomorrow(entries: list[PriceEntry], resolution: timedelta, now: datetime) -> list[PriceEntry]:
+    """Append zero-price entries for tomorrow if tomorrow has no entries yet."""
+    tomorrow_date = (now + timedelta(days=1)).date()
+    has_tomorrow = any(e.start.date() == tomorrow_date for e in entries)
+    if has_tomorrow:
+        return entries
+
+    tomorrow_start = datetime(
+        tomorrow_date.year, tomorrow_date.month, tomorrow_date.day,
+        0, 0, 0, tzinfo=timezone.utc,
+    )
+    slots_per_day = 96 if resolution <= timedelta(minutes=15) else 24
+    zero_entries = [
+        PriceEntry(
+            start=tomorrow_start + i * resolution,
+            end=tomorrow_start + (i + 1) * resolution,
+            price_eur_kwh=0.0,
+        )
+        for i in range(slots_per_day)
+    ]
+    return entries + zero_entries
+
+
+def _watts_to_solar_entries(watts: dict[datetime, float]) -> list[SolarEntry]:
+    """Convert {slot_utc: W} dict to SolarEntry list, detecting slot duration."""
+    sorted_ts = sorted(watts.keys())
+    if len(sorted_ts) >= 2:
+        slot_dur = sorted_ts[1] - sorted_ts[0]
+    else:
+        slot_dur = timedelta(hours=1)
+    slot_h = slot_dur.total_seconds() / 3600.0
+    return [
+        SolarEntry(
+            start=ts,
+            end=ts + slot_dur,
+            expected_kwh=round(w * slot_h / 1000.0, 6),
+            source="open_meteo",
+        )
+        for ts in sorted_ts
+        for w in (watts[ts],)
+    ]
+
+
+def _make_solar_data(entries: list[SolarEntry], source: str, now: datetime) -> SolarData:
+    today = now.date()
+    total_today = sum(e.expected_kwh for e in entries if e.start.date() == today)
+    remaining = sum(e.expected_kwh for e in entries if e.start.date() == today and e.start >= now)
+    return SolarData(
+        entries=entries,
+        total_today_kwh=round(total_today, 4),
+        today_remaining_kwh=round(remaining, 4),
+        primary_source=source,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Nordpool translator
 # ---------------------------------------------------------------------------
 
 class NordpoolTranslator:
-    """Reads Nordpool sensor and produces NordpoolPrices.
+    """Reads Nordpool sensor; produces NordpoolData for today + tomorrow.
 
-    Produces:
-      - slots: list[HourlyPrice] at configured resolution (15min or hourly)
-      - raw_15min: dict[datetime, float] always at 15-min granularity for dashboard use
+    Resolution is auto-detected from the sensor data (15min or 1h).
+    Tomorrow entries are zero-filled when not yet published.
+    Coordinator prepends yesterday entries from persistent store.
     """
 
-    output_type = NordpoolPrices
+    output_type = NordpoolData
 
-    def __init__(self, entity_id: str, resolution: str) -> None:
+    def __init__(self, entity_id: str) -> None:
         self._entity_id = entity_id
-        self._resolution = resolution
 
-    def parse(self, hass: Any) -> NordpoolPrices:
-        """Parse Nordpool state into NordpoolPrices. Sync; callable from tests."""
+    def parse(self, hass: Any, now: datetime | None = None) -> NordpoolData:
+        """Parse Nordpool state into NordpoolData (today + tomorrow). Sync; callable from tests."""
+        if now is None:
+            now = datetime.now(timezone.utc)
+
         state = hass.states.get(self._entity_id)
         if state is None:
             _LOGGER.warning("Nordpool entity '%s' not found", self._entity_id)
-            return NordpoolPrices(slots=[], raw_15min={})
+            return NordpoolData(entries=[], resolution=timedelta(hours=1))
 
         raw_entries: list[dict] = []
         for attr_key in ("raw_today", "raw_tomorrow"):
@@ -69,12 +129,11 @@ class NordpoolTranslator:
                 raw_entries.extend(raw)
 
         if raw_entries:
-            return self._parse_raw_entries(raw_entries)
+            return self._parse_raw_entries(raw_entries, now)
 
-        # Legacy: flat list of hourly prices
-        return self._parse_legacy(state)
+        return self._parse_legacy(state, now)
 
-    def _parse_raw_entries(self, raw_entries: list[dict]) -> NordpoolPrices:
+    def _parse_raw_entries(self, raw_entries: list[dict], now: datetime) -> NordpoolData:
         parsed: list[tuple[datetime, float]] = []
         for entry in raw_entries:
             try:
@@ -95,34 +154,17 @@ class NordpoolTranslator:
                 unique.append(item)
 
         if not unique:
-            return NordpoolPrices(slots=[], raw_15min={})
+            return NordpoolData(entries=[], resolution=timedelta(hours=1))
 
-        slot_dur = (unique[1][0] - unique[0][0]) if len(unique) >= 2 else timedelta(hours=1)
-        raw_15min = {s: p for s, p in unique}
+        resolution = (unique[1][0] - unique[0][0]) if len(unique) >= 2 else timedelta(hours=1)
+        entries = [PriceEntry(start=s, end=s + resolution, price_eur_kwh=p) for s, p in unique]
+        entries = _zero_fill_tomorrow(entries, resolution, now)
+        return NordpoolData(entries=entries, resolution=resolution)
 
-        if self._resolution == "hourly" and slot_dur < timedelta(hours=1):
-            hourly: dict[datetime, list[float]] = {}
-            for start_utc, price in unique:
-                hour = start_utc.replace(minute=0)
-                hourly.setdefault(hour, []).append(price)
-            slots = [
-                HourlyPrice(start=h, end=h + timedelta(hours=1),
-                            price_eur_kwh=sum(vals) / len(vals))
-                for h, vals in sorted(hourly.items())
-            ]
-        else:
-            slots = [
-                HourlyPrice(start=s, end=s + slot_dur, price_eur_kwh=p)
-                for s, p in unique
-            ]
-
-        return NordpoolPrices(slots=slots, raw_15min=raw_15min)
-
-    def _parse_legacy(self, state: Any) -> NordpoolPrices:
+    def _parse_legacy(self, state: Any, now: datetime) -> NordpoolData:
         """Legacy format: flat list of up to 24 hourly prices per day."""
-        now = datetime.now(timezone.utc)
-        slots: list[HourlyPrice] = []
-        raw_15min: dict[datetime, float] = {}
+        resolution = timedelta(hours=1)
+        entries: list[PriceEntry] = []
         for offset, attr_key in enumerate(("today", "tomorrow")):
             raw = state.attributes.get(attr_key)
             if not isinstance(raw, list):
@@ -135,16 +177,17 @@ class NordpoolTranslator:
                     base_date.year, base_date.month, base_date.day,
                     hour_idx, 0, 0, tzinfo=timezone.utc,
                 )
-                hp = HourlyPrice(start=start, end=start + timedelta(hours=1),
-                                 price_eur_kwh=float(price))
-                slots.append(hp)
-                raw_15min[start] = float(price)
-        return NordpoolPrices(slots=slots, raw_15min=raw_15min)
+                entries.append(PriceEntry(start=start, end=start + resolution, price_eur_kwh=float(price)))
+
+        if not entries:
+            return NordpoolData(entries=[], resolution=resolution)
+        entries = _zero_fill_tomorrow(entries, resolution, now)
+        return NordpoolData(entries=entries, resolution=resolution)
 
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
-    ) -> NordpoolPrices:
-        return self.parse(hass)
+    ) -> NordpoolData:
+        return self.parse(hass, now)
 
 
 # ---------------------------------------------------------------------------
@@ -160,21 +203,27 @@ def _tomorrow_entity(entity_id: str) -> str:
 
 
 class SolarTranslator:
-    """Reads solar forecast from HA entities and produces RawSolarData.
+    """Reads solar forecast from HA entities; produces SolarData.
 
-    Tries Open Meteo (watts attribute) first across both entity IDs (today + tomorrow).
-    Falls back to Forecast.Solar / Solcast (forecast attribute) for entity_1 only.
+    Tries Open Meteo (watts attribute) first across all entity IDs (today + tomorrow).
+    Falls back to Forecast.Solar / Solcast (forecast attribute).
+    Multiple panels (entity_1, entity_2) are combined by summing at each timestamp.
+    Coordinator prepends yesterday entries from persistent store.
     """
 
-    output_type = RawSolarData
+    output_type = SolarData
 
     def __init__(self, entity_1: str, entity_2: str) -> None:
         self._entity_1 = entity_1
         self._entity_2 = entity_2
 
-    def parse(self, hass: Any) -> RawSolarData:
-        """Parse solar state into RawSolarData. Sync; callable from tests."""
-        watts: dict[datetime, float] = {}
+    def parse(self, hass: Any, now: datetime | None = None) -> SolarData:
+        """Parse solar state into SolarData. Sync; callable from tests."""
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        # --- Open Meteo: collect watts from all entities and their tomorrow counterparts ---
+        combined_watts: dict[datetime, float] = {}
         for base_eid in (self._entity_1, self._entity_2):
             if not base_eid:
                 continue
@@ -193,26 +242,46 @@ class SolarTranslator:
                         if dt.tzinfo is None:
                             dt = dt.replace(tzinfo=timezone.utc)
                         slot_utc = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
-                        watts[slot_utc] = watts.get(slot_utc, 0.0) + float(w)
+                        combined_watts[slot_utc] = combined_watts.get(slot_utc, 0.0) + float(w)
                     except (ValueError, TypeError):
                         continue
 
-        if watts:
-            return RawSolarData(watts=watts, forecast_slots=[])
+        if combined_watts:
+            entries = _watts_to_solar_entries(combined_watts)
+            return _make_solar_data(entries, "open_meteo", now)
 
-        # Fallback: Forecast.Solar / Solcast
-        forecast_slots: list[dict] = []
-        if self._entity_1:
-            state = hass.states.get(self._entity_1)
-            if state is not None:
-                forecast_slots = state.attributes.get("forecast", [])
+        # --- Forecast.Solar / Solcast fallback: collect from all entities ---
+        combined_kwh: dict[datetime, float] = {}
+        for base_eid in (self._entity_1, self._entity_2):
+            if not base_eid:
+                continue
+            state = hass.states.get(base_eid)
+            if state is None:
+                continue
+            for slot in state.attributes.get("forecast", []):
+                try:
+                    dt = datetime.fromisoformat(str(slot["time"]))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    slot_utc = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+                    kwh = float(slot.get("pv_estimate", slot.get("energy", 0.0)))
+                    combined_kwh[slot_utc] = combined_kwh.get(slot_utc, 0.0) + kwh
+                except (KeyError, ValueError, TypeError):
+                    continue
 
-        return RawSolarData(watts={}, forecast_slots=list(forecast_slots))
+        if combined_kwh:
+            entries = [
+                SolarEntry(start=s, end=s + timedelta(hours=1), expected_kwh=kwh, source="forecast_solar")
+                for s, kwh in sorted(combined_kwh.items())
+            ]
+            return _make_solar_data(entries, "forecast_solar", now)
+
+        return SolarData(entries=[], total_today_kwh=0.0, today_remaining_kwh=0.0, primary_source="none")
 
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
-    ) -> RawSolarData:
-        return self.parse(hass)
+    ) -> SolarData:
+        return self.parse(hass, now)
 
 
 # ---------------------------------------------------------------------------

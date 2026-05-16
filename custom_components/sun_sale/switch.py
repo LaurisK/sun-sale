@@ -8,8 +8,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
-from .coordinator import SunSaleCoordinator
+from .contract.const import DOMAIN
+from .orchestration.coordinator import SunSaleCoordinator
 
 
 async def async_setup_entry(

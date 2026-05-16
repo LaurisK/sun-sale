@@ -1,8 +1,8 @@
 """Tests for models.py — data structure correctness."""
 from datetime import datetime, timezone, timedelta
 import pytest
-from custom_components.sun_sale.models import (
-    Action, HourlyPrice, TariffConfig, BatteryConfig, BatteryState,
+from custom_components.sun_sale.contract.models import (
+    Action, PriceEntry, TariffConfig, BatteryConfig, BatteryState,
     SolarForecast, ScheduleSlot, Schedule, EVChargerConfig, EVChargerState,
     EVChargeSlot, EVSchedule, CapacityObservation,
 )
@@ -23,8 +23,8 @@ def test_action_enum_from_value():
     assert Action("charge_from_grid") == Action.CHARGE_FROM_GRID
 
 
-def test_hourly_price_frozen():
-    hp = HourlyPrice(start=NOW, end=NOW + timedelta(hours=1), price_eur_kwh=0.10)
+def test_price_entry_frozen():
+    hp = PriceEntry(start=NOW, end=NOW + timedelta(hours=1), price_eur_kwh=0.10)
     with pytest.raises((AttributeError, TypeError)):
         hp.price_eur_kwh = 0.20  # type: ignore[misc]
 

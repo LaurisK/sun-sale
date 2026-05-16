@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import logging
 
-from .events import ControlEvent, EVActionEvent, InverterActionEvent
+from ..contract.events import ControlEvent, EVActionEvent, InverterActionEvent
 from .ev_charger import EVChargerController
 from .inverter import InverterController
-from .models import Action
+from ..contract.models import Action
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -5,8 +5,8 @@ import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from custom_components.sun_sale.inverter import InverterController, InverterPlatform
-from custom_components.sun_sale.models import BatteryConfig
+from custom_components.sun_sale.outbound.inverter import InverterController, InverterPlatform
+from custom_components.sun_sale.contract.models import BatteryConfig
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ async def test_charge_issues_correct_service_calls():
 
     fixed_now = datetime(2026, 4, 26, 10, 17, 0, tzinfo=timezone.utc)
     with patch(
-        "custom_components.sun_sale.inverter.dt_util.now",
+        "custom_components.sun_sale.outbound.inverter.dt_util.now",
         return_value=fixed_now,
     ):
         await controller.async_charge_from_grid(2.5)
@@ -124,7 +124,7 @@ async def test_charge_does_not_write_discharge_entities():
     controller, hass = make_controller()
 
     fixed_now = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.inverter.dt_util.now", return_value=fixed_now):
+    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
         await controller.async_charge_from_grid(1.0)
 
     calls = _calls_for(hass)
@@ -141,7 +141,7 @@ async def test_discharge_issues_correct_service_calls():
     controller, hass = make_controller()
 
     fixed_now = datetime(2026, 4, 26, 14, 33, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.inverter.dt_util.now", return_value=fixed_now):
+    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
         await controller.async_discharge_to_grid(2.5)
 
     calls = _calls_for(hass)
@@ -208,7 +208,7 @@ async def test_charge_power_above_max_is_clamped():
     controller, hass = make_controller(cfg)
 
     fixed_now = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.inverter.dt_util.now", return_value=fixed_now):
+    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
         await controller.async_charge_from_grid(10.0)  # 10 kW >> 3 kW cap
 
     calls = _calls_for(hass)
@@ -224,7 +224,7 @@ async def test_discharge_power_above_max_is_clamped():
     controller, hass = make_controller(cfg)
 
     fixed_now = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.inverter.dt_util.now", return_value=fixed_now):
+    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
         await controller.async_discharge_to_grid(8.0)
 
     calls = _calls_for(hass)
@@ -247,9 +247,9 @@ async def test_different_voltages_produce_different_amps_for_same_kw():
     ctrl_hv, hass_hv = make_controller(cfg_hv)
 
     fixed_now = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.inverter.dt_util.now", return_value=fixed_now):
+    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
         await ctrl_lv.async_charge_from_grid(2.5)
-    with patch("custom_components.sun_sale.inverter.dt_util.now", return_value=fixed_now):
+    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
         await ctrl_hv.async_charge_from_grid(2.5)
 
     amps_lv = _entity_value(_calls_for(hass_lv), SOLIS_ENTITY_IDS["solis_charge_current"])

@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from .battery import trade_profit_per_kwh
-from .models import (
+from ..contract.models import (
     Action,
     BatteryConfig,
     BatteryState,

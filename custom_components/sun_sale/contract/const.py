@@ -61,6 +61,7 @@ CONF_INVERTER_ENTITY_SOLAR_ENERGY = "inverter_entity_solar_energy"
 
 # Persistent storage
 STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"
+STORAGE_KEY_YESTERDAY = f"{DOMAIN}_yesterday"
 STORAGE_VERSION = 1
 
 # Update interval (minutes)

@@ -22,8 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypeVar
 
-from .events import ControlEvent
-from .models import SunSaleConfig
+from ..contract.events import ControlEvent
+from ..contract.models import SunSaleConfig
 
 _LOGGER = logging.getLogger(__name__)
 

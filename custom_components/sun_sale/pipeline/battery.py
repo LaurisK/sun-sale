@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .const import CAPACITY_OBS_MIN_SOC_DELTA
-from .models import BatteryConfig, BatteryState, CapacityObservation
+from ..contract.const import CAPACITY_OBS_MIN_SOC_DELTA
+from ..contract.models import BatteryConfig, BatteryState, CapacityObservation
 
 
 def degradation_cost_per_kwh(config: BatteryConfig, state: BatteryState) -> float:

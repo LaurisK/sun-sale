@@ -15,9 +15,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_INVERTER_ENTITY_SOLAR_ENERGY, DOMAIN
-from .coordinator import SunSaleCoordinator
-from .models import Action, CalculationResult, EVSchedule, GenerationSeries, PriceSeries, PriceSlot, Schedule
+from .contract.const import CONF_INVERTER_ENTITY_SOLAR_ENERGY, DOMAIN
+from .orchestration.coordinator import SunSaleCoordinator
+from .contract.models import Action, CalculationResult, EVSchedule, GenerationSeries, PriceSeries, PriceSlot, Schedule
 
 
 async def async_setup_entry(

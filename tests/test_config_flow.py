@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from custom_components.sun_sale.config_flow import SunSaleConfigFlow
-from custom_components.sun_sale.const import (
+from custom_components.sun_sale.contract.const import (
     CONF_BATTERY_NOMINAL_CAPACITY,
     CONF_BATTERY_PURCHASE_PRICE,
     CONF_BATTERY_RATED_CYCLE_LIFE,
@@ -22,7 +22,7 @@ from custom_components.sun_sale.const import (
     CONF_TARIFF_SELL_TAX_RATE,
     CONF_TARIFF_TAX_RATE,
 )
-from custom_components.sun_sale.inverter import InverterPlatform
+from custom_components.sun_sale.outbound.inverter import InverterPlatform
 
 VALID_TARIFF_INPUT = {
     CONF_TARIFF_DISTRIBUTION_FEE: 0.03,

@@ -15,7 +15,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
 )
 
-from .const import (
+from .contract.const import (
     CONF_BATTERY_MAX_CHARGE_POWER,
     CONF_BATTERY_MAX_DISCHARGE_POWER,
     CONF_BATTERY_MAX_SOC,
@@ -79,8 +79,8 @@ from .const import (
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
     DOMAIN,
 )
-from .ev_charger import EVChargerPlatform
-from .inverter import InverterPlatform
+from .outbound.ev_charger import EVChargerPlatform
+from .outbound.inverter import InverterPlatform
 
 INVERTER_PLATFORMS = [
     {"value": InverterPlatform.SOLIS.value, "label": "Solis (solis_modbus)"},

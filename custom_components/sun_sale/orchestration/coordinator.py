@@ -17,8 +17,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .battery import CapacityEstimator
-from .const import (
+from ..pipeline.battery import CapacityEstimator
+from ..contract.const import (
     CONF_BATTERY_MAX_CHARGE_POWER,
     CONF_BATTERY_MAX_DISCHARGE_POWER,
     CONF_BATTERY_MAX_SOC,
@@ -54,7 +54,6 @@ from .const import (
     CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH,
     CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_NORDPOOL_ENTITY,
-    CONF_NORDPOOL_RESOLUTION,
     CONF_SOLAR_FORECAST_ENTITY,
     CONF_SOLAR_FORECAST_ENTITY_2,
     CONF_TARIFF_DISTRIBUTION_FEE,
@@ -66,7 +65,6 @@ from .const import (
     CAPACITY_OBS_MIN_SOC_DELTA,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
     DEFAULT_EV_MIN_CHARGE_POWER_KW,
-    DEFAULT_NORDPOOL_RESOLUTION,
     DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     DEFAULT_SOLIS_CHARGE_CURRENT,
     DEFAULT_SOLIS_CHARGE_END_TIME_1,
@@ -78,14 +76,15 @@ from .const import (
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
     DOMAIN,
     STORAGE_KEY_CAPACITY,
+    STORAGE_KEY_YESTERDAY,
     STORAGE_VERSION,
     UPDATE_INTERVAL_MINUTES,
 )
-from .dag_engine import DagEngine, SunSaleConfig, run_translators
-from .event_router import EventRouter
-from .ev_charger import EVChargerController, EVChargerPlatform
-from .inverter import InverterController, InverterPlatform
-from .models import (
+from ..pipeline.dag_engine import DagEngine, run_translators
+from ..outbound.event_router import EventRouter
+from ..outbound.ev_charger import EVChargerController, EVChargerPlatform
+from ..outbound.inverter import InverterController, InverterPlatform
+from ..contract.models import (
     BatteryConfig,
     BatteryReading,
     BatteryState,
@@ -98,13 +97,17 @@ from .models import (
     EVChargerState,
     EVSchedule,
     GenerationSeries,
-    NordpoolPrices,
+    NordpoolData,
+    PriceEntry,
     PriceSeries,
-    RawSolarData,
+    SolarData,
+    SolarEntry,
     Schedule,
+    SunSaleConfig,
     TariffConfig,
+    YesterdayPrices,
 )
-from .nodes import (
+from ..pipeline.nodes import (
     BatteryStateNode,
     DashboardNode,
     DegradationNode,
@@ -115,7 +118,7 @@ from .nodes import (
     PricingNode,
     make_last_ref,
 )
-from .translators import (
+from ..inbound.translators import (
     BatteryTranslator,
     EVTranslator,
     NordpoolTranslator,
@@ -144,6 +147,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._translators: list = []
         self._event_router: EventRouter | None = None
         self._last_battery_reading: BatteryReading | None = None
+        self._yesterday_store: Store | None = None
+        self._yesterday_nordpool: list[PriceEntry] = []
+        self._yesterday_solar: list[SolarEntry] = []
+        self._yesterday_stored_date: str | None = None  # date string the stored entries represent
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
@@ -239,7 +246,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._translators = [
             NordpoolTranslator(
                 entity_id=data.get(CONF_NORDPOOL_ENTITY, ""),
-                resolution=data.get(CONF_NORDPOOL_RESOLUTION, DEFAULT_NORDPOOL_RESOLUTION),
             ),
             SolarTranslator(
                 entity_1=data.get(CONF_SOLAR_FORECAST_ENTITY, ""),
@@ -277,6 +283,28 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             else CapacityEstimator(battery_config.nominal_capacity_kwh)
         )
 
+        self._yesterday_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_YESTERDAY)
+        yesterday_stored = await self._yesterday_store.async_load()
+        if yesterday_stored:
+            self._yesterday_stored_date = yesterday_stored.get("date")
+            self._yesterday_nordpool = [
+                PriceEntry(
+                    start=datetime.fromisoformat(e["start"]),
+                    end=datetime.fromisoformat(e["end"]),
+                    price_eur_kwh=e["price"],
+                )
+                for e in yesterday_stored.get("nordpool", [])
+            ]
+            self._yesterday_solar = [
+                SolarEntry(
+                    start=datetime.fromisoformat(e["start"]),
+                    end=datetime.fromisoformat(e["end"]),
+                    expected_kwh=e["kwh"],
+                    source=e["source"],
+                )
+                for e in yesterday_stored.get("solar", [])
+            ]
+
     async def _async_update_data(self) -> dict:
         """One DAG cycle: translate → capacity update → DAG → event routing."""
         now = datetime.now(timezone.utc)
@@ -285,6 +313,44 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             primary = await run_translators(
                 self._translators, self.hass, self._sun_sale_config, self._config, now
             )
+
+            today_str = now.date().isoformat()
+            yesterday_str = (now.date() - timedelta(days=1)).isoformat()
+
+            nordpool_data: NordpoolData | None = primary.get(NordpoolData)
+            solar_data: SolarData | None = primary.get(SolarData)
+
+            # Pricing: pass yesterday in via a primary input; inbound.pricing
+            # owns the 72h yesterday→today→tomorrow assembly. Stored data older
+            # than yesterday is treated as empty.
+            yesterday_pricing_entries = (
+                tuple(self._yesterday_nordpool)
+                if self._yesterday_stored_date == yesterday_str
+                else ()
+            )
+            primary[YesterdayPrices] = YesterdayPrices(entries=yesterday_pricing_entries)
+
+            if self._yesterday_stored_date == yesterday_str and solar_data is not None:
+                solar_data.entries = self._yesterday_solar + solar_data.entries
+
+            # Save today's entries to the yesterday store (will be valid as yesterday tomorrow)
+            if nordpool_data is not None and solar_data is not None:
+                today_nordpool = [e for e in nordpool_data.entries if e.start.date().isoformat() == today_str]
+                today_solar = [e for e in solar_data.entries if e.start.date().isoformat() == today_str]
+                await self._yesterday_store.async_save({
+                    "date": today_str,
+                    "nordpool": [
+                        {"start": e.start.isoformat(), "end": e.end.isoformat(), "price": e.price_eur_kwh}
+                        for e in today_nordpool
+                    ],
+                    "solar": [
+                        {"start": e.start.isoformat(), "end": e.end.isoformat(), "kwh": e.expected_kwh, "source": e.source}
+                        for e in today_solar
+                    ],
+                })
+                self._yesterday_stored_date = today_str
+                self._yesterday_nordpool = today_nordpool
+                self._yesterday_solar = today_solar
 
             current_reading: BatteryReading | None = primary.get(BatteryReading)
             if current_reading is not None:
@@ -316,7 +382,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
     def _build_sensor_dict(self, primary: dict, secondary: dict) -> dict:
         """Map typed DAG outputs to the string-keyed dict that sensors read."""
         reading: BatteryReading | None = primary.get(BatteryReading)
-        nordpool: NordpoolPrices | None = primary.get(NordpoolPrices)
+        nordpool: NordpoolData | None = primary.get(NordpoolData)
         dashboard: DashboardData | None = secondary.get(DashboardData)
         deg: DegradationCost | None = secondary.get(DegradationCost)
 
@@ -329,7 +395,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "battery_state": secondary.get(BatteryState),
             "degradation_cost": deg.value_kwh if deg else 0.0,
             "estimated_capacity": self._capacity_estimator.estimated_capacity_kwh,
-            "prices": nordpool.slots if nordpool else [],
+            "prices": nordpool.entries if nordpool else [],
             "grid_power_kw": reading.grid_power_kw if reading else 0.0,
             "battery_power_kw": reading.power_kw if reading else 0.0,
             "ev_state": primary.get(EVChargerState),

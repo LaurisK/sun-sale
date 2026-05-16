@@ -1,9 +1,9 @@
 """Tests for ev_scheduler.py — pure Python, no HA required."""
 from datetime import datetime, timedelta, timezone
 import pytest
-from custom_components.sun_sale.ev_scheduler import _cheapest_slots, schedule_ev_charge
-from custom_components.sun_sale.models import EVChargerConfig, EVChargerState
-from custom_components.sun_sale.pricing import build_price_series
+from custom_components.sun_sale.pipeline.ev_scheduler import _cheapest_slots, schedule_ev_charge
+from custom_components.sun_sale.contract.models import EVChargerConfig, EVChargerState
+from custom_components.sun_sale.inbound.pricing import build_price_series
 from tests.conftest import BASE_DT, default_ev_config, default_tariff_config, make_price
 
 NOW = BASE_DT  # 2024-01-15 00:00 UTC

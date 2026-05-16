@@ -188,13 +188,13 @@ _const_mod = sys.modules["homeassistant.const"]
 _const_mod.UnitOfEnergy = MagicMock()
 _const_mod.UnitOfEnergy.KILO_WATT_HOUR = "kWh"
 
-from custom_components.sun_sale.models import (
+from custom_components.sun_sale.contract.models import (
     Action,
     BatteryConfig,
     BatteryState,
     EVChargerConfig,
     EVChargerState,
-    HourlyPrice,
+    PriceEntry,
     SolarForecast,
     TariffConfig,
 )
@@ -206,10 +206,10 @@ from custom_components.sun_sale.models import (
 BASE_DT = datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
 
 
-def make_price(hour: int, price: float, base: datetime = BASE_DT) -> HourlyPrice:
-    """Create an HourlyPrice for a given hour of BASE_DT."""
+def make_price(hour: int, price: float, base: datetime = BASE_DT) -> PriceEntry:
+    """Create a PriceEntry for a given hour of BASE_DT."""
     start = base.replace(hour=hour, minute=0, second=0, microsecond=0)
-    return HourlyPrice(start=start, end=start + timedelta(hours=1), price_eur_kwh=price)
+    return PriceEntry(start=start, end=start + timedelta(hours=1), price_eur_kwh=price)
 
 
 def make_solar(hour: int, kwh: float, base: datetime = BASE_DT) -> SolarForecast:

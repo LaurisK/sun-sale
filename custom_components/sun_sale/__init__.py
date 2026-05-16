@@ -10,9 +10,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN
-from .coordinator import SunSaleCoordinator
-from .debug_view import SunSaleDebugView
+from .contract.const import DOMAIN
+from .orchestration.coordinator import SunSaleCoordinator
+from .orchestration.debug_view import SunSaleDebugView
 
 _PANEL_KEY = f"{DOMAIN}_panel_registered"
 _STATIC_PATH = "/sun_sale"

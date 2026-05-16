@@ -4,7 +4,7 @@ Pure Python — no Home Assistant imports.
 """
 from __future__ import annotations
 
-from .models import HourlyPrice, TariffConfig, TariffResult
+from ..contract.models import PriceEntry, TariffConfig, TariffResult
 
 
 def buy_price(spot: float, config: TariffConfig) -> float:
@@ -23,7 +23,7 @@ def sell_price(spot: float, config: TariffConfig) -> float:
     return (spot - config.sell_distribution_fee - config.sell_markup) * (1.0 - config.sell_tax_rate)
 
 
-def compute_tariffs(prices: list[HourlyPrice], config: TariffConfig) -> list[TariffResult]:
+def compute_tariffs(prices: list[PriceEntry], config: TariffConfig) -> list[TariffResult]:
     """Convert raw spot prices to effective buy/sell prices for each hour.
 
     Deprecated: new code should use pricing.build_price_series() instead.

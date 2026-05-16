@@ -12,17 +12,17 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .models import (
+from ..contract.models import (
     Action,
     BatteryConfig,
     BatteryReading,
-    NordpoolPrices,
-    RawSolarData,
+    NordpoolData,
+    SolarData,
     Schedule,
     ScheduleSlot,
     TariffConfig,
 )
-from . import tariff as tariff_module
+from ..pipeline import tariff as tariff_module
 
 _SLOT_MIN = 15
 _SLOT_H = _SLOT_MIN / 60.0
@@ -30,6 +30,23 @@ _SLOT_H = _SLOT_MIN / 60.0
 
 def _floor_15min(dt: datetime) -> datetime:
     return dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
+
+
+def _spot_at(entries, t: datetime) -> float | None:
+    """Find the spot price covering time t in NordpoolData.entries."""
+    for e in entries:
+        if e.start <= t < e.end:
+            return e.price_eur_kwh
+    return None
+
+
+def _solar_watts_at(entries, t: datetime) -> float:
+    """Return solar generation at time t as approximate watts (from SolarData.entries)."""
+    for e in entries:
+        if e.start <= t < e.end:
+            slot_h = (e.end - e.start).total_seconds() / 3600.0
+            return e.expected_kwh / slot_h * 1000.0 if slot_h > 0 else 0.0
+    return 0.0
 
 
 def _derive_mode(
@@ -73,8 +90,8 @@ def _project_soc(
 
 
 def build_future_slots(
-    nordpool: NordpoolPrices,
-    solar: RawSolarData,
+    nordpool: NordpoolData,
+    solar: SolarData,
     reading: BatteryReading,
     schedule: Schedule | None,
     battery_config: BatteryConfig,
@@ -86,8 +103,6 @@ def build_future_slots(
     Each slot: {t, buy_price, sell_price, solar_forecast_w, battery_soc_pct,
                 inverter_mode, grid_operation}
     """
-    solar_watts = solar.watts
-
     sched_by_hour: dict[datetime, ScheduleSlot] = {}
     if schedule:
         for s in schedule.slots:
@@ -104,14 +119,14 @@ def build_future_slots(
     t = _floor_15min(now)
 
     while t <= end_dt:
-        spot = nordpool.raw_15min.get(t)
+        spot = _spot_at(nordpool.entries, t)
         if spot is None:
             t += timedelta(minutes=15)
             continue
 
         buy_p = tariff_module.buy_price(spot, tariff_config)
         sell_p = tariff_module.sell_price(spot, tariff_config)
-        solar_w = solar_watts.get(t, 0.0)
+        solar_w = _solar_watts_at(solar.entries, t)
         slot = sched_by_hour.get(t.replace(minute=0, second=0, microsecond=0))
 
         mode, grid_op, net_kwh = _derive_mode(slot, solar_w, load_w)
@@ -133,19 +148,20 @@ def build_future_slots(
 
 
 def build_solar_frozen_forecast(
-    solar: RawSolarData,
+    solar: SolarData,
     now: datetime,
 ) -> list[dict[str, Any]]:
-    """Return today's frozen solar forecast as [{t_ms, forecast_w}]."""
-    if not solar.watts:
-        return []
+    """Return today's frozen solar forecast as [{t_ms, forecast_w, forecast_kwh}]."""
     today = now.date()
-    return [
-        {
-            "t": int(ts.timestamp() * 1000),
+    result = []
+    for e in solar.entries:
+        if e.start.date() != today:
+            continue
+        slot_h = (e.end - e.start).total_seconds() / 3600.0
+        w = e.expected_kwh / slot_h * 1000.0 if slot_h > 0 else 0.0
+        result.append({
+            "t": int(e.start.timestamp() * 1000),
             "forecast_w": round(w),
-            "forecast_kwh": round(w * _SLOT_H / 1000, 4),
-        }
-        for ts, w in sorted(solar.watts.items())
-        if ts.date() == today
-    ]
+            "forecast_kwh": round(e.expected_kwh, 4),
+        })
+    return result

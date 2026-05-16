@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, call
 
-from custom_components.sun_sale.ev_charger import EVChargerController, EVChargerPlatform
+from custom_components.sun_sale.outbound.ev_charger import EVChargerController, EVChargerPlatform
 
 
 def make_controller(platform: EVChargerPlatform = EVChargerPlatform.GENERIC):

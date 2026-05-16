@@ -1,5 +1,5 @@
 """Tests for tariff.py — pure Python, no HA required."""
-from custom_components.sun_sale.tariff import buy_price, sell_price, compute_tariffs
+from custom_components.sun_sale.pipeline.tariff import buy_price, sell_price, compute_tariffs
 from tests.conftest import make_price, default_tariff_config
 
 

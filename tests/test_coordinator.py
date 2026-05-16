@@ -4,14 +4,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
-from custom_components.sun_sale.coordinator import SunSaleCoordinator
-from custom_components.sun_sale.translators import NordpoolTranslator
-from custom_components.sun_sale.models import BatteryReading
-from custom_components.sun_sale.const import CONF_NORDPOOL_ENTITY, CONF_SOLAR_FORECAST_ENTITY
+from custom_components.sun_sale.orchestration.coordinator import SunSaleCoordinator
+from custom_components.sun_sale.inbound.translators import NordpoolTranslator
+from custom_components.sun_sale.contract.models import BatteryReading
+from custom_components.sun_sale.contract.const import CONF_NORDPOOL_ENTITY, CONF_SOLAR_FORECAST_ENTITY
 
 BASE = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-
-_DEFAULT_RESOLUTION = "15min"
 
 
 def _make_coordinator():
@@ -26,8 +24,8 @@ def _make_coordinator():
     return coord, hass
 
 
-def _make_translator(entity_id: str = "sensor.nordpool", resolution: str = _DEFAULT_RESOLUTION):
-    return NordpoolTranslator(entity_id=entity_id, resolution=resolution)
+def _make_translator(entity_id: str = "sensor.nordpool"):
+    return NordpoolTranslator(entity_id=entity_id)
 
 
 def _state(attrs: dict) -> MagicMock:
@@ -50,34 +48,41 @@ def test_nordpool_empty_when_entity_missing():
     t = _make_translator()
     hass = MagicMock()
     hass.states.get.return_value = None
-    result = t.parse(hass)
-    assert result.slots == []
-    assert result.raw_15min == {}
+    result = t.parse(hass, now=BASE)
+    assert result.entries == []
 
 
 def test_nordpool_parses_raw_today():
     t = _make_translator()
     entry = {"start": "2024-01-15T10:00:00+00:00", "value": 0.10}
     hass = _hass_with("sensor.nordpool", {"raw_today": [entry], "raw_tomorrow": []})
-    result = t.parse(hass)
-    assert len(result.slots) == 1
-    assert abs(result.slots[0].price_eur_kwh - 0.10) < 1e-9
+    result = t.parse(hass, now=BASE)
+    # At least one entry is parsed; zero-fill may add more for tomorrow
+    assert len(result.entries) >= 1
+    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
+    assert len(today_entries) == 1
+    assert abs(today_entries[0].price_eur_kwh - 0.10) < 1e-9
 
 
-def test_nordpool_raw_15min_populated():
+def test_nordpool_resolution_detected():
     t = _make_translator()
-    entry = {"start": "2024-01-15T10:00:00+00:00", "value": 0.10}
-    hass = _hass_with("sensor.nordpool", {"raw_today": [entry], "raw_tomorrow": []})
-    result = t.parse(hass)
-    assert len(result.raw_15min) == 1
+    entries = [
+        {"start": "2024-01-15T10:00:00+00:00", "value": 0.10},
+        {"start": "2024-01-15T10:15:00+00:00", "value": 0.11},
+    ]
+    hass = _hass_with("sensor.nordpool", {"raw_today": entries, "raw_tomorrow": []})
+    result = t.parse(hass, now=BASE)
+    assert result.resolution == timedelta(minutes=15)
 
 
 def test_nordpool_deduplicates_slots():
     t = _make_translator()
     dup = {"start": "2024-01-15T10:00:00+00:00", "value": 0.10}
     hass = _hass_with("sensor.nordpool", {"raw_today": [dup, dup], "raw_tomorrow": []})
-    result = t.parse(hass)
-    assert len(result.slots) == 1
+    result = t.parse(hass, now=BASE)
+    # Only one unique today entry; zero-fill may add tomorrow entries
+    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
+    assert len(today_entries) == 1
 
 
 def test_nordpool_includes_tomorrow():
@@ -85,8 +90,8 @@ def test_nordpool_includes_tomorrow():
     today_e = {"start": "2024-01-15T10:00:00+00:00", "value": 0.10}
     tomorrow_e = {"start": "2024-01-16T10:00:00+00:00", "value": 0.09}
     hass = _hass_with("sensor.nordpool", {"raw_today": [today_e], "raw_tomorrow": [tomorrow_e]})
-    result = t.parse(hass)
-    assert len(result.slots) == 2
+    result = t.parse(hass, now=BASE)
+    assert len(result.entries) == 2
 
 
 def test_nordpool_slot_duration_15min():
@@ -96,23 +101,8 @@ def test_nordpool_slot_duration_15min():
         {"start": "2024-01-15T10:15:00+00:00", "value": 0.11},
     ]
     hass = _hass_with("sensor.nordpool", {"raw_today": entries, "raw_tomorrow": []})
-    result = t.parse(hass)
-    assert result.slots[0].end == result.slots[0].start + timedelta(minutes=15)
-
-
-def test_nordpool_hourly_resolution_aggregates():
-    t = _make_translator(resolution="hourly")
-    entries = [
-        {"start": "2024-01-15T10:00:00+00:00", "value": 0.10},
-        {"start": "2024-01-15T10:15:00+00:00", "value": 0.12},
-        {"start": "2024-01-15T10:30:00+00:00", "value": 0.10},
-        {"start": "2024-01-15T10:45:00+00:00", "value": 0.12},
-    ]
-    hass = _hass_with("sensor.nordpool", {"raw_today": entries, "raw_tomorrow": []})
-    result = t.parse(hass)
-    assert len(result.slots) == 1
-    assert result.slots[0].end == result.slots[0].start + timedelta(hours=1)
-    assert abs(result.slots[0].price_eur_kwh - 0.11) < 1e-9
+    result = t.parse(hass, now=BASE)
+    assert result.entries[0].end == result.entries[0].start + timedelta(minutes=15)
 
 
 # ---------------------------------------------------------------------------
@@ -122,23 +112,26 @@ def test_nordpool_hourly_resolution_aggregates():
 def test_nordpool_legacy_parses_today():
     t = _make_translator()
     hass = _hass_with("sensor.nordpool", {"today": [0.10, 0.12, 0.08], "tomorrow": []})
-    result = t.parse(hass)
-    assert len(result.slots) == 3
-    assert abs(result.slots[0].price_eur_kwh - 0.10) < 1e-9
+    result = t.parse(hass, now=BASE)
+    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
+    assert len(today_entries) == 3
+    assert abs(today_entries[0].price_eur_kwh - 0.10) < 1e-9
 
 
 def test_nordpool_legacy_skips_none_entries():
     t = _make_translator()
     hass = _hass_with("sensor.nordpool", {"today": [0.10, None, 0.08], "tomorrow": []})
-    result = t.parse(hass)
-    assert len(result.slots) == 2
+    result = t.parse(hass, now=BASE)
+    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
+    assert len(today_entries) == 2
 
 
 def test_nordpool_legacy_slot_spans_one_hour():
     t = _make_translator()
     hass = _hass_with("sensor.nordpool", {"today": [0.10], "tomorrow": []})
-    result = t.parse(hass)
-    assert result.slots[0].end == result.slots[0].start + timedelta(hours=1)
+    result = t.parse(hass, now=BASE)
+    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
+    assert today_entries[0].end == today_entries[0].start + timedelta(hours=1)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +182,7 @@ def test_build_capacity_observation_energy_computed():
     coord._last_battery_reading = _reading(0.20, 4.0)
     obs = coord._build_capacity_observation(_reading(0.80, 4.0), BASE)
     assert obs is not None
-    from custom_components.sun_sale.const import UPDATE_INTERVAL_MINUTES
+    from custom_components.sun_sale.contract.const import UPDATE_INTERVAL_MINUTES
     expected_energy = 4.0 * (UPDATE_INTERVAL_MINUTES / 60.0)
     assert abs(obs.energy_kwh - expected_energy) < 1e-6
 
@@ -199,11 +192,11 @@ def test_build_capacity_observation_energy_computed():
 # ---------------------------------------------------------------------------
 
 def _make_pipeline_data() -> dict:
-    from custom_components.sun_sale.models import GenerationSeries
-    from custom_components.sun_sale.pricing import build_price_series
-    from custom_components.sun_sale.calculator import calculate
-    from custom_components.sun_sale.battery import degradation_cost_per_kwh
-    from custom_components.sun_sale.optimizer import optimize_schedule
+    from custom_components.sun_sale.contract.models import GenerationSeries
+    from custom_components.sun_sale.inbound.pricing import build_price_series
+    from custom_components.sun_sale.pipeline.calculator import calculate
+    from custom_components.sun_sale.pipeline.battery import degradation_cost_per_kwh
+    from custom_components.sun_sale.pipeline.optimizer import optimize_schedule
     from tests.conftest import default_battery_config, default_battery_state, default_tariff_config, make_price
 
     now = BASE
@@ -225,20 +218,20 @@ def test_pipeline_keys_present_in_coordinator_data():
 
 
 def test_pipeline_pricing_is_price_series():
-    from custom_components.sun_sale.models import PriceSeries
+    from custom_components.sun_sale.contract.models import PriceSeries
     assert isinstance(_make_pipeline_data()["pricing"], PriceSeries)
 
 
 def test_pipeline_forecast_is_generation_series():
-    from custom_components.sun_sale.models import GenerationSeries
+    from custom_components.sun_sale.contract.models import GenerationSeries
     assert isinstance(_make_pipeline_data()["forecast"], GenerationSeries)
 
 
 def test_pipeline_calculation_is_calculation_result():
-    from custom_components.sun_sale.models import CalculationResult
+    from custom_components.sun_sale.contract.models import CalculationResult
     assert isinstance(_make_pipeline_data()["calculation"], CalculationResult)
 
 
 def test_pipeline_schedule_is_schedule():
-    from custom_components.sun_sale.models import Schedule
+    from custom_components.sun_sale.contract.models import Schedule
     assert isinstance(_make_pipeline_data()["schedule"], Schedule)

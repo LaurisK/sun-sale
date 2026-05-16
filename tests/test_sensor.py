@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
-from custom_components.sun_sale.models import (
+from custom_components.sun_sale.contract.models import (
     Action,
     EVChargeSlot,
     EVSchedule,
@@ -12,7 +12,7 @@ from custom_components.sun_sale.models import (
     ScheduleSlot,
     TariffResult,
 )
-from custom_components.sun_sale.pricing import build_price_series
+from custom_components.sun_sale.inbound.pricing import build_price_series
 from custom_components.sun_sale.sensor import (
     CurrentActionSensor,
     CurrentBuyPriceSensor,
@@ -76,7 +76,7 @@ def make_tariff(hour: int, buy: float = 0.12, sell: float = 0.06) -> TariffResul
 
 def _make_price_series_for_hour(hour: int, buy_eur_kwh: float = 0.12, sell_eur_kwh: float = 0.06):
     """Create a minimal PriceSeries with one slot matching the given buy/sell prices."""
-    from custom_components.sun_sale.models import PriceSlot, PriceSeries
+    from custom_components.sun_sale.contract.models import PriceSlot, PriceSeries
     from datetime import timedelta
     start = BASE.replace(hour=hour)
     slot = PriceSlot(
