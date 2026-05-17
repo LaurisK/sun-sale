@@ -6,28 +6,21 @@
  *   Buy price   amber  solid stepline  — past history + future from pricing sensor (one continuous line)
  *   Sell price  coral  solid stepline  — past history + future from pricing sensor (one continuous line)
  *
- * Right Y axis — kWh/slot (15-min). Two stacked bar series share this axis:
- *   1. "Solar base"    — bottom segment. For past slots with an observation it
- *                        is min(forecast, observed); otherwise it is the
- *                        forecast itself. Coloured grey 25 % for past / non-
- *                        today-future slots; today's remaining slots are
- *                        coloured by charging_profile_slots:
- *                          blue   SOLAR_CHARGE  — going to battery
- *                          amber  SELL          — exporting for €
- *                          red    NO_EXPORT     — curtailed (sell ≤ 0)
- *   2. "Forecast error" — top segment stacked on the base. Only past slots
- *                        where ForecastErrorSeries has both a forecast and an
- *                        observation. Height = |forecast − observed|, so the
- *                        total stacked column always reaches max(fc, obs):
- *                          green = observed > forecast (under-forecast)
- *                          red   = observed < forecast (over-forecast)
- *                        Driven by `forecast_error_slots` on the dashboard
- *                        sensor (the backend ForecastErrorSeries).
+ * Right Y axis — kWh/slot (15-min):
+ *   Solar forecast — vertical bar per 15-min slot (scalar y = forecast_kwh).
+ *                    Past + non-today-future slots: grey 25 % opacity.
+ *                    Today's remaining slots: per-bar colour from
+ *                    charging_profile_slots:
+ *                      blue   SOLAR_CHARGE  — going to battery
+ *                      amber  SELL          — exporting for €
+ *                      red    NO_EXPORT     — curtailed (sell ≤ 0)
  *
- *   Stacked bars are used instead of overlaid rangeBars because ApexCharts
- *   3.x silently drops rangeBar series in mixed-type ('line') charts, and
- *   plain bar+range-y is rendered clustered side-by-side rather than
- *   overlapping. Stacking two single-value bar series gives a true overlay.
+ *   Forecast-vs-observed error overlay is intentionally not rendered here:
+ *   ApexCharts 3.x in a mixed line+bar chart does not support `chart.stacked`
+ *   (lines disappear) nor `rangeBar` overlap (silently dropped), and plain
+ *   bar+range-y renders side-by-side rather than overlaid. The backend keeps
+ *   exposing `forecast_error_slots` so the overlay can be added once an
+ *   overlay-capable rendering approach is in place.
  *
  * Overlays:
  *   Red shaded bands  negative-sell lockout windows (sensor.sun_sale_calculation)
@@ -333,11 +326,6 @@
       return slots;
     }
 
-    // ── Data: per-slot forecast-vs-observed error from dashboard sensor ───────
-    // Returns Map<slotStartMs, { forecast_kwh, observed_kwh, error_kwh }>.
-    // Only past slots — the backend ForecastErrorSeries pairs forecast against
-    // the inverter's cumulative-kWh counter, which has no future samples.
-
     // ── Data: per-slot charging-profile disposition from dashboard sensor ─────
     // Returns Map<slotStartMs, { mode, expected_kwh, sell_eur_kwh }>.
     // Only today's remaining slots are present (backend convention).
@@ -356,21 +344,6 @@
       return slots;
     }
 
-    _readForecastErrorSlots(dashAttrs, windowStart, windowEnd) {
-      const slots = new Map();
-      if (!Array.isArray(dashAttrs?.forecast_error_slots)) return slots;
-      for (const e of dashAttrs.forecast_error_slots) {
-        if (typeof e?.t !== 'number') continue;
-        if (e.t < windowStart || e.t > windowEnd) continue;
-        slots.set(e.t, {
-          forecast_kwh: Number(e.forecast_kwh) || 0,
-          observed_kwh: Number(e.observed_kwh) || 0,
-          error_kwh:    Number(e.error_kwh)    || 0,
-        });
-      }
-      return slots;
-    }
-
     // ── Render ─────────────────────────────────────────────────────────────────
 
     async _render() {
@@ -384,7 +357,6 @@
       const lockouts      = this._readLockoutWindows();
       const dashAttrs     = this._hass.states[DASHBOARD_ENTITY]?.attributes;
       const forecastSlots = this._buildForecastSlots(dashAttrs, windowStart, windowEnd);
-      const errorSlots    = this._readForecastErrorSlots(dashAttrs, windowStart, windowEnd);
       const profileSlots  = this._readChargingProfile(dashAttrs);
 
       this._renderBatteryRow(dashAttrs);
@@ -407,13 +379,8 @@
         return;
       }
 
-      // Build the two stacked bar series. For each 15-min slot in the window:
-      //   base  = min(fc, obs) if past with observation, else fc
-      //   error = |fc - obs|   if past with observation, else 0
-      // Stacking base+error gives a single column reaching max(fc, obs), with
-      // the discrepancy highlighted in green (under-forecast) or red (over).
-      const GREEN    = '#4caf50';
-      const RED      = '#f44336';
+      // Single forecast bar per slot. Per-point colour by charging-profile mode
+      // for today's remaining slots; grey 25 % opacity everywhere else.
       const GREY_BAR = 'rgba(158,158,158,0.25)';
       const MODE_COLORS = {
         solar_charge: '#42a5f5',
@@ -421,43 +388,14 @@
         no_export:    '#e53935',
       };
 
-      const baseBars  = [];
-      const errorBars = [];
+      const forecastBars = [];
       let t = Math.floor(windowStart / SLOT_MS) * SLOT_MS;
       while (t <= windowEnd) {
         const fKwh = forecastSlots.get(t);
-        const err  = errorSlots.get(t);
-
-        // Reconcile: errorSlots carries the forecast value that was actually
-        // paired with the observation. Prefer it when present so base+error
-        // visually agrees with the error tooltip.
-        const fcForBar = err ? err.forecast_kwh : fKwh;
-        const obs      = err ? err.observed_kwh : null;
-
-        if (fcForBar == null || fcForBar <= 0.001) {
-          // No forecast for this slot — but if observed > 0 we still want to
-          // show it as a pure-green column (generation with no forecast ref).
-          if (obs != null && obs > 0.001) {
-            baseBars.push({  x: t, y: 0,   fillColor: GREY_BAR, strokeColor: GREY_BAR });
-            errorBars.push({ x: t, y: obs, fillColor: GREEN,    strokeColor: GREEN    });
-          }
-          t += SLOT_MS;
-          continue;
-        }
-
-        const prof      = profileSlots.get(t);
-        const baseColor = (prof && MODE_COLORS[prof.mode]) || GREY_BAR;
-
-        if (obs == null) {
-          // Future slot, or past slot with no observation yet — just forecast.
-          baseBars.push({  x: t, y: fcForBar, fillColor: baseColor, strokeColor: baseColor });
-          errorBars.push({ x: t, y: 0 });
-        } else {
-          const delta = Math.abs(fcForBar - obs);
-          const base  = Math.min(fcForBar, obs);
-          const color = obs >= fcForBar ? GREEN : RED;
-          baseBars.push({  x: t, y: base,  fillColor: baseColor, strokeColor: baseColor });
-          errorBars.push({ x: t, y: delta > 0.0005 ? delta : 0, fillColor: color, strokeColor: color });
+        if (fKwh != null && fKwh > 0.001) {
+          const prof  = profileSlots.get(t);
+          const color = (prof && MODE_COLORS[prof.mode]) || GREY_BAR;
+          forecastBars.push({ x: t, y: fKwh, fillColor: color, strokeColor: color });
         }
         t += SLOT_MS;
       }
@@ -484,13 +422,11 @@
         },
       }));
 
-      // Series: 0=buy(line) 1=sell(line) 2=solar base(bar) 3=forecast error(bar).
-      // Bars 2 & 3 are stacked (see chart.stacked below); lines are unaffected.
+      // Series: 0=buy(line) 1=sell(line) 2=solar forecast(bar)
       const series = [
-        { name: 'Buy price',      type: 'line', data: buyData   },
-        { name: 'Sell price',     type: 'line', data: sellData  },
-        { name: 'Solar forecast', type: 'bar',  data: baseBars  },
-        { name: 'Forecast error', type: 'bar',  data: errorBars },
+        { name: 'Buy price',      type: 'line', data: buyData      },
+        { name: 'Sell price',     type: 'line', data: sellData     },
+        { name: 'Solar forecast', type: 'bar',  data: forecastBars },
       ];
 
       const options = {
@@ -500,7 +436,6 @@
           type:       'line',
           height:     500,
           background: 'transparent',
-          stacked:    true,     // stacks the two bar series; lines unaffected
           toolbar: {
             show:  true,
             tools: { zoom: true, zoomin: true, zoomout: true, pan: true, reset: true, download: false },
@@ -524,17 +459,17 @@
 
         stroke: {
           show:      true,
-          curve:     ['stepline', 'stepline', 'smooth', 'smooth'],
-          width:     [2,          2,          0,         0],
-          dashArray: [0,          0,          0,         0],
+          curve:     ['stepline', 'stepline', 'smooth'],
+          width:     [2,          2,          0       ],
+          dashArray: [0,          0,          0       ],
         },
 
-        // 0:amber buy 1:coral sell 2:forecast (per-point fillColor) 3:green default (per-point overrides for error sign)
-        colors: ['#ffb300', '#ff7043', GREY_BAR, GREEN],
+        // 0:amber buy 1:coral sell 2:forecast (per-point fillColor; this is the fallback)
+        colors: ['#ffb300', '#ff7043', GREY_BAR],
 
         fill: {
-          type:    ['solid', 'solid', 'solid', 'solid'],
-          opacity: [1,       1,       1,       1],
+          type:    ['solid', 'solid', 'solid'],
+          opacity: [1,       1,       1      ],
         },
 
         xaxis: {
@@ -553,7 +488,6 @@
 
         // yaxis[n] matches series[n]; shared axes use seriesName + show: false.
         // Series 1 (Sell price) shares the price axis (series 0).
-        // Series 3 (Forecast error) shares the solar axis (series 2).
         yaxis: [
           {
             seriesName: 'Buy price',
@@ -584,7 +518,6 @@
               formatter: v => (v != null ? v.toFixed(3) : ''),
             },
           },
-          { seriesName: 'Solar forecast', opposite: true, show: false },
         ],
 
         annotations: {
@@ -623,33 +556,17 @@
               if (val == null) return null;
               if (seriesIndex < 2) return val.toFixed(4) + ' €/kWh';
 
-              // Bar series — reach into the source point so the tooltip can
-              // describe forecast / observed / error coherently regardless of
-              // which stacked segment was hovered.
+              // Forecast bar — annotate with charging-profile disposition.
               const pt    = w.config.series[seriesIndex].data[dataPointIndex];
               const slotT = pt?.x;
-              const err   = slotT != null ? errorSlots.get(slotT) : null;
               const prof  = slotT != null ? profileSlots.get(slotT) : null;
-
-              if (seriesIndex === 2) {
-                // Base segment — show forecast and (if past) observed.
-                const fc = err ? err.forecast_kwh : val;
-                const lines = [fc.toFixed(3) + ' kWh forecast'];
-                if (err) lines.push(err.observed_kwh.toFixed(3) + ' kWh observed');
-                if (prof) {
-                  if (prof.mode === 'solar_charge') lines[0] += ' → charge battery';
-                  else if (prof.mode === 'sell')    lines[0] += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
-                  else if (prof.mode === 'no_export') lines[0] += ' → curtail (sell ≤ 0)';
-                }
-                return lines.join(' · ');
+              let line = val.toFixed(3) + ' kWh forecast';
+              if (prof) {
+                if (prof.mode === 'solar_charge')      line += ' → charge battery';
+                else if (prof.mode === 'sell')         line += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
+                else if (prof.mode === 'no_export')    line += ' → curtail (sell ≤ 0)';
               }
-
-              // Error segment — zero-height bars produce no tooltip row.
-              if (val < 0.0005) return null;
-              if (!err) return val.toFixed(3) + ' kWh';
-              const signed = err.error_kwh;             // observed - forecast
-              const tag    = signed >= 0 ? 'under-forecast' : 'over-forecast';
-              return (signed >= 0 ? '+' : '') + signed.toFixed(3) + ' kWh (' + tag + ')';
+              return line;
             },
           },
         },
