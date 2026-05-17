@@ -425,11 +425,15 @@
         opacity:     1,
       }));
 
-      // Series: 0=buy(line) 1=sell(line) 2=solar forecast(bar)
+      // Series: 0=buy(line) 1=sell(line) 2=solar forecast(bar).
+      // All three use {x, y} object format. Mixing tuple-format line data
+      // with object-format bar data on a datetime xaxis causes ApexCharts
+      // to create the bar <g> group but emit zero <rect>s (bars invisible).
+      const toXY = pts => pts.map(([x, y]) => ({ x, y }));
       const series = [
-        { name: 'Buy price',      type: 'line', data: buyData      },
-        { name: 'Sell price',     type: 'line', data: sellData     },
-        { name: 'Solar forecast', type: 'bar',  data: forecastBars },
+        { name: 'Buy price',      type: 'line', data: toXY(buyData)  },
+        { name: 'Sell price',     type: 'line', data: toXY(sellData) },
+        { name: 'Solar forecast', type: 'bar',  data: forecastBars   },
       ];
 
       const options = {
