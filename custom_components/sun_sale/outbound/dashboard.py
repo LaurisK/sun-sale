@@ -98,7 +98,7 @@ def build_future_slots(
     tariff_config: TariffConfig,
     now: datetime,
 ) -> list[dict[str, Any]]:
-    """Build 15-min future slots from now to end of tomorrow.
+    """Build 15-min future slots from now to end of local-tomorrow.
 
     Each slot: {t, buy_price, sell_price, solar_forecast_w, battery_soc_pct,
                 inverter_mode, grid_operation}
@@ -112,8 +112,13 @@ def build_future_slots(
     load_w = reading.household_load_kw * 1000.0
     soc = current_soc
 
-    tomorrow = now.date() + timedelta(days=1)
-    end_dt = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 23, 45, tzinfo=timezone.utc)
+    # End at "day-after-tomorrow UTC 23:45". The +2-day reach absorbs the
+    # UTC↔local boundary skew: when the coordinator runs in the early-UTC-
+    # morning hours of local-yesterday, `now.date() + 1 day` is only a few
+    # hours into local tomorrow, leaving the chart's tomorrow column empty.
+    # The chart filters its own 72 h window, so the extra slots are harmless.
+    end_date = now.date() + timedelta(days=2)
+    end_dt = datetime(end_date.year, end_date.month, end_date.day, 23, 45, tzinfo=timezone.utc)
 
     slots: list[dict[str, Any]] = []
     t = _floor_15min(now)
@@ -151,11 +156,20 @@ def build_solar_frozen_forecast(
     solar: SolarData,
     now: datetime,
 ) -> list[dict[str, Any]]:
-    """Return today's frozen solar forecast as [{t_ms, forecast_w, forecast_kwh}]."""
+    """Return the yesterday/today/tomorrow solar forecast as
+    [{t_ms, forecast_w, forecast_kwh}]. Yesterday is included so the chart
+    can render the full 72 h window — yesterday's entries come from the
+    coordinator's persisted yesterday store (re-attached to `solar.entries`
+    on each cycle); today and tomorrow come straight from the live HA
+    forecast entities.
+    """
     today = now.date()
+    yesterday = today - timedelta(days=1)
+    tomorrow = today + timedelta(days=1)
+    in_window = {yesterday, today, tomorrow}
     result = []
     for e in solar.entries:
-        if e.start.date() != today:
+        if e.start.date() not in in_window:
             continue
         slot_h = (e.end - e.start).total_seconds() / 3600.0
         w = e.expected_kwh / slot_h * 1000.0 if slot_h > 0 else 0.0
