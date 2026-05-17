@@ -617,5 +617,9 @@
     }
   }
 
-  customElements.define('sun-sale-panel', SunSalePanel);
+  if (!customElements.get('sun-sale-panel')) {
+    customElements.define('sun-sale-panel', SunSalePanel);
+  } else {
+    console.warn('sunSale: <sun-sale-panel> already registered — this script load is a duplicate, the older copy is what actually runs. Clear the Service Worker cache to pick up the new file.');
+  }
 })();
