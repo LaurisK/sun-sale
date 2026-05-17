@@ -460,7 +460,7 @@
         plotOptions: {
           bar: {
             horizontal:  false,
-            columnWidth: '90%',
+            columnWidth: '100%',
           },
         },
 
@@ -493,11 +493,15 @@
           axisTicks:  { show: false },
         },
 
-        // yaxis[n] matches series[n]; shared axes use seriesName + show: false.
-        // Series 1 (Sell price) shares the price axis (series 0).
+        // Two y-axes: left = EUR/kWh shared by both price lines; right = kWh/slot
+        // for the solar-forecast bar. seriesName-as-array binds multiple series
+        // to one axis. The earlier "duplicate seriesName + show:false" pattern
+        // left 'Sell price' with no axis match — that, combined with mixed
+        // tuple/object series data, was enough to make ApexCharts emit zero
+        // <rect>s for the bar series.
         yaxis: [
           {
-            seriesName: 'Buy price',
+            seriesName: ['Buy price', 'Sell price'],
             title: {
               text:  'EUR / kWh',
               style: { color: '#ffb300', fontSize: '11px' },
@@ -509,7 +513,6 @@
               formatter: v => (v != null ? v.toFixed(3) : ''),
             },
           },
-          { seriesName: 'Buy price', show: false },
           {
             seriesName: 'Solar forecast',
             opposite:   true,
