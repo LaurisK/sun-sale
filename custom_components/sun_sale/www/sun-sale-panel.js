@@ -348,6 +348,10 @@
         if (typeof s?.t !== 'number') continue;
         if (s.t < windowStart || s.t > windowEnd) continue;
         const err = Number(s.error_kwh);
+        const obs = Number(s.observed_kwh);
+        // -1 sentinel from the backend means observation history isn't yet
+        // available — accuracy is pending, not zero. Skip painting these.
+        if (err === -1 || obs === -1) continue;
         if (!isFinite(err) || Math.abs(err) < 1e-4) continue;
         out.push({
           x:            s.t,

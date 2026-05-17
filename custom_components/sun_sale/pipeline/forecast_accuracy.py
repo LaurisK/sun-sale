@@ -34,8 +34,14 @@ def build_forecast_error_series(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    if not forecast.slots or not observed.slots:
+    if not forecast.slots:
         return _empty(now)
+
+    # No observed history yet (inverter sensor just configured, or no samples
+    # collected): emit one -1-filled slot per forecast slot so consumers can
+    # distinguish "accuracy pending" from "no forecast at all".
+    if not observed.slots:
+        return _pending(forecast, now)
 
     forecast_by_key = {(s.start, s.end): s.expected_kwh for s in forecast.slots}
 
@@ -90,6 +96,33 @@ def _empty(now: datetime) -> ForecastErrorSeries:
         total_error_kwh=0.0,
         mean_absolute_error_kwh=0.0,
         bias_kwh=0.0,
+        mean_absolute_percentage_error=None,
+        computed_at=now,
+    )
+
+
+def _pending(forecast: GenerationSeries, now: datetime) -> ForecastErrorSeries:
+    """Sentinel result for the "forecast known, observation not yet recovered"
+    case. Each per-slot field that depends on observation is -1; consumers
+    treat the -1 mark as invalid/no-data."""
+    slots = tuple(
+        ForecastErrorSlot(
+            start=s.start,
+            end=s.end,
+            forecast_kwh=round(s.expected_kwh, 6),
+            observed_kwh=-1.0,
+            error_kwh=-1.0,
+            relative_error=None,
+        )
+        for s in forecast.slots
+    )
+    return ForecastErrorSeries(
+        slots=slots,
+        total_forecast_kwh=round(sum(s.expected_kwh for s in forecast.slots), 4),
+        total_observed_kwh=-1.0,
+        total_error_kwh=-1.0,
+        mean_absolute_error_kwh=-1.0,
+        bias_kwh=-1.0,
         mean_absolute_percentage_error=None,
         computed_at=now,
     )

@@ -63,11 +63,24 @@ def test_empty_inputs_yield_empty_series():
     assert result.mean_absolute_percentage_error is None
 
 
-def test_empty_observed_yields_empty():
+def test_empty_observed_yields_pending_sentinels():
+    """Forecast present but observation history not yet recovered: one -1
+    sentinel slot per forecast slot, totals also -1, MAPE remains None."""
     result = build_forecast_error_series(
         _forecast(_fc_slot(10, 2.0)), _observed(), now=NOW,
     )
-    assert result.slots == ()
+    assert len(result.slots) == 1
+    s = result.slots[0]
+    assert s.forecast_kwh == 2.0
+    assert s.observed_kwh == -1.0
+    assert s.error_kwh == -1.0
+    assert s.relative_error is None
+    assert result.total_forecast_kwh == 2.0
+    assert result.total_observed_kwh == -1.0
+    assert result.total_error_kwh == -1.0
+    assert result.mean_absolute_error_kwh == -1.0
+    assert result.bias_kwh == -1.0
+    assert result.mean_absolute_percentage_error is None
 
 
 def test_no_overlap_yields_empty():
