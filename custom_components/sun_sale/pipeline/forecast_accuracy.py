@@ -37,43 +37,59 @@ def build_forecast_error_series(
     if not forecast.slots:
         return _empty(now)
 
-    # No observed history yet (inverter sensor just configured, or no samples
-    # collected): emit one -1-filled slot per forecast slot so consumers can
-    # distinguish "accuracy pending" from "no forecast at all".
-    if not observed.slots:
-        return _pending(forecast, now)
-
-    forecast_by_key = {(s.start, s.end): s.expected_kwh for s in forecast.slots}
+    # Iterate over every forecast slot so the chart always has something to
+    # paint for each one. Slots without a matching observation get a -1
+    # sentinel on observed_kwh / error_kwh (relative_error stays None).
+    observed_by_key = {(s.start, s.end): s.generated_kwh for s in observed.slots}
 
     slots: list[ForecastErrorSlot] = []
     total_forecast = 0.0
     total_observed = 0.0
     abs_error_sum = 0.0
-    for obs in observed.slots:
-        fc_kwh = forecast_by_key.get((obs.start, obs.end))
-        if fc_kwh is None:
+    matched = 0
+    for fc in forecast.slots:
+        obs_kwh = observed_by_key.get((fc.start, fc.end))
+        if obs_kwh is None:
+            slots.append(ForecastErrorSlot(
+                start=fc.start,
+                end=fc.end,
+                forecast_kwh=round(fc.expected_kwh, 6),
+                observed_kwh=-1.0,
+                error_kwh=-1.0,
+                relative_error=None,
+            ))
             continue
-        err = obs.generated_kwh - fc_kwh
-        rel = err / fc_kwh if fc_kwh != 0.0 else None
+        err = obs_kwh - fc.expected_kwh
+        rel = err / fc.expected_kwh if fc.expected_kwh != 0.0 else None
         slots.append(ForecastErrorSlot(
-            start=obs.start,
-            end=obs.end,
-            forecast_kwh=round(fc_kwh, 6),
-            observed_kwh=round(obs.generated_kwh, 6),
+            start=fc.start,
+            end=fc.end,
+            forecast_kwh=round(fc.expected_kwh, 6),
+            observed_kwh=round(obs_kwh, 6),
             error_kwh=round(err, 6),
             relative_error=round(rel, 6) if rel is not None else None,
         ))
-        total_forecast += fc_kwh
-        total_observed += obs.generated_kwh
+        total_forecast += fc.expected_kwh
+        total_observed += obs_kwh
         abs_error_sum += abs(err)
+        matched += 1
 
-    if not slots:
-        return _empty(now)
+    if matched == 0:
+        # Forecast present, observation entirely missing — totals are sentinels.
+        return ForecastErrorSeries(
+            slots=tuple(slots),
+            total_forecast_kwh=round(sum(s.expected_kwh for s in forecast.slots), 4),
+            total_observed_kwh=-1.0,
+            total_error_kwh=-1.0,
+            mean_absolute_error_kwh=-1.0,
+            bias_kwh=-1.0,
+            mean_absolute_percentage_error=None,
+            computed_at=now,
+        )
 
     total_error = total_observed - total_forecast
-    n = len(slots)
-    mae = abs_error_sum / n
-    bias = total_error / n
+    mae = abs_error_sum / matched
+    bias = total_error / matched
     mape = abs_error_sum / total_forecast if total_forecast > 0 else None
 
     return ForecastErrorSeries(
@@ -101,28 +117,3 @@ def _empty(now: datetime) -> ForecastErrorSeries:
     )
 
 
-def _pending(forecast: GenerationSeries, now: datetime) -> ForecastErrorSeries:
-    """Sentinel result for the "forecast known, observation not yet recovered"
-    case. Each per-slot field that depends on observation is -1; consumers
-    treat the -1 mark as invalid/no-data."""
-    slots = tuple(
-        ForecastErrorSlot(
-            start=s.start,
-            end=s.end,
-            forecast_kwh=round(s.expected_kwh, 6),
-            observed_kwh=-1.0,
-            error_kwh=-1.0,
-            relative_error=None,
-        )
-        for s in forecast.slots
-    )
-    return ForecastErrorSeries(
-        slots=slots,
-        total_forecast_kwh=round(sum(s.expected_kwh for s in forecast.slots), 4),
-        total_observed_kwh=-1.0,
-        total_error_kwh=-1.0,
-        mean_absolute_error_kwh=-1.0,
-        bias_kwh=-1.0,
-        mean_absolute_percentage_error=None,
-        computed_at=now,
-    )

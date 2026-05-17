@@ -343,8 +343,15 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 self._translators, self.hass, self._sun_sale_config, self._config, now
             )
 
-            today_str = now.date().isoformat()
-            yesterday_str = (now.date() - timedelta(days=1)).isoformat()
+            # Day boundaries must be LOCAL so the chart's yesterday/today/tomorrow
+            # axis aligns with the persisted yesterday store. Computing from
+            # now.date() (UTC) leaves a UTC-offset-sized window after local
+            # midnight where the store has "today's UTC date" but the lookup
+            # asks for "yesterday LOCAL" — they never match, yesterday silently
+            # disappears from the chart.
+            local_now     = now.astimezone(self._sun_sale_config.local_tz)
+            today_str     = local_now.date().isoformat()
+            yesterday_str = (local_now.date() - timedelta(days=1)).isoformat()
 
             nordpool_data: NordpoolData | None = primary.get(NordpoolData)
             solar_data: SolarData | None = primary.get(SolarData)
@@ -362,10 +369,15 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             if self._yesterday_stored_date == yesterday_str and solar_data is not None:
                 solar_data.entries = self._yesterday_solar + solar_data.entries
 
-            # Save today's entries to the yesterday store (will be valid as yesterday tomorrow)
+            # Save today's entries to the yesterday store (will be valid as yesterday tomorrow).
+            # Filter on LOCAL start.date() so the persisted "today" matches the
+            # local-tz today_str used by the loader.
             if nordpool_data is not None and solar_data is not None:
-                today_nordpool = [e for e in nordpool_data.entries if e.start.date().isoformat() == today_str]
-                today_solar = [e for e in solar_data.entries if e.start.date().isoformat() == today_str]
+                _local = self._sun_sale_config.local_tz
+                today_nordpool = [e for e in nordpool_data.entries
+                                   if e.start.astimezone(_local).date().isoformat() == today_str]
+                today_solar = [e for e in solar_data.entries
+                                if e.start.astimezone(_local).date().isoformat() == today_str]
                 await self._yesterday_store.async_save({
                     "date": today_str,
                     "nordpool": [

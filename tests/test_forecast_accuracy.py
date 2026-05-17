@@ -83,15 +83,24 @@ def test_empty_observed_yields_pending_sentinels():
     assert result.mean_absolute_percentage_error is None
 
 
-def test_no_overlap_yields_empty():
-    """Forecast covers hour 10, observed covers hour 5 — no matching slots."""
+def test_no_overlap_yields_pending_sentinels():
+    """Forecast covers hour 10, observed covers hour 5 — no matching slots.
+    Per-slot contract: every forecast slot emits, observed-side fields = -1."""
     result = build_forecast_error_series(
         _forecast(_fc_slot(10, 2.0)),
         _observed(_obs_slot(5, 1.0)),
         now=NOW,
     )
-    assert result.slots == ()
-    assert result.total_forecast_kwh == 0.0
+    assert len(result.slots) == 1
+    s = result.slots[0]
+    assert s.forecast_kwh == 2.0
+    assert s.observed_kwh == -1.0
+    assert s.error_kwh == -1.0
+    assert s.relative_error is None
+    # No matches → totals collapse to sentinels (kept distinct from "all zero").
+    assert result.total_forecast_kwh == 2.0
+    assert result.total_observed_kwh == -1.0
+    assert result.total_error_kwh == -1.0
 
 
 # ---------------------------------------------------------------------------
@@ -163,14 +172,19 @@ def test_mae_bias_mape_across_multiple_slots():
     assert abs(result.mean_absolute_percentage_error - 1 / 3) < 1e-6
 
 
-def test_partial_overlap_only_pairs_matching_slots():
-    """Forecast covers 10,11,12; observed covers only 10,11 (future absent)."""
+def test_partial_overlap_emits_sentinel_for_unmatched_slots():
+    """Forecast 10,11,12; observed 10,11 only. Hour 12 emits the -1 sentinel;
+    hours 10/11 have real errors. Totals aggregate matched slots only."""
     result = build_forecast_error_series(
         _forecast(_fc_slot(10, 2.0), _fc_slot(11, 2.0), _fc_slot(12, 2.0)),
         _observed(_obs_slot(10, 2.0), _obs_slot(11, 1.0)),
         now=NOW,
     )
-    assert len(result.slots) == 2
+    assert len(result.slots) == 3
+    assert result.slots[2].observed_kwh == -1.0
+    assert result.slots[2].error_kwh == -1.0
+    assert result.slots[2].relative_error is None
+    # Totals reflect only the matched (real) slots.
     assert result.total_forecast_kwh == 4.0
     assert result.total_observed_kwh == 3.0
     assert result.total_error_kwh == -1.0

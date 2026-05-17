@@ -349,14 +349,24 @@
         if (s.t < windowStart || s.t > windowEnd) continue;
         const err = Number(s.error_kwh);
         const obs = Number(s.observed_kwh);
-        // -1 sentinel from the backend means observation history isn't yet
-        // available — accuracy is pending, not zero. Skip painting these.
-        if (err === -1 || obs === -1) continue;
+        // -1 sentinel from the backend = observation not yet recovered for
+        // this slot. Surface as a "pending" marker; the overlay drawer
+        // renders these as a thin grey strip instead of a green/red rect.
+        if (err === -1 || obs === -1) {
+          out.push({
+            x:            s.t,
+            forecastKwh:  Number(s.forecast_kwh) || 0,
+            errorKwh:     0,
+            pending:      true,
+          });
+          continue;
+        }
         if (!isFinite(err) || Math.abs(err) < 1e-4) continue;
         out.push({
           x:            s.t,
           forecastKwh:  Number(s.forecast_kwh) || 0,
           errorKwh:     err,
+          pending:      false,
         });
       }
       return out;
@@ -475,6 +485,8 @@
       const OVL_GROUP = 'sunsale-error-overlay';
       const ERR_POS   = '#66bb6a';   // observed > forecast
       const ERR_NEG   = '#ef5350';   // observed < forecast
+      const ERR_PEND  = '#9e9e9e';   // observation pending (-1 sentinel)
+      const PEND_PX   = 4;           // pending-marker strip height
       const drawErrorOverlay = (chartContext) => {
         try {
           const w = chartContext?.w;
@@ -502,16 +514,27 @@
           const g = document.createElementNS(SVG_NS, 'g');
           g.setAttribute('class', OVL_GROUP);
           for (const e of errorSlots) {
-            const cx     = xPx(e.x + SLOT_MS / 2);  // bars are centred on slot midpoint
-            const yTop   = yPx(Math.max(e.forecastKwh, e.forecastKwh + e.errorKwh));
-            const yBot   = yPx(Math.min(e.forecastKwh, e.forecastKwh + e.errorKwh));
-            const rect   = document.createElementNS(SVG_NS, 'rect');
-            rect.setAttribute('x',      String(cx - colW / 2));
-            rect.setAttribute('y',      String(yTop));
-            rect.setAttribute('width',  String(colW));
-            rect.setAttribute('height', String(Math.max(1, yBot - yTop)));
-            rect.setAttribute('fill',   e.errorKwh > 0 ? ERR_POS : ERR_NEG);
-            rect.setAttribute('fill-opacity', '0.85');
+            const cx   = xPx(e.x + SLOT_MS / 2);  // bars are centred on slot midpoint
+            const rect = document.createElementNS(SVG_NS, 'rect');
+            rect.setAttribute('x',     String(cx - colW / 2));
+            rect.setAttribute('width', String(colW));
+            if (e.pending) {
+              // Thin grey strip sitting just above the forecast bar top —
+              // visible regardless of forecast magnitude (zero-forecast slots
+              // get the strip pinned to the x-axis).
+              const yTop = yPx(e.forecastKwh);
+              rect.setAttribute('y',      String(yTop - PEND_PX));
+              rect.setAttribute('height', String(PEND_PX));
+              rect.setAttribute('fill',   ERR_PEND);
+              rect.setAttribute('fill-opacity', '0.7');
+            } else {
+              const yTop = yPx(Math.max(e.forecastKwh, e.forecastKwh + e.errorKwh));
+              const yBot = yPx(Math.min(e.forecastKwh, e.forecastKwh + e.errorKwh));
+              rect.setAttribute('y',      String(yTop));
+              rect.setAttribute('height', String(Math.max(1, yBot - yTop)));
+              rect.setAttribute('fill',   e.errorKwh > 0 ? ERR_POS : ERR_NEG);
+              rect.setAttribute('fill-opacity', '0.85');
+            }
             g.appendChild(rect);
           }
           plotEl.appendChild(g);
