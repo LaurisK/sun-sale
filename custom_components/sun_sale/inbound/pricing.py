@@ -49,7 +49,6 @@ def build_price_series(
             buy_eur_kwh=buy,
             sell_eur_kwh=sell,
             spot_eur_kwh=p.price_eur_kwh,
-            sell_allowed=sell > 0.0,
             sources=("nordpool", "tariff"),
         ))
 

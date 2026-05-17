@@ -32,7 +32,7 @@ For each module: a one-line role, who it talks to (in/out), and a **status**:
 |---|---|---|
 | refactored | 6 | `inbound/pricing.py`, `inbound/forecast.py`, `inbound/generation.py`, `inbound/battery.py`, `pipeline/charging_profile.py`, `pipeline/base_load.py` |
 | missing | 1 | `pipeline/profitability.py` (no `profitability_missing.md` yet — see §9) |
-| old | 17 | `contract/*`, `inbound/translators.py`, `pipeline/{dag_engine,nodes,tariff,battery,calculator,optimizer,ev_scheduler}.py`, `outbound/*`, `orchestration/*`, `__init__.py`, `config_flow.py`, `sensor.py`, `switch.py` |
+| old | 16 | `contract/*`, `inbound/translators.py`, `pipeline/{dag_engine,nodes,tariff,battery,calculator,optimizer}.py`, `outbound/*`, `orchestration/*`, `__init__.py`, `config_flow.py`, `sensor.py`, `switch.py` |
 
 `docs/base_load_missing.md` is no longer "open" — the items it describes (`HouseholdLoadTranslator`, coordinator persistence, `BaseLoadProfileNode`, `BatteryRuntimeNode`, sensor dict entries) have been merged into `orchestration/coordinator.py` and `pipeline/nodes.py`. The doc stays as the rationale record for the 0.2 kW stub and the local-tz invariant.
 
@@ -74,7 +74,6 @@ flowchart TB
         P_bat["battery.py"]:::old
         P_calc["calculator.py"]:::old
         P_opt["optimizer.py"]:::old
-        P_ev["ev_scheduler.py"]:::old
         P_cp["charging_profile.py"]:::refactored
         P_bl["base_load.py"]:::refactored
         P_prof["profitability.py<br/>⚠ not wired"]:::missing
@@ -83,7 +82,6 @@ flowchart TB
     subgraph OUTBOUND["outbound/ — HA-write + presentation"]
         O_router["event_router.py"]:::old
         O_inv["inverter.py"]:::old
-        O_ev["ev_charger.py"]:::old
         O_dash["dashboard.py"]:::old
     end
 
@@ -102,7 +100,6 @@ flowchart TB
     %% HA boundary
     HA --> I_trans
     O_inv --> HA
-    O_ev --> HA
     R_init --> HA
     R_cfg --> HA
     R_sens --> HA
@@ -121,7 +118,6 @@ flowchart TB
     P_nodes --> P_bat
     P_nodes --> P_calc
     P_nodes --> P_opt
-    P_nodes --> P_ev
     P_nodes --> P_cp
     P_nodes --> P_bl
     P_prof -. "MISSING wiring" .-> P_nodes
@@ -129,7 +125,6 @@ flowchart TB
     %% Pipeline → Outbound
     P_nodes -- "ControlEvent list" --> O_router
     O_router --> O_inv
-    O_router --> O_ev
     P_nodes -- "DashboardData" --> O_dash
 
     %% Orchestration spans layers
@@ -137,7 +132,6 @@ flowchart TB
     ORCH_coord --> P_engine
     ORCH_coord --> O_router
     ORCH_coord --> O_inv
-    ORCH_coord --> O_ev
     ORCH_coord -. "primary/secondary" .-> ORCH_dbg
 
     %% Root → Orchestration
@@ -170,7 +164,7 @@ Pure data types. No imports from any other sun_sale layer. Everything else depen
 | Module | Role | Used by | Status |
 |---|---|---|---|
 | `contract/const.py` | DOMAIN, storage keys, config keys, defaults, retention windows | every layer | **old** |
-| `contract/events.py` | `ControlEvent` / `InverterActionEvent` / `EVActionEvent` | pipeline nodes (emit), outbound `event_router` (consume) | **old** |
+| `contract/events.py` | `ControlEvent` / `InverterActionEvent` | pipeline nodes (emit), outbound `event_router` (consume) | **old** |
 | `contract/models.py` | All dataclasses: configs, primary types, secondary types | everywhere | **old** |
 
 Note: `models.py` already carries the types for the missing module (`DayClass`, `DailyPeak`, `PriceHistory`, `ProfitabilityScore`). Adding new node-level types here is the usual path — the file is intentionally a flat catalogue rather than per-feature submodules.
@@ -183,7 +177,7 @@ Translators read HA state. Helpers normalise translator output into pipeline-rea
 
 | Module | Role | Inputs | Outputs | Status | Doc |
 |---|---|---|---|---|---|
-| `inbound/translators.py` | All HA-state readers (Nordpool, Solar, Battery, EV, Generation, HouseholdLoad). Sync `parse()` + async `translate()`. | `hass.states`, inverter/EV controllers | `NordpoolData`, `SolarData`, `BatteryReading`, `EVChargerState`, `GenerationReading`, `HouseholdLoadReading` | **old** | — |
+| `inbound/translators.py` | All HA-state readers (Nordpool, Solar, Battery, Generation, HouseholdLoad). Sync `parse()` + async `translate()`. | `hass.states`, inverter controller | `NordpoolData`, `SolarData`, `BatteryReading`, `GenerationReading`, `HouseholdLoadReading` | **old** | — |
 | `inbound/pricing.py` | Assemble 72h yesterday→today→tomorrow `PriceSeries` with tariff applied | `NordpoolData`, `YesterdayPrices`, `TariffConfig` | `PriceSeries` | **refactored** | `inbound_pricing.md` |
 | `inbound/forecast.py` | Resample `SolarData` onto `PriceSeries` grid | `SolarData`, `PriceSeries` | `GenerationSeries` | **refactored** | `inbound_forecast.md` |
 | `inbound/generation.py` | Difference inverter today-total samples into per-slot observed generation | `GenerationHistory`, `PriceSeries` | `ObservedGenerationSeries` | **refactored** | `inbound_generation.md` |
@@ -214,7 +208,6 @@ DAG engine + node logic + helper modules consumed by nodes. All pure Python.
 | `pipeline/charging_profile.py` | `ChargingProfileNode` | Per-slot disposition of today's remaining solar (battery / sell / no-export / idle) | **refactored** | `pipeline_charging_profile.md` |
 | `pipeline/base_load.py` | `BaseLoadProfileNode`, `BatteryRuntimeNode` | 24h hour-of-day baseload profile + worst-case runtime estimate | **refactored** | `pipeline_base_load.md` + `base_load_missing.md` (historical) |
 | `pipeline/optimizer.py` | `OptimizerNode` | Greedy pair-match schedule | **old** | — |
-| `pipeline/ev_scheduler.py` | `EVSchedulerNode` (optional) | EV charge plan from cheapest hours before departure | **old** | — |
 | `pipeline/profitability.py` | **none** | Day-class-normalised rolling percentile of daily peaks (sell-now vs hold) | **missing** | — (needs `profitability_missing.md`) |
 
 `profitability.py` is fully implemented as pure helpers and its types (`DayClass`, `DailyPeak`, `PriceHistory`, `ProfitabilityScore`) are in `contract/models.py`, with unit coverage in `tests/test_profitability.py`. What is **not** yet present: a `PriceHistoryTranslator`/coordinator-injected primary, a `ProfitabilityNode` in `pipeline/nodes.py`, a `STORAGE_KEY_PRICE_HISTORY` for daily-peak persistence, sensor exposure, and dashboard surfacing. See §9.
@@ -223,13 +216,12 @@ DAG engine + node logic + helper modules consumed by nodes. All pure Python.
 
 ## 6. Outbound layer
 
-HA writers + presentation builders. Only `inverter.py` and `ev_charger.py` actually call HA services.
+HA writers + presentation builders. Only `inverter.py` actually calls HA services.
 
 | Module | Role | Inputs | Outputs | Status |
 |---|---|---|---|---|
 | `outbound/event_router.py` | Receive `ControlEvent` list, dedupe inverter command keys, dispatch to controllers | `ControlEvent`s | controller calls | **old** |
 | `outbound/inverter.py` | `InverterController` — Solis-specific + abstract base. Reads SoC/power, dispatches charge/discharge/idle. | `hass`, entity IDs | HA service calls | **old** |
-| `outbound/ev_charger.py` | `EVChargerController` — start/stop charging, read plug state, read EV SoC | `hass`, entity IDs | HA service calls | **old** |
 | `outbound/dashboard.py` | Pure presentation builder: `build_future_slots`, `build_solar_frozen_forecast`. Writes nothing. | typed pipeline data | dict list for sensors | **old** |
 
 Two-layer deduplication: nodes themselves suppress emit on unchanged action keys, and `event_router` re-checks the inverter key before dispatch (belt-and-braces).
@@ -242,7 +234,7 @@ Glue: schedule, persistence, sensor dict mapping.
 
 | Module | Role | Status |
 |---|---|---|
-| `orchestration/coordinator.py` | `SunSaleCoordinator(DataUpdateCoordinator)`. Builds translator list, registers DAG nodes (incl. optional EV node), owns `Store` for capacity / yesterday prices / generation history / household-load history, injects `YesterdayPrices` + `EstimatedCapacity` primaries each cycle, routes events when automation is enabled, builds the string-keyed sensor dict. | **old** |
+| `orchestration/coordinator.py` | `SunSaleCoordinator(DataUpdateCoordinator)`. Builds translator list, registers DAG nodes, owns `Store` for capacity / yesterday prices / generation history / household-load history, injects `YesterdayPrices` + `EstimatedCapacity` primaries each cycle, routes events when automation is enabled, builds the string-keyed sensor dict. | **old** |
 | `orchestration/debug_view.py` | HTTP view at `/api/sun_sale/debug` exposing the most recent `primary` and `secondary`. | **old** |
 
 The coordinator is where new modules get wired in. Every "missing" follow-up tends to touch coordinator in three places: store load in `async_setup`, primary injection in `_async_update_data`, and an entry in `_build_sensor_dict`.
@@ -254,7 +246,7 @@ The coordinator is where new modules get wired in. Every "missing" follow-up ten
 | Module | Role | Status |
 |---|---|---|
 | `__init__.py` | `async_setup_entry` / `async_unload_entry`, panel registration, debug view registration, `force_recalculate` service | **old** |
-| `config_flow.py` | Multi-step ConfigFlow + OptionsFlow (tariff, battery, inverter, EV, entity selection) | **old** |
+| `config_flow.py` | Multi-step ConfigFlow + OptionsFlow (tariff, battery, inverter, entity selection) | **old** |
 | `sensor.py` | All HA sensor entities; read from `coordinator.data` string-keyed dict | **old** |
 | `switch.py` | `sun_sale_enabled` — when off, coordinator computes but doesn't dispatch events | **old** |
 

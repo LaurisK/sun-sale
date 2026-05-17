@@ -2,7 +2,7 @@
 
 Reference for `custom_components/sun_sale/inbound/pricing.py`.
 
-The pricing module owns the **72h yesterday→today→tomorrow `PriceSeries`** that every downstream consumer (calculator, optimizer, EV scheduler, dashboard, sensors) reads. It is pure Python with no Home Assistant imports.
+The pricing module owns the **72h yesterday→today→tomorrow `PriceSeries`** that every downstream consumer (calculator, optimizer, dashboard, sensors) reads. It is pure Python with no Home Assistant imports.
 
 ## Contents
 
@@ -85,8 +85,9 @@ Each `PriceSlot` carries:
 | `buy_eur_kwh` | Effective grid-import price (always ≥ 0 in practice) |
 | `sell_eur_kwh` | Effective grid-export revenue — **can be negative** |
 | `spot_eur_kwh` | Raw Nordpool price, retained for provenance |
-| `sell_allowed` | `sell_eur_kwh > 0.0` (strict — hard zero is `False`) |
 | `sources` | `("nordpool", "tariff")` for diagnostics |
+
+The pricing module emits raw buy/sell price data only. Whether a slot is sellable (the "sell allowed" decision) is not a pricing concern — it belongs to the charging-profile stage, which decides what to do with generated energy based on `sell_eur_kwh`.
 
 ---
 
@@ -99,7 +100,7 @@ buy  = (spot + distribution_fee + markup) * (1 + tax_rate)
 sell = (spot - sell_distribution_fee - sell_markup) * (1 - sell_tax_rate)
 ```
 
-`sell_allowed` is a strict `> 0` check, so a slot whose effective sell price computes to exactly `0.0` is marked **not sellable** (avoids round-trip energy loss with zero revenue).
+`sell_eur_kwh` can be negative (high sell fees against low spot prices) or exactly zero. Downstream consumers — primarily the charging profile — apply the strict `> 0` sellability check; the pricing module itself does not flag this.
 
 ---
 
@@ -157,9 +158,9 @@ Run them with:
 | Tariff math | `test_buy_price_formula` | Buy = `(spot + distribution + markup) * (1 + tax)` |
 | | `test_sell_price_formula` | Sell = `(spot - dist - markup) * (1 - tax)` |
 | | `test_spot_price_preserved` | Raw spot retained on slot |
-| Sell guard | `test_negative_spot_produces_negative_sell` | Negative spot → negative sell, `sell_allowed=False` |
-| | `test_positive_spot_produces_sell_allowed` | Positive spot → `sell_allowed=True` |
-| | `test_sell_allowed_boundary_hard_zero` | `sell == 0.0` exact → `sell_allowed=False` (strict `>`) |
+| Sell sign | `test_negative_spot_produces_negative_sell` | Negative spot → `sell_eur_kwh < 0` |
+| | `test_positive_spot_produces_positive_sell` | Positive spot → `sell_eur_kwh > 0` |
+| | `test_sell_price_can_be_exactly_zero` | Fees that exactly cancel spot → `sell_eur_kwh == 0.0` |
 | Resolution | `test_hourly_resolution_detected` | Hourly slot stride → `timedelta(hours=1)` |
 | | `test_single_slot_defaults_to_hourly_resolution` | Single slot → defaults to 1h when no `resolution` arg |
 | Helpers | `test_slot_at_returns_correct_slot` | `slot_at(t)` picks the slot containing `t` |

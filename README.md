@@ -1,6 +1,6 @@
 # sunSale
 
-A Home Assistant custom integration that automates electricity **buying, selling, and EV charging** decisions for households with solar panels and battery storage. It optimises the battery and EV charger purely around Nordpool spot prices, your tariff formula, solar generation, battery state, and battery degradation cost.
+A Home Assistant custom integration that automates electricity **buying and selling** decisions for households with solar panels and battery storage. It optimises the battery purely around Nordpool spot prices, your tariff formula, solar generation, battery state, and battery degradation cost.
 
 > **Status: alpha (v0.1.2).** Structurally complete and unit-tested. Huawei Solar and Solis have dedicated inverter branches; SolarEdge and GoodWe fall through to a generic `number.set_value` call and will likely need adjustment. Use the **Automation** master switch to run in observation mode first.
 
@@ -18,7 +18,6 @@ A Home Assistant custom integration that automates electricity **buying, selling
   - SoC limits and round-trip efficiency,
   - Battery degradation cost (derived from purchase price, rated cycle life, and learned capacity).
 - Drives the inverter via HA service calls to charge from grid, discharge to grid, or idle.
-- Optionally schedules EV charging into the cheapest hours before a configured departure time.
 - Learns the battery's actual usable capacity over time from observed SoC deltas and energy throughput.
 
 ## What it does NOT do
@@ -37,7 +36,6 @@ A Home Assistant custom integration that automates electricity **buying, selling
 | [Nordpool integration](https://github.com/custom-components/nordpool) | Hourly spot prices (`today` / `tomorrow` attributes) |
 | An inverter / battery integration | SoC, battery power, grid power, and a charge-control entity |
 | Solar forecast integration *(optional)* | Forecast.Solar, Solcast, etc. |
-| EV charger integration *(optional)* | OpenEVSE, Easee, Wallbox, or any switch-controllable charger |
 
 The integration declares no Python `requirements` of its own — it consumes data via the HA state machine.
 
@@ -48,13 +46,6 @@ Selectable in the config flow:
 - `huawei_solar` — dedicated branch: writes signed watt values to the charge-control `number` entity (positive = charge, negative = discharge).
 - `solis_modbus` — dedicated branch: uses the [Pho3niX90/solis_modbus](https://github.com/Pho3niX90/solis_modbus) integration's native Time-of-Use (TOU) scheduling model. Rather than a single setpoint, sunSale writes charge/discharge amps and slot-1 start/end times each cycle, and toggles the TOU/self-use mode switches. The config flow shows pre-filled defaults for the canonical solis_modbus entity IDs; you only need to change them if your instance uses a custom prefix. Configure the **Nominal DC bus voltage** on the Battery step (48 V for most low-voltage residential packs; ~400 V for Pylontech HV and similar high-voltage systems) — this is required for correct kW→A conversion.
 - `solaredge`, `goodwe`, `generic` — share the **generic** code path: write signed kW to the configured `number` entity. **Verify this matches what your inverter integration accepts** before enabling automation.
-
-### Supported EV charger platforms
-
-- `openevse` — sets charge current via a `number` entity, then `switch.turn_on`.
-- `easee` — calls the `easee.start_charging` / `easee.stop_charging` services.
-- `wallbox` — calls the `wallbox.start_charging` / `wallbox.stop_charging` services.
-- `generic` — plain `switch.turn_on` / `switch.turn_off`.
 
 ---
 
@@ -98,7 +89,7 @@ sunSale ships with `hacs.json` and is installable as a HACS **custom repository*
 
 ## Configuration
 
-The config flow has five steps. Have your entity IDs ready before you start.
+The config flow has four steps. Have your entity IDs ready before you start.
 
 ### 1. Tariff
 
@@ -160,16 +151,7 @@ Pick the platform. The next step depends on the selection:
 | Allow-grid-charge switch | `switch.solis_allow_grid_to_charge_the_battery` |
 | Self-use mode switch | `switch.solis_self_use_mode` |
 
-### 4. EV charger *(optional)*
-
-Toggle off if you don't have one. Otherwise pick a platform and provide:
-
-- Plug-state binary sensor.
-- EV SoC sensor *(optional)*, target SoC sensor *(optional)*, departure-time sensor *(optional)*.
-- Charger switch / charger ID.
-- Battery capacity (kWh), max / min charge power (kW).
-
-### 5. Data sources
+### 4. Data sources
 
 - **Nordpool entity** — typically `sensor.nordpool_kwh_<area>_eur_3_10_0` or similar. The integration prefers `raw_today` / `raw_tomorrow` (15-min slots with timestamps) and falls back to legacy hourly `today` / `tomorrow` arrays when only those are present.
 - **Solar forecast entity** *(optional)* — must expose a `forecast` attribute as a list of `{time, pv_estimate | energy}` entries.
@@ -192,8 +174,6 @@ Created under a single `sunSale` device:
 | `sensor.sunsale_estimated_battery_capacity` | kWh | Learned usable capacity |
 | `sensor.sunsale_current_buy_price` | EUR/kWh | Effective buy price right now |
 | `sensor.sunsale_current_sell_price` | EUR/kWh | Effective sell price right now |
-| `sensor.sunsale_ev_charging` | `on` / `off` | Whether EV should charge in the current hour |
-| `sensor.sunsale_ev_charge_cost` | EUR | Total cost of the planned EV session |
 | `sensor.sunsale_schedule` | sensor | Current action; full hourly plan in `extra_state_attributes.schedule` |
 | `sensor.sunsale_inverter_mode` | sensor | Current inverter mode label (recorded in HA history for the dashboard's past-mode band) |
 | `sensor.sunsale_dashboard` | sensor | Pre-built 15-min slots and frozen solar forecast consumed by the side-panel chart |
@@ -223,13 +203,13 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements_dev.txt
 
-pytest tests/                         # full suite, optimiser + tariff + battery + EV scheduler + entity smoke
+pytest tests/                         # full suite, optimiser + tariff + battery + entity smoke
 pytest tests/test_optimizer.py        # one file
 ruff check custom_components/sun_sale/
 mypy custom_components/sun_sale/
 ```
 
-The computation core (`dag_engine.py`, `nodes.py`, `events.py`, `event_router.py`, `pricing.py`, `forecast.py`, `calculator.py`, `optimizer.py`, `ev_scheduler.py`, `tariff.py`, `battery.py`, `dashboard.py`, `models.py`) is pure Python with no Home Assistant imports, so it runs fully under plain `pytest` without an HA test harness.
+The computation core (`dag_engine.py`, `nodes.py`, `events.py`, `event_router.py`, `pricing.py`, `forecast.py`, `calculator.py`, `optimizer.py`, `tariff.py`, `battery.py`, `dashboard.py`, `models.py`) is pure Python with no Home Assistant imports, so it runs fully under plain `pytest` without an HA test harness.
 
 ### Architecture
 
@@ -242,7 +222,7 @@ HA state machine
 ┌─────────────────────────────────────────┐
 │  Translation Layer  (translators.py)    │
 │  NordpoolTranslator · SolarTranslator   │
-│  BatteryTranslator  · EVTranslator      │
+│  BatteryTranslator                      │
 └─────────────────────────────────────────┘
       │  typed primary data
       ▼
@@ -251,7 +231,6 @@ HA state machine
 │                                         │
 │  T1  PricingNode   BatteryStateNode     │
 │  T2  GenerationNode  DegradationNode    │
-│      EVSchedulerNode (opt.)             │
 │  T3  LockoutNode                        │
 │  T4  OptimizerNode                      │
 │  T5  DashboardNode                      │
@@ -260,11 +239,11 @@ HA state machine
       ▼
 ┌─────────────────────────────────────────┐
 │  EventRouter  (event_router.py)         │
-│  → InverterController / EVChargerCtrl   │
+│  → InverterController                   │
 └─────────────────────────────────────────┘
 ```
 
-Each DAG node declares its `tier`, `output_type`, and `consumes` list. The engine auto-wires observer relationships and enforces that a node may only consume outputs from nodes in a strictly lower tier (prevents cycles). Within each tier all ready nodes run concurrently via `asyncio.gather`. Nodes emit typed `ControlEvent` objects; the `EventRouter` deduplicates and dispatches to the inverter/EV-charger output adapters.
+Each DAG node declares its `tier`, `output_type`, and `consumes` list. The engine auto-wires observer relationships and enforces that a node may only consume outputs from nodes in a strictly lower tier (prevents cycles). Within each tier all ready nodes run concurrently via `asyncio.gather`. Nodes emit typed `ControlEvent` objects; the `EventRouter` deduplicates and dispatches to the inverter output adapter.
 
 ### Layout
 
@@ -278,13 +257,13 @@ Each DAG node declares its `tier`, `output_type`, and `consumes` list. The engin
     ├── __init__.py          # entry setup, force_recalculate service
     ├── manifest.json
     ├── const.py
-    ├── config_flow.py       # 5-step UI flow + options flow
+    ├── config_flow.py       # 4-step UI flow + options flow
     ├── coordinator.py       # orchestrator: translators → DAG engine → event router
     ├── models.py            # all dataclasses and SunSaleConfig (no HA deps)
     ├── dag_engine.py        # DagNode ABC, DagEngine, NodeContext, tier enforcement
     ├── nodes.py             # all 8 DAG computation nodes (pure Python)
     ├── translators.py       # HA state → typed primary data (only file with HA reads)
-    ├── events.py            # ControlEvent hierarchy (InverterActionEvent, EVActionEvent)
+    ├── events.py            # ControlEvent hierarchy (InverterActionEvent)
     ├── event_router.py      # routes ControlEvents to output adapters with deduplication
     ├── pricing.py           # build_price_series — applies tariff formulas to Nordpool slots
     ├── forecast.py          # build_generation_series — Open Meteo / Forecast.Solar parser
@@ -292,9 +271,7 @@ Each DAG node declares its `tier`, `output_type`, and `consumes` list. The engin
     ├── tariff.py            # spot → effective buy/sell price formula
     ├── battery.py           # degradation cost + capacity learner
     ├── optimizer.py         # greedy pair-matching schedule
-    ├── ev_scheduler.py      # cheapest-hours EV charging plan
     ├── inverter.py          # inverter platform abstraction (Huawei, Solis, generic)
-    ├── ev_charger.py        # EV charger platform abstraction
     ├── sensor.py            # HA sensor entities
     ├── switch.py            # automation kill-switch
     ├── debug_view.py        # /api/sun_sale/debug JSON snapshot view

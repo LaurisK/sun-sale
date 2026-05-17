@@ -159,7 +159,6 @@ class PriceSlot:
     buy_eur_kwh: float    # effective buy price (spot + fees + tax)
     sell_eur_kwh: float   # effective sell price — can be NEGATIVE
     spot_eur_kwh: float   # raw nordpool, kept for provenance
-    sell_allowed: bool    # sell_eur_kwh > 0
     sources: tuple[str, ...]  # ("nordpool", "tariff") — for diagnostics
 
 
@@ -248,6 +247,43 @@ class ObservedGenerationSeries:
     computed_at: datetime
     total_yesterday_kwh: float = 0.0
     total_today_so_far_kwh: float = 0.0
+
+
+@dataclass(frozen=True)
+class ForecastErrorSlot:
+    """Per-slot forecast vs. observed solar generation delta.
+
+    `error_kwh = observed_kwh - forecast_kwh`. Positive means the forecast
+    under-predicted (actual generation exceeded the forecast); negative means
+    it over-predicted. `relative_error` is `error_kwh / forecast_kwh` when
+    the forecast is non-zero; None when the forecast was zero (relative error
+    is undefined and would otherwise blow up the series-level MAPE).
+    """
+    start: datetime
+    end: datetime
+    forecast_kwh: float
+    observed_kwh: float
+    error_kwh: float
+    relative_error: float | None
+
+
+@dataclass(frozen=True)
+class ForecastErrorSeries:
+    """Aligned forecast/observed error series over the overlap window.
+
+    Slots are those for which both a forecast and an observation exist (the
+    observed series covers yesterday 00:00 → now, so future slots are absent).
+    Statistics summarise the slots in this series and are intended to feed a
+    future calibration/correction stage that minimises forecast error.
+    """
+    slots: tuple[ForecastErrorSlot, ...]
+    total_forecast_kwh: float
+    total_observed_kwh: float
+    total_error_kwh: float           # sum of signed errors
+    mean_absolute_error_kwh: float    # MAE per slot (mean of |error_kwh|)
+    bias_kwh: float                    # mean signed error per slot
+    mean_absolute_percentage_error: float | None    # MAPE (forecast-weighted); None when total_forecast_kwh == 0
+    computed_at: datetime
 
 
 @dataclass(frozen=True)

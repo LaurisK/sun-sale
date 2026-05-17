@@ -6,7 +6,7 @@ End-to-end description of the tiered observer DAG that drives every sunSale upda
 |---|---|
 | **Status** | Implemented |
 | **Pattern** | Translation layer + inbound normalisers + tiered observer DAG + event router |
-| **HA boundary** | HA imports confined to root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/`, and `outbound/inverter.py` + `outbound/ev_charger.py`. `inbound/translators.py` does not import HA but receives `hass` at runtime to read `hass.states`. All other modules are pure Python. |
+| **HA boundary** | HA imports confined to root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/`, and `outbound/inverter.py`. `inbound/translators.py` does not import HA but receives `hass` at runtime to read `hass.states`. All other modules are pure Python. |
 
 ## Contents
 
@@ -34,7 +34,6 @@ HA state machine
 │  NordpoolTranslator   →  NordpoolData                   │
 │  SolarTranslator      →  SolarData                      │
 │  BatteryTranslator    →  BatteryReading                 │
-│  EVTranslator         →  EVChargerState (EV optional)   │
 └─────────────────────────────────────────────────────────┘
       │  typed primary data (dict[type, Any])
       │  + YesterdayPrices, EstimatedCapacity (injected by coordinator)
@@ -44,7 +43,6 @@ HA state machine
 │                                                         │
 │  T1  PricingNode      BatteryStateNode                  │
 │  T2  GenerationNode   DegradationNode                   │
-│      EVSchedulerNode  (EV optional)                     │
 │  T3  LockoutNode      ChargingProfileNode               │
 │  T4  OptimizerNode                                      │
 │  T5  DashboardNode                                      │
@@ -57,14 +55,12 @@ HA state machine
 │    pipeline/calculator.py        (lockout windows)      │
 │    pipeline/charging_profile.py  (solar disposition)    │
 │    pipeline/optimizer.py         (greedy pair-match)    │
-│    pipeline/ev_scheduler.py                             │
 └─────────────────────────────────────────────────────────┘
       │  ControlEvents
       ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Event Router             outbound/event_router.py      │
 │  → InverterController     outbound/inverter.py          │
-│  → EVChargerController    outbound/ev_charger.py        │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -83,7 +79,7 @@ custom_components/sun_sale/
 │
 ├── contract/                    Pure data types — no logic, no imports of other layers
 │   ├── const.py                 Storage keys, conf keys, defaults
-│   ├── events.py                ControlEvent / InverterActionEvent / EVActionEvent
+│   ├── events.py                ControlEvent / InverterActionEvent
 │   └── models.py                All dataclasses (configs, primary types, secondary types)
 │
 ├── inbound/                     HA-read translators + pure-Python normalisers
@@ -99,13 +95,11 @@ custom_components/sun_sale/
 │   ├── battery.py               CapacityEstimator, degradation_cost_per_kwh
 │   ├── calculator.py            Lockout windows, slot decisions
 │   ├── charging_profile.py      Per-slot solar disposition (battery/sell/no-export)
-│   ├── optimizer.py             Greedy pair-match schedule
-│   └── ev_scheduler.py          EV charge plan
+│   └── optimizer.py             Greedy pair-match schedule
 │
 ├── outbound/                    HA-write adapters + event routing
 │   ├── event_router.py          Deduplicates and routes ControlEvents
 │   ├── inverter.py              InverterController (Solis + abstract)
-│   ├── ev_charger.py            EVChargerController
 │   └── dashboard.py             Build future_slots / frozen forecast (pure)
 │
 └── orchestration/               Glue: schedule, persistence, sensor dict mapping
@@ -121,7 +115,7 @@ Layering rule: `contract` imports nothing from the integration. `inbound`/`pipel
 
 **File:** `inbound/translators.py`
 
-Translators are the primary HA-state readers. The only other modules that touch `hass.states` are `outbound/inverter.py` and `outbound/ev_charger.py`, which read live device telemetry (SoC, plug state, etc.) on demand from their controller methods. All remaining modules are pure Python.
+Translators are the primary HA-state readers. The only other module that touches `hass.states` is `outbound/inverter.py`, which reads live device telemetry (SoC, etc.) on demand from its controller methods. All remaining modules are pure Python.
 
 Translator modules themselves do **not** import the `homeassistant` package — they accept `hass: Any` and call methods on it at runtime, which keeps them unit-testable without an HA harness.
 
@@ -132,7 +126,6 @@ Each translator has a synchronous `.parse(hass, now)` method (testable without H
 | `NordpoolTranslator` | `NordpoolData` | Nordpool sensor — prefers `raw_today`/`raw_tomorrow` (timestamped slots, 15-min or hourly), falls back to legacy flat `today`/`tomorrow` arrays. Resolution is auto-detected from slot stride. Tomorrow is zero-filled until the day-ahead market publishes. |
 | `SolarTranslator` | `SolarData` | Open-Meteo `watts` dict preferred; Forecast.Solar / Solcast `forecast` attribute as fallback. Combines today + tomorrow entities and multi-panel sources by summing at matching timestamps. |
 | `BatteryTranslator` | `BatteryReading` | `InverterController` for SoC/power/grid; HA state for household load sensor (with default fallback). |
-| `EVTranslator` | `EVChargerState` | `EVChargerController` for plug-state and SoC; HA state for target SoC and departure time. Only registered when `CONF_EV_ENABLED=True`. |
 
 All translators run in parallel via `asyncio.gather` (`run_translators` in `pipeline/dag_engine.py`) before the DAG starts.
 
@@ -186,7 +179,7 @@ All ready nodes in a tier run concurrently. Primary data (translator outputs plu
 class NodeContext:
     primary:   dict[type, Any]    # translator + coordinator-injected primary data
     secondary: dict[type, Any]    # node outputs — accumulated tier by tier
-    config:    SunSaleConfig      # tariff + battery + EV config
+    config:    SunSaleConfig      # tariff + battery config
     now:       datetime
 
     def require(self, t: type) -> Any   # raises MissingDependencyError if absent
@@ -197,7 +190,7 @@ class NodeContext:
 
 ## 5. Layer 3 — Event router and output adapters (outbound)
 
-**Files:** `outbound/event_router.py`, `outbound/inverter.py`, `outbound/ev_charger.py`
+**Files:** `outbound/event_router.py`, `outbound/inverter.py`
 
 Nodes emit `ControlEvent` objects (defined in `contract/events.py`) alongside their computed result. The coordinator collects all events from the DAG run and passes them to `EventRouter.handle()` only when automation is enabled.
 
@@ -206,18 +199,14 @@ Nodes emit `ControlEvent` objects (defined in `contract/events.py`) alongside th
 class InverterActionEvent(ControlEvent):
     action: Action       # IDLE | CHARGE_FROM_GRID | DISCHARGE_TO_GRID | CHARGE_FROM_SOLAR
     power_kw: float
-
-@dataclass(frozen=True)
-class EVActionEvent(ControlEvent):
-    charge_power_kw: float   # 0.0 = stop charging
 ```
 
 Dedup happens at two layers:
 
-- **Node-side** — `OptimizerNode` and `EVSchedulerNode` each hold a mutable `_LastActionRef` cell that tracks the last action key. They only emit an event when the current-slot action differs from the previous cycle's.
-- **Router-side** — `EventRouter` additionally keeps `_last_inverter_key` and re-checks `f"{action}:{power_kw:.3f}"` before calling the inverter controller, so a duplicate inverter command would still be suppressed even if a node emitted one. EV events have only node-side dedup.
+- **Node-side** — `OptimizerNode` holds a mutable `_LastActionRef` cell that tracks the last action key. It only emits an event when the current-slot action differs from the previous cycle's.
+- **Router-side** — `EventRouter` additionally keeps `_last_inverter_key` and re-checks `f"{action}:{power_kw:.3f}"` before calling the inverter controller, so a duplicate inverter command would still be suppressed even if a node emitted one.
 
-The output controllers (`InverterController`, `EVChargerController`) contain all platform-specific HA service-call logic and are the only outbound writers to HA.
+The `InverterController` contains all platform-specific HA service-call logic and is the only outbound writer to HA.
 
 `outbound/dashboard.py` is also in this layer but is **pure Python** — it builds presentation dicts for `DashboardNode` from already-typed data and writes nothing.
 
@@ -231,8 +220,8 @@ The output controllers (`InverterController`, `EVChargerController`) contain all
 
 `async_setup()` (once at integration load):
 
-1. Build `TariffConfig`, `BatteryConfig`, optional `EVChargerConfig` from the config entry.
-2. Instantiate `InverterController` (Solis or abstract) and optional `EVChargerController`.
+1. Build `TariffConfig`, `BatteryConfig` from the config entry.
+2. Instantiate `InverterController` (Solis or abstract).
 3. Build translator list, DAG node list, `DagEngine`, `EventRouter`.
 4. Load `CapacityEstimator` state from `STORAGE_KEY_CAPACITY`.
 5. Load yesterday entries (Nordpool + solar) from `STORAGE_KEY_YESTERDAY`.
@@ -246,7 +235,7 @@ The output controllers (`InverterController`, `EVChargerController`) contain all
 5. **Capacity estimation** — derive a `CapacityObservation` from the SoC delta vs. `_last_battery_reading`; add it to the `CapacityEstimator` and persist. Inject `EstimatedCapacity` into `primary`.
 6. **DAG run** — `DagEngine.run(primary, config, now)` executes tiers T1→T5; returns `secondary` dict + all emitted events.
 7. **Route events** — pass each event to `EventRouter.handle()` (only when `automation_enabled`); update `last_dispatched_action` / `last_dispatched_at` for the UI.
-8. **Build sensor dict** — map type-keyed `secondary` entries to the string-keyed dict sensors read (`"pricing"`, `"forecast"`, `"calculation"`, `"schedule"`, `"ev_schedule"`, `"battery_state"`, `"degradation_cost"`, `"estimated_capacity"`, `"prices"`, `"grid_power_kw"`, `"battery_power_kw"`, `"ev_state"`, `"dashboard_slots"`, `"solar_frozen_forecast"`).
+8. **Build sensor dict** — map type-keyed `secondary` entries to the string-keyed dict sensors read (`"pricing"`, `"forecast"`, `"calculation"`, `"schedule"`, `"battery_state"`, `"degradation_cost"`, `"estimated_capacity"`, `"prices"`, `"grid_power_kw"`, `"battery_power_kw"`, `"dashboard_slots"`, `"solar_frozen_forecast"`).
 
 The coordinator contains no domain computation — it owns the schedule, the persistent stores, and the string↔type bridge to sensors.
 
@@ -263,13 +252,10 @@ The coordinator contains no domain computation — it owns the schedule, the per
 | `BatteryStatusNode` | 1 | `BatteryReading` | `BatteryStatus` | — |
 | `GenerationNode` | 2 | `SolarData`, `PriceSeries` | `GenerationSeries` | — |
 | `DegradationNode` | 2 | `BatteryState` | `DegradationCost` | — |
-| `EVSchedulerNode` | 2 | `PriceSeries`, `EVChargerState` | `EVSchedule` | `EVActionEvent` (on change) |
 | `ChargingProfileNode` | 3 | `BatteryStatus`, `GenerationSeries`, `PriceSeries` | `ChargingProfile` | — |
-| `LockoutNode` | 3 | `PriceSeries`, `GenerationSeries`, `BatteryState` (+ optional `EVChargerState` via `ctx.get`) | `CalculationResult` | — |
+| `LockoutNode` | 3 | `PriceSeries`, `GenerationSeries`, `BatteryState` | `CalculationResult` | — |
 | `OptimizerNode` | 4 | `PriceSeries`, `CalculationResult`, `GenerationSeries`, `BatteryState`, `DegradationCost` | `Schedule` | `InverterActionEvent` (on change) |
 | `DashboardNode` | 5 | `NordpoolData`, `SolarData`, `BatteryReading`, `PriceSeries`, `GenerationSeries`, `Schedule` | `DashboardData` | — |
-
-`EVSchedulerNode` is only registered when `CONF_EV_ENABLED=True`. `EVChargerState` is then a primary input (from `EVTranslator`); when EV is disabled it is absent from `primary` and `LockoutNode` uses `ctx.get(EVChargerState)` (returns `None`).
 
 ---
 
@@ -286,7 +272,6 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 | `SolarData` | `SolarTranslator` | `entries: list[SolarEntry]`, `total_today_kwh: float`, `today_remaining_kwh: float`, `primary_source: str` |
 | `BatteryReading` | `BatteryTranslator` | `soc`, `power_kw`, `grid_power_kw`, `household_load_kw` |
 | `EstimatedCapacity` | Coordinator (from `CapacityEstimator`) | `value_kwh: float` |
-| `EVChargerState` | `EVTranslator` (EV only) | `is_plugged_in`, `soc`, `target_soc`, `departure_time` |
 
 ### Secondary data (in `NodeContext.secondary`)
 
@@ -297,19 +282,18 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 | `BatteryStatus` | `BatteryStatusNode` | `total_capacity_kwh`, `max_charge_power_kw`, `max_discharge_power_kw`, `soc`, `remaining_capacity_kwh` |
 | `GenerationSeries` | `GenerationNode` | `slots: tuple[GenerationSlot, ...]`, `primary: str`, `overlays: tuple[str, ...]`, `computed_at` |
 | `DegradationCost` | `DegradationNode` | `value_kwh: float` |
-| `EVSchedule` | `EVSchedulerNode` | `slots: list[EVChargeSlot]`, `total_cost_eur`, `total_energy_kwh`, `computed_at` |
 | `CalculationResult` | `LockoutNode` | `slots: tuple[SlotDecision, ...]`, `feed_in_lockout_windows`, `total_negative_sale_kwh`, `computed_at` |
 | `ChargingProfile` | `ChargingProfileNode` | `slots: tuple[ChargingProfileSlot, ...]` (today's remaining; `mode ∈ {solar_charge, sell, no_export, idle}`), `free_capacity_kwh`, `today_remaining_generation_kwh`, `solar_exceeds_capacity`, `allocated_solar_kwh`, `total_no_export_kwh`, `computed_at` |
 | `Schedule` | `OptimizerNode` | `slots: list[ScheduleSlot]`, `total_expected_profit_eur`, `degradation_cost_per_kwh`, `computed_at` |
 | `DashboardData` | `DashboardNode` | `future_slots: list[dict]`, `solar_frozen_forecast: list[dict]` |
 
-`PriceSlot` carries `buy_eur_kwh`, `sell_eur_kwh` (can be negative), `spot_eur_kwh`, `sell_allowed` (strict `> 0`), and `sources: tuple[str, ...]` for diagnostics. See `docs/inbound_pricing.md`.
+`PriceSlot` carries `buy_eur_kwh`, `sell_eur_kwh` (can be negative or zero), `spot_eur_kwh`, and `sources: tuple[str, ...]` for diagnostics. Sellability (the strict `> 0` check) lives downstream in the charging-profile stage. See `docs/inbound_pricing.md`.
 
 ---
 
 ## 9. Key design decisions
 
-**HA boundary.** HA imports are confined to the root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/coordinator.py`, `orchestration/debug_view.py`, and the two outbound controllers (`outbound/inverter.py`, `outbound/ev_charger.py`). `inbound/translators.py` reads `hass.states` but never imports the `homeassistant` package — it works on duck-typed `hass`. Every other module is pure Python and testable with plain `pytest` without an HA harness.
+**HA boundary.** HA imports are confined to the root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/coordinator.py`, `orchestration/debug_view.py`, and the outbound controller (`outbound/inverter.py`). `inbound/translators.py` reads `hass.states` but never imports the `homeassistant` package — it works on duck-typed `hass`. Every other module is pure Python and testable with plain `pytest` without an HA harness.
 
 **Sub-package layering enforces direction.** `contract` depends on nothing. `inbound` / `pipeline` / `outbound` depend only on `contract`. `orchestration` is the only layer allowed to glue them. This is enforced by convention (and would surface as a circular import if violated).
 
@@ -319,8 +303,6 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 
 **Events vs. return values.** Nodes return their computed data *and* a list of `ControlEvent` objects. Events signal side-effects (send an inverter command); the return value is data that flows to downstream nodes. Keeping them separate means the engine can route them independently.
 
-**Two-layer deduplication.** `OptimizerNode` and `EVSchedulerNode` suppress emitting an event when the current-slot action key matches the previous cycle (`_LastActionRef`). `EventRouter` additionally re-checks the inverter key (`_last_inverter_key`) before dispatching, giving belt-and-braces protection against duplicate inverter commands. EV events rely on node-side dedup only.
+**Two-layer deduplication.** `OptimizerNode` suppresses emitting an event when the current-slot action key matches the previous cycle (`_LastActionRef`). `EventRouter` additionally re-checks the inverter key (`_last_inverter_key`) before dispatching, giving belt-and-braces protection against duplicate inverter commands.
 
 **Coordinator-injected primary data.** `YesterdayPrices` and `EstimatedCapacity` are not translator outputs — they are stateful values the coordinator owns across cycles (loaded from `Store`, updated each cycle) and deposited into `primary` before `DagEngine.run()`. Treating them as primary data keeps DAG nodes stateless and the engine free of cross-cycle state.
-
-**Optional EV path is additive.** When EV is disabled, `EVTranslator` and `EVChargerController` are not constructed, `EVChargerState` is absent from `primary`, and `EVSchedulerNode` is not added to the engine. `LockoutNode` uses `ctx.get(EVChargerState)` (returns `None`); all other nodes ignore EV types entirely. No conditional EV branches scattered through the DAG.

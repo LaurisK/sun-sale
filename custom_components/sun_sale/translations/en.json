@@ -62,22 +62,6 @@
           "inverter_solis_self_use_mode_switch": "Self-use mode switch entity"
         }
       },
-      "ev": {
-        "title": "EV Charger (Optional)",
-        "description": "Leave 'Enable EV charger' off to skip.",
-        "data": {
-          "ev_enabled": "Enable EV charger control",
-          "ev_platform": "EV charger platform",
-          "ev_battery_capacity_kwh": "EV battery capacity (kWh)",
-          "ev_max_charge_power_kw": "Max charge power (kW)",
-          "ev_min_charge_power_kw": "Min charge power (kW)",
-          "ev_entity_plug_state": "Plug state entity (binary_sensor)",
-          "ev_entity_soc": "EV SoC entity (sensor, optional)",
-          "ev_entity_target_soc": "Target SoC entity (sensor, optional)",
-          "ev_entity_departure_time": "Departure time entity (optional)",
-          "ev_entity_charger_switch": "Charger switch / ID entity"
-        }
-      },
       "sources": {
         "title": "Data Sources",
         "description": "Select the Nordpool and solar forecast entities.",
@@ -160,22 +144,6 @@
           "inverter_solis_tou_mode_switch": "TOU mode switch entity",
           "inverter_solis_allow_grid_charge_switch": "Allow-grid-charge switch entity",
           "inverter_solis_self_use_mode_switch": "Self-use mode switch entity"
-        }
-      },
-      "ev": {
-        "title": "EV Charger (Optional)",
-        "description": "Leave 'Enable EV charger' off to skip.",
-        "data": {
-          "ev_enabled": "Enable EV charger control",
-          "ev_platform": "EV charger platform",
-          "ev_battery_capacity_kwh": "EV battery capacity (kWh)",
-          "ev_max_charge_power_kw": "Max charge power (kW)",
-          "ev_min_charge_power_kw": "Min charge power (kW)",
-          "ev_entity_plug_state": "Plug state entity (binary_sensor)",
-          "ev_entity_soc": "EV SoC entity (sensor, optional)",
-          "ev_entity_target_soc": "Target SoC entity (optional)",
-          "ev_entity_departure_time": "Departure time entity (optional)",
-          "ev_entity_charger_switch": "Charger switch entity"
         }
       },
       "sources": {

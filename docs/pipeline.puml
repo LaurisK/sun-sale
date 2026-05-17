@@ -61,39 +61,21 @@ package "Translation Layer" #D6EAF8 {
     household_load_kw : float
   }
 
-  class EVTranslator <<optional>> {
-    - ev_charger : EVChargerController
-    - target_soc_entity : str
-    - departure_entity : str
-    ..
-    + translate(hass, config, raw_config, now) : EVChargerState
-  }
-  class EVChargerState <<primary>> {
-    is_plugged_in : bool
-    soc : float
-    target_soc : float
-    departure_time : datetime
-  }
-
   ' ── 2-column: translator (left) | output type (right) ──
   NordpoolTranslator -[hidden]right- NordpoolData
   SolarTranslator    -[hidden]right- SolarData
   BatteryTranslator  -[hidden]right- BatteryReading
-  EVTranslator       -[hidden]right- EVChargerState
 
   ' ── row ordering top→bottom ──
   NordpoolTranslator -[hidden]down-> SolarTranslator
   SolarTranslator    -[hidden]down-> BatteryTranslator
-  BatteryTranslator  -[hidden]down-> EVTranslator
   NordpoolData       -[hidden]down-> SolarData
   SolarData          -[hidden]down-> BatteryReading
-  BatteryReading     -[hidden]down-> EVChargerState
 
   ' ── produces ──
   NordpoolTranslator o--> NordpoolData
   SolarTranslator    o--> SolarData
   BatteryTranslator  o--> BatteryReading
-  EVTranslator       o--> EVChargerState
 }
 
 ' ══════════════════════════════════════════════════════════════
@@ -182,28 +164,13 @@ package "DAG Tier 2" #FDFDE8 {
     value_kwh : float
   }
 
-  class EVSchedulerNode <<optional>> {
-    tier = 2
-    + compute(ctx : NodeContext) : EVSchedule
-    .. emits: EVActionEvent ..
-  }
-  class EVSchedule <<secondary>> {
-    slots : list[EVChargeSlot]
-    total_cost_eur : float
-    total_energy_kwh : float
-  }
-
   GenerationNode   -[hidden]right- GenerationSeries
   DegradationNode  -[hidden]right- DegradationCost
-  EVSchedulerNode  -[hidden]right- EVSchedule
   GenerationNode   -[hidden]down->  DegradationNode
-  DegradationNode  -[hidden]down->  EVSchedulerNode
   GenerationSeries -[hidden]down->  DegradationCost
-  DegradationCost  -[hidden]down->  EVSchedule
 
   GenerationNode  o--> GenerationSeries
   DegradationNode o--> DegradationCost
-  EVSchedulerNode o--> EVSchedule
 }
 
 ' ══════════════════════════════════════════════════════════════
@@ -310,13 +277,10 @@ BatteryStatusNode ..> BatteryReading
 GenerationNode  ..> SolarData
 GenerationNode  ..> PriceSeries
 DegradationNode ..> BatteryState
-EVSchedulerNode ..> PriceSeries
-EVSchedulerNode ..> EVChargerState
 
 LockoutNode ..> PriceSeries
 LockoutNode ..> GenerationSeries
 LockoutNode ..> BatteryState
-LockoutNode ..> EVChargerState
 
 ChargingProfileNode ..> BatteryStatus
 ChargingProfileNode ..> GenerationSeries
@@ -344,7 +308,6 @@ legend right
   ..>   depends on (class consumes this type as input)
   <<primary>>   HA state translated to domain type
   <<secondary>> computed by a DAG node
-  <<optional>>  registered only when EV is enabled
 endlegend
 
 @enduml

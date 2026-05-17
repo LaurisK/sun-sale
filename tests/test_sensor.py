@@ -59,7 +59,7 @@ def _make_price_series_for_hour(hour: int, buy_eur_kwh: float = 0.12, sell_eur_k
     slot = PriceSlot(
         start=start, end=start + timedelta(hours=1),
         buy_eur_kwh=buy_eur_kwh, sell_eur_kwh=sell_eur_kwh, spot_eur_kwh=0.08,
-        sell_allowed=sell_eur_kwh > 0, sources=("nordpool", "tariff"),
+        sources=("nordpool", "tariff"),
     )
     return PriceSeries(slots=(slot,), resolution=timedelta(hours=1), computed_at=BASE)
 

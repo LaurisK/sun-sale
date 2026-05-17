@@ -66,14 +66,13 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "slot_count": len(pricing.slots),
                 "resolution_s": int(pricing.resolution.total_seconds()),
                 "computed_at": pricing.computed_at.isoformat(),
-                "negative_sell_count": sum(1 for s in pricing.slots if not s.sell_allowed),
+                "negative_sell_count": sum(1 for s in pricing.slots if s.sell_eur_kwh <= 0),
                 "slots": [
                     {
                         "start": s.start.isoformat(),
                         "buy": round(s.buy_eur_kwh, 4),
                         "sell": round(s.sell_eur_kwh, 4),
                         "spot": round(s.spot_eur_kwh, 4),
-                        "sell_allowed": s.sell_allowed,
                     }
                     for s in pricing.slots
                 ],

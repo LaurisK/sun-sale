@@ -18,7 +18,7 @@ from datetime import datetime
 
 from . import base_load as base_load_module
 from . import battery as battery_module
-from . import calculator, charging_profile as charging_profile_module, optimizer
+from . import calculator, charging_profile as charging_profile_module, forecast_accuracy, optimizer
 from ..inbound import battery as battery_inbound
 from ..inbound import forecast as forecast_module
 from ..inbound import generation as generation_module
@@ -39,6 +39,7 @@ from ..contract.models import (
     DashboardData,
     DegradationCost,
     EstimatedCapacity,
+    ForecastErrorSeries,
     GenerationHistory,
     GenerationSeries,
     HouseholdLoadHistory,
@@ -224,6 +225,29 @@ class BatteryRuntimeNode(DagNode):
             now=ctx.now,
         )
         return estimate, []
+
+
+class ForecastAccuracyNode(DagNode):
+    """Pair forecast vs. observed solar slots → ForecastErrorSeries.
+
+    Read-only signal today (MAE/bias/MAPE for monitoring); the same series is
+    the input a future calibration stage would consume to fit a per-hour
+    correction or to compare forecast sources.
+    """
+
+    tier = 3
+    output_type = ForecastErrorSeries
+    consumes = [GenerationSeries, ObservedGenerationSeries]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[ForecastErrorSeries, list[ControlEvent]]:
+        forecast = ctx.require(GenerationSeries)
+        observed = ctx.require(ObservedGenerationSeries)
+        series = forecast_accuracy.build_forecast_error_series(
+            forecast, observed, now=ctx.now,
+        )
+        return series, []
 
 
 class LockoutNode(DagNode):

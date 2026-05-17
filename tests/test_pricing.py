@@ -74,21 +74,19 @@ def test_spot_price_preserved():
 def test_negative_spot_produces_negative_sell():
     ps = build_price_series([make_price(0, -0.05)], default_tariff_config(), now=NOW)
     assert ps.slots[0].sell_eur_kwh < 0
-    assert ps.slots[0].sell_allowed is False
 
 
-def test_positive_spot_produces_sell_allowed():
+def test_positive_spot_produces_positive_sell():
     ps = build_price_series([make_price(0, 0.10)], default_tariff_config(), now=NOW)
-    assert ps.slots[0].sell_allowed is True
+    assert ps.slots[0].sell_eur_kwh > 0
 
 
-def test_sell_allowed_boundary_hard_zero():
-    # Spot so low that sell_eur_kwh == exactly 0: sell_allowed must be False
+def test_sell_price_can_be_exactly_zero():
     tc = TariffConfig(distribution_fee=0.0, tax_rate=0.0, markup=0.0,
                       sell_distribution_fee=0.10, sell_tax_rate=0.0, sell_markup=0.0)
     ps = build_price_series([make_price(0, 0.10)], tc, now=NOW)
-    # sell = (0.10 - 0.10) * 1 = 0.0 → not > 0 → sell_allowed=False
-    assert ps.slots[0].sell_allowed is False
+    # sell = (0.10 - 0.10) * 1 = 0.0 exactly
+    assert ps.slots[0].sell_eur_kwh == 0.0
 
 
 # ---------------------------------------------------------------------------

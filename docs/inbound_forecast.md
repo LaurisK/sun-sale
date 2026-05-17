@@ -87,7 +87,7 @@ Each `GenerationSlot` carries:
 | `source` | `solar.primary_source` for every slot (uniform across yesterday/today/tomorrow) |
 | `confidence` | `None` (sources don't expose per-slot confidence today) |
 
-`energy_between(t1, t2)` keeps the existing fractional-overlap semantics: it sums `expected_kwh * (overlap_secs / slot_secs)` across slots whose source equals `primary`. Useful for queries that don't align to the grid (e.g., an arbitrary EV-charging window).
+`energy_between(t1, t2)` keeps the existing fractional-overlap semantics: it sums `expected_kwh * (overlap_secs / slot_secs)` across slots whose source equals `primary`. Useful for queries that don't align to the grid.
 
 ---
 

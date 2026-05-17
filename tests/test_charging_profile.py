@@ -41,7 +41,6 @@ def _price_slot(hour: int, sell: float, buy: float = 0.20) -> PriceSlot:
         buy_eur_kwh=buy,
         sell_eur_kwh=sell,
         spot_eur_kwh=sell,
-        sell_allowed=sell > 0.0,
         sources=("nordpool", "tariff"),
     )
 
@@ -253,7 +252,6 @@ def test_tomorrow_slots_excluded():
         buy_eur_kwh=0.2,
         sell_eur_kwh=0.1,
         spot_eur_kwh=0.1,
-        sell_allowed=True,
         sources=("nordpool", "tariff"),
     )
     profile = build_charging_profile(

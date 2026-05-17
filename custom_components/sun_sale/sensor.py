@@ -22,6 +22,7 @@ from .contract.models import (
     BaseLoadProfile,
     BatteryRuntimeEstimate,
     CalculationResult,
+    ForecastErrorSeries,
     GenerationSeries,
     PriceSeries,
     PriceSlot,
@@ -326,11 +327,22 @@ class DashboardSensor(_BaseSensor):
         now = datetime.now(timezone.utc)
         bc = self.coordinator.battery_config
         config = {**self._entry.data, **self._entry.options}
+        err: ForecastErrorSeries | None = self.coordinator.data.get("forecast_error")
+        forecast_error_slots = [
+            {
+                "t": int(s.start.timestamp() * 1000),
+                "forecast_kwh": round(s.forecast_kwh, 4),
+                "observed_kwh": round(s.observed_kwh, 4),
+                "error_kwh": round(s.error_kwh, 4),
+            }
+            for s in (err.slots if err else ())
+        ]
         return {
             "generated_at": now.isoformat(),
             "now_ts": int(now.timestamp() * 1000),
             "slots": self.coordinator.data.get("dashboard_slots", []),
             "solar_frozen_forecast": self.coordinator.data.get("solar_frozen_forecast", []),
+            "forecast_error_slots": forecast_error_slots,
             "battery_capacity_kwh": round(bc.nominal_capacity_kwh, 2) if bc else None,
             "solar_energy_entity_id": config.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
         }
@@ -360,7 +372,7 @@ class PricingPipelineSensor(_BaseSensor):
         return {
             "resolution_s": int(pricing.resolution.total_seconds()),
             "computed_at": pricing.computed_at.isoformat(),
-            "negative_sell_count": sum(1 for s in pricing.slots if not s.sell_allowed),
+            "negative_sell_count": sum(1 for s in pricing.slots if s.sell_eur_kwh <= 0),
             "min_buy": round(min(buy_prices), 4) if buy_prices else None,
             "max_buy": round(max(buy_prices), 4) if buy_prices else None,
             "min_sell": round(min(sell_prices), 4) if sell_prices else None,
@@ -372,7 +384,6 @@ class PricingPipelineSensor(_BaseSensor):
                     "buy_eur_kwh": round(s.buy_eur_kwh, 4),
                     "sell_eur_kwh": round(s.sell_eur_kwh, 4),
                     "spot_eur_kwh": round(s.spot_eur_kwh, 4),
-                    "sell_allowed": s.sell_allowed,
                 }
                 for s in pricing.slots
             ],

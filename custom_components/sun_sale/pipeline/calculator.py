@@ -32,7 +32,7 @@ def calculate(
     slots: list[SlotDecision] = []
 
     for price_slot in prices.slots:
-        sell_allowed = price_slot.sell_allowed
+        sell_allowed = price_slot.sell_eur_kwh > 0.0
         expected_kwh = generation.energy_between(price_slot.start, price_slot.end)
         notes: list[str] = []
 

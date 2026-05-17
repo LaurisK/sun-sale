@@ -56,7 +56,7 @@ def _make_calculation(price_series: PriceSeries) -> CalculationResult:
     slots = tuple(
         SlotDecision(
             start=s.start, end=s.end,
-            sell_allowed=s.sell_allowed,
+            sell_allowed=s.sell_eur_kwh > 0,
             expected_solar_kwh=0.0,
             expected_solar_negative_sale_kwh=0.0,
             notes=(),
@@ -172,7 +172,7 @@ def test_pipeline_pricing_present():
     assert "slots" in pricing
     assert len(pricing["slots"]) == 4
     slot = pricing["slots"][0]
-    for key in ("start", "buy", "sell", "spot", "sell_allowed"):
+    for key in ("start", "buy", "sell", "spot"):
         assert key in slot, f"missing pricing slot key: {key}"
 
 
