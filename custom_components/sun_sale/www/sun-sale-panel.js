@@ -617,29 +617,57 @@
         await this._chart.render();
         console.log('sunSale: ApexCharts.render() resolved');
 
-        // Post-render SVG introspection — confirm bars actually painted.
+        // Post-render introspection — surface what ApexCharts actually built.
         requestAnimationFrame(() => {
           const root = el.querySelector('svg.apexcharts-svg');
-          if (!root) { console.warn('sunSale: no apexcharts SVG found'); return; }
-          const barSeries = root.querySelectorAll('g.apexcharts-bar-series');
-          const allRects  = root.querySelectorAll('g.apexcharts-bar-series rect');
+          const w = this._chart?.w;
+
           console.groupCollapsed('sunSale: SVG inspection');
-          console.log('bar-series groups:', barSeries.length);
-          console.log('total bar rects:',    allRects.length);
-          if (allRects.length) {
-            const first = allRects[0].getBoundingClientRect();
-            const peak  = [...allRects].reduce((a, b) =>
-              b.getBoundingClientRect().height > a.getBoundingClientRect().height ? b : a
-            );
-            const pb = peak.getBoundingClientRect();
-            console.log('first rect bbox:', first);
-            console.log('tallest rect bbox:', pb,
-              'attrs:', { x: peak.getAttribute('x'), y: peak.getAttribute('y'),
-                          width: peak.getAttribute('width'), height: peak.getAttribute('height'),
-                          fill: peak.getAttribute('fill') });
+          if (!root) {
+            console.warn('no apexcharts SVG found');
+          } else {
+            const barSeries = root.querySelectorAll('g.apexcharts-bar-series');
+            const allRects  = root.querySelectorAll('g.apexcharts-bar-series rect');
+            console.log('bar-series groups:', barSeries.length);
+            console.log('total bar rects:',    allRects.length);
+            // Dump the bar-series group's actual HTML — see exactly what is/isn't inside it.
+            barSeries.forEach((g, i) => {
+              console.log(`bar-series[${i}] childCount=${g.childElementCount}, outerHTML(first 400ch):`,
+                g.outerHTML.slice(0, 400));
+            });
+            // Are there ANY rect children in the plot area we missed?
+            const allG = root.querySelectorAll('g');
+            const groupsWithRects = [...allG].filter(g => g.querySelector(':scope > rect'));
+            console.log('all <g> with direct <rect> children:', groupsWithRects.length);
+            groupsWithRects.slice(0, 6).forEach(g => console.log('  class:', g.getAttribute('class'),
+              'rect count:', g.querySelectorAll(':scope > rect').length));
+            console.log('y-axis groups:', root.querySelectorAll('g.apexcharts-yaxis').length);
+            console.log('line-series paths:', root.querySelectorAll('g.apexcharts-line-series path').length);
           }
-          // Confirm which y-axis the bars are anchored on (which scale element).
-          console.log('y-axis groups:', root.querySelectorAll('g.apexcharts-yaxis').length);
+
+          // ApexCharts internal state — definitive answer about what the chart "thinks" is in the bar series.
+          if (w) {
+            console.log('w.config.chart.type:', w.config.chart.type);
+            console.log('w.config.series shapes:', w.config.series.map(s => ({
+              name: s.name, type: s.type, len: (s.data || []).length,
+              firstData: s.data?.[0], lastData: s.data?.[s.data.length - 1],
+            })));
+            // Normalised series arrays — what gets fed to the renderer.
+            console.log('w.globals.series (y values):',  w.globals.series?.map(arr => arr?.length));
+            console.log('w.globals.seriesX (x values):', w.globals.seriesX?.map(arr => arr?.length));
+            console.log('w.globals.seriesX[2] sample:',  w.globals.seriesX?.[2]?.slice(0, 3),
+              '...', w.globals.seriesX?.[2]?.slice(-3));
+            console.log('w.globals.series[2] sample:',   w.globals.series?.[2]?.slice(0, 3),
+              '...', w.globals.series?.[2]?.slice(-3));
+            console.log('w.globals.minX/maxX:', w.globals.minX, w.globals.maxX);
+            console.log('w.globals.minXDiff:', w.globals.minXDiff);
+            console.log('w.globals.barWidth / dataXY:', w.globals.barWidth, w.globals.dataXY);
+            console.log('w.globals.gridWidth/gridHeight:', w.globals.gridWidth, w.globals.gridHeight);
+            console.log('w.globals.collapsedSeries:', w.globals.collapsedSeries);
+            console.log('w.globals.collapsedSeriesIndices:', w.globals.collapsedSeriesIndices);
+          } else {
+            console.warn('no chart.w available');
+          }
           console.groupEnd();
         });
       } catch (e) {
