@@ -37,6 +37,7 @@ from ..contract.const import (
     CONF_INVERTER_ENTITY_BATTERY_SOC,
     CONF_INVERTER_ENTITY_CHARGE_CONTROL,
     CONF_INVERTER_ENTITY_GRID_POWER,
+    CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY,
     CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
     CONF_INVERTER_ENTITY_SOLAR_ENERGY,
     CONF_INVERTER_PLATFORM,
@@ -99,6 +100,7 @@ from ..contract.models import (
     GenerationHistory,
     GenerationReading,
     GenerationSeries,
+    HouseholdConsumptionReading,
     HouseholdLoadHistory,
     HouseholdLoadReading,
     HouseholdLoadSample,
@@ -132,6 +134,7 @@ from ..pipeline.nodes import (
 from ..inbound.battery import BatteryTranslator
 from ..inbound.forecast import SolarTranslator
 from ..inbound.generation import GenerationTranslator
+from ..inbound.household_consumption import HouseholdConsumptionTranslator
 from ..inbound.household_load import HouseholdLoadTranslator
 from ..inbound.pricing import NordpoolTranslator
 
@@ -251,6 +254,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ),
             HouseholdLoadTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
+            ),
+            HouseholdConsumptionTranslator(
+                entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY, ""),
             ),
         ]
 
@@ -467,6 +473,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         nordpool: NordpoolData | None = primary.get(NordpoolData)
         dashboard: DashboardData | None = secondary.get(DashboardData)
         deg: DegradationCost | None = secondary.get(DegradationCost)
+        consumption: HouseholdConsumptionReading | None = primary.get(
+            HouseholdConsumptionReading,
+        )
 
         return {
             "pricing": secondary.get(PriceSeries),
@@ -487,6 +496,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "solar_frozen_forecast": dashboard.solar_frozen_forecast if dashboard else [],
             "base_load_profile": secondary.get(BaseLoadProfile),
             "battery_runtime": secondary.get(BatteryRuntimeEstimate),
+            "consumption_today_kwh": (
+                consumption.today_total_kwh if consumption else None
+            ),
         }
 
     def _build_capacity_observation(

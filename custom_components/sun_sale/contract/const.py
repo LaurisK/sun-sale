@@ -45,6 +45,9 @@ CONF_NORDPOOL_RESOLUTION = "nordpool_resolution"
 CONF_SOLAR_FORECAST_ENTITY = "solar_forecast_entity"
 CONF_SOLAR_FORECAST_ENTITY_2 = "solar_forecast_entity_2"
 CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD = "inverter_entity_household_load"
+CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY = (
+    "inverter_entity_household_consumption_energy"
+)
 CONF_INVERTER_ENTITY_SOLAR_ENERGY = "inverter_entity_solar_energy"
 
 # Persistent storage

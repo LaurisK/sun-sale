@@ -71,7 +71,8 @@
           "solar_forecast_entity": "Solar forecast entity (optional)",
           "solar_forecast_entity_2": "Solar forecast entity 2 (optional, second array)",
           "inverter_entity_solar_energy": "Solar energy counter entity (optional, kWh, for chart)",
-          "inverter_entity_household_load": "Household load power sensor (optional)"
+          "inverter_entity_household_load": "Household load power sensor (optional)",
+          "inverter_entity_household_consumption_energy": "Household consumption today-total energy counter (optional, kWh, daily-resetting)"
         }
       }
     },
@@ -155,7 +156,8 @@
           "solar_forecast_entity": "Solar forecast entity (optional)",
           "solar_forecast_entity_2": "Solar forecast entity 2 (optional, second array)",
           "inverter_entity_solar_energy": "Solar energy counter entity (optional, kWh, for chart)",
-          "inverter_entity_household_load": "Household load power sensor (optional)"
+          "inverter_entity_household_load": "Household load power sensor (optional)",
+          "inverter_entity_household_consumption_energy": "Household consumption today-total energy counter (optional, kWh, daily-resetting)"
         }
       }
     }

@@ -373,6 +373,18 @@ class EstimatedCapacity:
 
 
 @dataclass(frozen=True)
+class HouseholdConsumptionReading:
+    """Primary data: one snapshot of the inverter's household-consumption today-total kWh counter.
+
+    The counter is cumulative and resets at local midnight; this is just the
+    most recent observed value, so consumers can show "consumption so far
+    today" without re-deriving it from instantaneous load samples.
+    """
+    today_total_kwh: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
 class HouseholdLoadReading:
     """Primary data: one snapshot of measured household load (per cycle).
 
