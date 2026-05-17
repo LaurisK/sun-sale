@@ -590,8 +590,30 @@
       };
 
       const el = this.shadowRoot.querySelector('#chart');
-      this._chart = new ApexCharts(el, options);
-      this._chart.render();
+
+      console.groupCollapsed('sunSale: render inputs');
+      console.log('buyData.length =',  buyData.length,  buyData[0],  buyData[buyData.length - 1]);
+      console.log('sellData.length =', sellData.length, sellData[0], sellData[sellData.length - 1]);
+      console.log('forecastBars.length =', forecastBars.length, forecastBars[0], forecastBars[forecastBars.length - 1]);
+      console.log('profileAnnotations.length =', profileAnnotations.length, profileAnnotations[0]);
+      console.log('window =', new Date(windowStart).toISOString(), '→', new Date(windowEnd).toISOString());
+      console.log('options =', options);
+      console.groupEnd();
+
+      try {
+        this._chart = new ApexCharts(el, options);
+      } catch (e) {
+        console.error('sunSale: ApexCharts constructor threw', e);
+        this._setStatus('⚠ chart constructor failed: ' + e.message);
+        return;
+      }
+      try {
+        await this._chart.render();
+        console.log('sunSale: ApexCharts.render() resolved');
+      } catch (e) {
+        console.error('sunSale: ApexCharts.render() threw', e);
+        this._setStatus('⚠ chart render failed: ' + e.message);
+      }
     }
   }
 
