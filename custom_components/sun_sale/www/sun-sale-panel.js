@@ -7,13 +7,13 @@
  *   Sell price  coral  solid stepline  — past history + future from pricing sensor (one continuous line)
  *
  * Right Y axis — kWh/slot (15-min):
- *   Solar forecast  rangeBar from 0 → forecast_kwh — full 72 h window.
+ *   Solar forecast  vertical range column (type:'bar', y:[0,forecast_kwh]) — full 72 h window.
  *                   Past + non-today-future slots: grey (25 % opacity).
  *                   Today's remaining slots: per-bar color from charging_profile_slots —
  *                     blue   SOLAR_CHARGE — going to battery
  *                     amber  SELL         — exporting for €
  *                     red    NO_EXPORT    — curtailed (sell ≤ 0)
- *   Forecast error  rangeBar overlay sitting on top of the forecast bar:
+ *   Forecast error  range column overlay sitting on top of the forecast bar:
  *                     green = observed > forecast (under-forecast), drawn from forecast → observed
  *                     red   = observed < forecast (over-forecast),  drawn from observed → forecast
  *                   Only past slots — driven by `forecast_error_slots` on the dashboard sensor,
@@ -469,12 +469,15 @@
         },
       }));
 
-      // Series: 0=buy(line) 1=sell(line) 2=forecast(rangeBar) 3=forecast error(rangeBar)
+      // Series: 0=buy(line) 1=sell(line) 2=forecast(bar) 3=forecast error(bar)
+      // `type: 'bar'` with y as [lo, hi] renders a vertical range column —
+      // mixing line + rangeBar with chart.type 'line' silently produces no
+      // bars in ApexCharts 3.x, so we use the bar+range-y form instead.
       const series = [
-        { name: 'Buy price',      type: 'line',     data: buyData      },
-        { name: 'Sell price',     type: 'line',     data: sellData     },
-        { name: 'Solar forecast', type: 'rangeBar', data: forecastBars },
-        { name: 'Forecast error', type: 'rangeBar', data: errorBars    },
+        { name: 'Buy price',      type: 'line', data: buyData      },
+        { name: 'Sell price',     type: 'line', data: sellData     },
+        { name: 'Solar forecast', type: 'bar',  data: forecastBars },
+        { name: 'Forecast error', type: 'bar',  data: errorBars    },
       ];
 
       const options = {
@@ -502,7 +505,6 @@
           bar: {
             horizontal:  false,
             columnWidth: '90%',
-            rangeBarOverlap: true,    // let the error overlay sit on top of the forecast column
           },
         },
 
