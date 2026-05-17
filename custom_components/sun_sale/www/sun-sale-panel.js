@@ -15,12 +15,13 @@
  *                      amber  SELL          — exporting for €
  *                      red    NO_EXPORT     — curtailed (sell ≤ 0)
  *
- *   Forecast-vs-observed error overlay is intentionally not rendered here:
- *   ApexCharts 3.x in a mixed line+bar chart does not support `chart.stacked`
- *   (lines disappear) nor `rangeBar` overlap (silently dropped), and plain
- *   bar+range-y renders side-by-side rather than overlaid. The backend keeps
- *   exposing `forecast_error_slots` so the overlay can be added once an
- *   overlay-capable rendering approach is in place.
+ *   Forecast-vs-observed error overlay — green/red rect per slot, anchored
+ *   at the top of the forecast bar (y = forecast_kwh):
+ *     +error (observed > forecast)  → green segment grows UP
+ *     -error (observed < forecast)  → red segment grows DOWN
+ *   ApexCharts 3.x has no native expression for this in a mixed line+bar
+ *   chart (stacked/rangeBar/range-y all fail), so we paint the rects as raw
+ *   SVG into `.apexcharts-graphical` from chart events.
  *
  * Overlays:
  *   Translucent bands  ChargingProfile mode windows (today's remaining slots):
@@ -336,6 +337,27 @@
       return slots;
     }
 
+    // ── Data: per-slot forecast accuracy from dashboard sensor ────────────────
+    // Returns [{x, forecastKwh, errorKwh}] for slots inside the window with a
+    // non-zero error. error_kwh = observed_kwh - forecast_kwh.
+
+    _readForecastErrors(dashAttrs, windowStart, windowEnd) {
+      if (!Array.isArray(dashAttrs?.forecast_error_slots)) return [];
+      const out = [];
+      for (const s of dashAttrs.forecast_error_slots) {
+        if (typeof s?.t !== 'number') continue;
+        if (s.t < windowStart || s.t > windowEnd) continue;
+        const err = Number(s.error_kwh);
+        if (!isFinite(err) || Math.abs(err) < 1e-4) continue;
+        out.push({
+          x:            s.t,
+          forecastKwh:  Number(s.forecast_kwh) || 0,
+          errorKwh:     err,
+        });
+      }
+      return out;
+    }
+
     // ── Render ─────────────────────────────────────────────────────────────────
 
     async _render() {
@@ -349,6 +371,7 @@
       const dashAttrs     = this._hass.states[DASHBOARD_ENTITY]?.attributes;
       const forecastSlots = this._buildForecastSlots(dashAttrs, windowStart, windowEnd);
       const profileSlots  = this._readChargingProfile(dashAttrs);
+      const errorSlots    = this._readForecastErrors(dashAttrs, windowStart, windowEnd);
 
       this._renderBatteryRow(dashAttrs);
       this._renderProfileRow(dashAttrs);
@@ -436,6 +459,61 @@
         { name: 'Solar forecast', type: 'bar',  data: forecastBars   },
       ];
 
+      // Forecast-accuracy overlay drawn straight into the SVG plot area.
+      // For each slot with a non-zero error: a rect anchored at the top of
+      // the forecast bar (y = forecast_kwh), extending UP by +error (green
+      // for under-forecast) or DOWN by |error| (red for over-forecast).
+      // ApexCharts can't express this via stacked / rangeBar / range-y in
+      // a mixed line+bar chart, so we paint custom <rect>s on its events.
+      const SVG_NS    = 'http://www.w3.org/2000/svg';
+      const OVL_GROUP = 'sunsale-error-overlay';
+      const ERR_POS   = '#66bb6a';   // observed > forecast
+      const ERR_NEG   = '#ef5350';   // observed < forecast
+      const drawErrorOverlay = (chartContext) => {
+        try {
+          const w = chartContext?.w;
+          if (!w || !errorSlots.length) return;
+          const plotEl = chartContext.el?.querySelector('.apexcharts-graphical');
+          if (!plotEl) return;
+          // Wipe previous paint.
+          plotEl.querySelectorAll('.' + OVL_GROUP).forEach(n => n.remove());
+
+          // Solar-forecast bar is series index 2 → yaxis index 2 (single per-series).
+          const yIdx  = 2;
+          const xMin  = w.globals.minX;
+          const xMax  = w.globals.maxX;
+          const yMin  = w.globals.minYArr?.[yIdx] ?? w.globals.minY;
+          const yMax  = w.globals.maxYArr?.[yIdx] ?? w.globals.maxY;
+          const gw    = w.globals.gridWidth;
+          const gh    = w.globals.gridHeight;
+          if (!(xMax > xMin) || !(yMax > yMin) || !gw || !gh) return;
+          const xPx   = t => ((t - xMin) / (xMax - xMin)) * gw;
+          const yPx   = v => gh - ((v - yMin) / (yMax - yMin)) * gh;
+          // Match the forecast bar width: columnWidth% of one slot.
+          const slotW = (SLOT_MS / (xMax - xMin)) * gw;
+          const colW  = slotW * 1.0; // mirrors plotOptions.bar.columnWidth: '100%'
+
+          const g = document.createElementNS(SVG_NS, 'g');
+          g.setAttribute('class', OVL_GROUP);
+          for (const e of errorSlots) {
+            const cx     = xPx(e.x + SLOT_MS / 2);  // bars are centred on slot midpoint
+            const yTop   = yPx(Math.max(e.forecastKwh, e.forecastKwh + e.errorKwh));
+            const yBot   = yPx(Math.min(e.forecastKwh, e.forecastKwh + e.errorKwh));
+            const rect   = document.createElementNS(SVG_NS, 'rect');
+            rect.setAttribute('x',      String(cx - colW / 2));
+            rect.setAttribute('y',      String(yTop));
+            rect.setAttribute('width',  String(colW));
+            rect.setAttribute('height', String(Math.max(1, yBot - yTop)));
+            rect.setAttribute('fill',   e.errorKwh > 0 ? ERR_POS : ERR_NEG);
+            rect.setAttribute('fill-opacity', '0.85');
+            g.appendChild(rect);
+          }
+          plotEl.appendChild(g);
+        } catch (err) {
+          console.warn('sunSale: error overlay paint failed', err);
+        }
+      };
+
       const options = {
         series,
 
@@ -452,6 +530,10 @@
           fontFamily: 'inherit',
           events: {
             beforeResetZoom: () => ({ xaxis: { min: windowStart, max: windowEnd } }),
+            mounted:         (c) => drawErrorOverlay(c),
+            updated:         (c) => drawErrorOverlay(c),
+            zoomed:          (c) => drawErrorOverlay(c),
+            scrolled:        (c) => drawErrorOverlay(c),
           },
         },
 
