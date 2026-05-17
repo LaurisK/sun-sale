@@ -211,6 +211,40 @@ mypy custom_components/sun_sale/
 
 The computation core (`dag_engine.py`, `nodes.py`, `events.py`, `event_router.py`, `pricing.py`, `forecast.py`, `calculator.py`, `optimizer.py`, `tariff.py`, `battery.py`, `dashboard.py`, `models.py`) is pure Python with no Home Assistant imports, so it runs fully under plain `pytest` without an HA test harness.
 
+### Tools
+
+Both scripts in `tools/` are stdlib-only (no extra deps) and target a running HA instance via its REST API. `HA_URL` and `HA_TOKEN` env vars override the built-in defaults.
+
+#### `tools/integration_check.py` — live validation harness
+
+Pulls a snapshot from `/api/sun_sale/debug` plus the raw states of every entity the integration consumes (`nordpool_entity`, `solar_forecast_entity`, …) and runs a registry of validators against it. Catches the kinds of breakage that unit tests miss because they only show up against real HA data: Nordpool slots that don't line up with computed pricing slots, tariff math drift, calculation slots outside the pricing window, schedule slots not aligned to pricing slot starts, implausible battery SoC, missing degradation cost when capacity is known, and so on.
+
+```bash
+python tools/integration_check.py                  # human-readable report
+python tools/integration_check.py --json           # machine-readable
+python tools/integration_check.py --filter pricing # only pricing checks
+python tools/integration_check.py --dump-snapshot  # raw debug + entity states
+```
+
+Exits non-zero if any check fails or the integration is not loaded — suitable for CI / post-deploy gating. Add new checks by writing a function decorated with `@validator("name", "category")` returning `(ok, detail)`.
+
+#### `tools/deploy.py` — push, redownload via HACS, restart
+
+Ships the current branch to the live HA without manual HACS clicks or an SSH session:
+
+1. `git push` current branch to `origin`
+2. Force HACS to recheck GitHub by calling `homeassistant.update_entity` on `update.sunsale_update`, then poll until `latest_version` matches the new HEAD SHA
+3. Call `update.install` and poll until `installed_version` matches and `in_progress` clears
+4. Call `homeassistant.restart`, wait for `/api/` to come back, then poll `/api/sun_sale/debug` until the integration is loaded again
+
+```bash
+python tools/deploy.py                # full pipeline: push → redownload → restart
+python tools/deploy.py --no-push      # skip git push (already pushed)
+python tools/deploy.py --skip-restart # redownload only
+```
+
+Requires the configured HA to have sunSale installed via HACS as a custom repository (so the `update.sunsale_update` entity exists and tracks commit SHAs from the default branch). After a successful deploy, run `integration_check.py` to confirm the new build is behaving against live data.
+
 ### Architecture
 
 sunSale is structured as a **tiered observer DAG** with a strict translation boundary:
