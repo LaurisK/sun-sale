@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentScriptType="application/ecmascript" contentStyleType="text/css" height="838px" preserveAspectRatio="none" style="width:711px;height:838px;" version="1.1" viewBox="0 0 711 838" width="711px" zoomAndPan="magnify"><defs/><g><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="413" x="5" y="17.8281">An error has occured : java.lang.IllegalStateException: Timeout4 TIMEOUT</text><text fill="#000000" font-family="sans-serif" font-size="12" font-style="italic" lengthAdjust="spacingAndGlyphs" textLength="143" x="5" y="34.1722">May the Force be with you!</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="0" x="8" y="50.5163"/><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="234" x="5" y="66.8604">Diagram size: 278 lines / 7168 characters.</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="0" x="8" y="83.2045"/><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="340" x="5" y="99.5487">PlantUML (1.2020.02) cannot parse result from dot/GraphViz.</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="312" x="5" y="115.8928">This version of PlantUML is 2267 days old, so you should</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="308" x="11" y="132.2369">consider upgrading from http://plantuml.com/download</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="0" x="8" y="148.581"/><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="432" x="5" y="164.9251">Please go to http://plantuml.com/graphviz-dot to check your GraphViz version.</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="0" x="8" y="181.2692"/><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="250" x="5" y="197.6133">Java Runtime: OpenJDK Runtime Environment</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="173" x="5" y="213.9575">JVM: OpenJDK 64-Bit Server VM</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="216" x="5" y="230.3016">Java Version: 21.0.10+7-Ubuntu-124.04</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="135" x="5" y="246.6457">Operating System: Linux</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="134" x="5" y="262.9898">Default Encoding: UTF-8</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="75" x="5" y="279.3339">Language: en</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="66" x="5" y="295.678">Country: US</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="137" x="5" y="312.0221">Machine: Precision-7550</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="164" x="5" y="328.3663">PLANTUML_LIMIT_SIZE: 4096</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="75" x="5" y="344.7104">Processors: 8</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="166" x="5" y="361.0545">Max Memory: 16,760,438,784</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="163" x="5" y="377.3986">Total Memory: 1,056,964,608</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="160" x="5" y="393.7427">Free Memory: 1,030,737,792</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="147" x="5" y="410.0868">Used Memory: 26,226,816</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="126" x="5" y="426.4309">Thread Active Count: 1</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="0" x="8" y="442.7751"/><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="132" x="5" y="459.1192">This may be caused by :</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="108" x="8" y="475.4633">- a bug in PlantUML</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="131" x="8" y="491.8074">- a problem in GraphViz</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="0" x="8" y="508.1515"/><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="263" x="5" y="524.4956">You should send this diagram and this image to</text><text fill="#000000" font-family="sans-serif" font-size="12" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="130" x="271" y="524.4956">plantuml@gmail.com</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="12" x="404" y="524.4956">or</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="38" x="5" y="540.8397">post to</text><text fill="#000000" font-family="sans-serif" font-size="12" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="143" x="46" y="540.8397">http://plantuml.com/qa</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="101" x="192" y="540.8397">to solve this issue.</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="359" x="5" y="557.1839">You can try to turn arround this issue by simplifing your diagram.</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="0" x="8" y="573.528"/><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="286" x="5" y="589.8721">java.lang.IllegalStateException: Timeout4 TIMEOUT</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="459" x="11" y="606.2162">net.sourceforge.plantuml.svek.DotStringFactory.getSvg(DotStringFactory.java:308)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="538" x="11" y="622.5603">net.sourceforge.plantuml.svek.GeneralImageBuilder.buildImage(GeneralImageBuilder.java:410)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="648" x="11" y="638.9044">net.sourceforge.plantuml.svek.CucaDiagramFileMakerSvek.createFileInternal(CucaDiagramFileMakerSvek.java:107)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="597" x="11" y="655.2485">net.sourceforge.plantuml.svek.CucaDiagramFileMakerSvek.createFile(CucaDiagramFileMakerSvek.java:71)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="564" x="11" y="671.5927">net.sourceforge.plantuml.cucadiagram.CucaDiagram.exportDiagramInternal(CucaDiagram.java:651)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="570" x="11" y="687.9368">net.sourceforge.plantuml.classdiagram.ClassDiagram.exportDiagramInternal(ClassDiagram.java:196)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="459" x="11" y="704.2809">net.sourceforge.plantuml.UmlDiagram.exportDiagramNow(UmlDiagram.java:201)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="480" x="11" y="720.625">net.sourceforge.plantuml.AbstractPSystem.exportDiagram(AbstractPSystem.java:135)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="470" x="11" y="736.9691">net.sourceforge.plantuml.PSystemUtils.exportDiagramsCuca(PSystemUtils.java:235)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="435" x="11" y="753.3132">net.sourceforge.plantuml.PSystemUtils.exportDiagrams(PSystemUtils.java:91)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="615" x="11" y="769.6573">net.sourceforge.plantuml.SourceFileReaderAbstract.getGeneratedImages(SourceFileReaderAbstract.java:159)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="356" x="11" y="786.0015">net.sourceforge.plantuml.Run.manageFileInternal(Run.java:507)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="317" x="11" y="802.3456">net.sourceforge.plantuml.Run.processArgs(Run.java:391)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="332" x="11" y="818.6897">net.sourceforge.plantuml.Run.manageAllFiles(Run.java:359)</text><text fill="#000000" font-family="sans-serif" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="275" x="11" y="835.0338">net.sourceforge.plantuml.Run.main(Run.java:182)</text><image height="23" width="23" x="688" xlink:href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABcAAAAXCAYAAADgKtSgAAAAeElEQVR4XtWQAQrAIAwDfbo/31DQlazSplXYDoMg5NqtlC9z9XMIKc8OamVVkBRXWc6IXmiy8RXp3xIqWcjt1AFj23azm7vlDCjFhEHRKjSzLJHvEApGzMjrLDmk7IBHTsbDf+UdLFqhwLIVGhSsEgZFmC0ckW7hBg14ybn8NrETAAAAAElFTkSuQmCC" y="6"/><!--MD5=[ccb648829d43a5aa9dce09855b4a0c80]
+@startuml sunSale_pipeline
+left to right direction
+
+skinparam packageStyle rectangle
+skinparam defaultFontSize 10
+skinparam nodesep 8
+skinparam ranksep 40
+skinparam class {
+  BackgroundColor White
+  BorderColor #555
+  ArrowColor #555
+  FontSize 10
+  AttributeFontSize 9
+}
+skinparam package {
+  BorderColor #444
+  FontSize 11
+  FontStyle bold
+}
+
+package "Translation Layer" #D6EAF8 {
+
+  class NordpoolTranslator {
+    - entity_id : str
+    ..
+    + parse(hass, now) : NordpoolData
+    + translate(hass, config, raw_config, now) : NordpoolData
+  }
+  class NordpoolData <<primary>> {
+    entries : list[PriceEntry]
+    resolution : timedelta
+  }
+
+  class SolarTranslator {
+    - entity_1 : str
+    - entity_2 : str
+    ..
+    + parse(hass, now) : SolarData
+    + translate(hass, config, raw_config, now) : SolarData
+  }
+  class SolarData <<primary>> {
+    entries : list[SolarEntry]
+    total_today_kwh : float
+    today_remaining_kwh : float
+    primary_source : str
+  }
+
+  class BatteryTranslator {
+    - inverter : InverterController
+    - household_load_entity : str
+    ..
+    + translate(hass, config, raw_config, now) : BatteryReading
+  }
+  class BatteryReading <<primary>> {
+    soc : float
+    power_kw : float
+    grid_power_kw : float
+    household_load_kw : float
+  }
+
+  NordpoolTranslator -[hidden]right- NordpoolData
+  SolarTranslator    -[hidden]right- SolarData
+  BatteryTranslator  -[hidden]right- BatteryReading
+
+  NordpoolTranslator -[hidden]down-> SolarTranslator
+  SolarTranslator    -[hidden]down-> BatteryTranslator
+  NordpoolData       -[hidden]down-> SolarData
+  SolarData          -[hidden]down-> BatteryReading
+
+  NordpoolTranslator o- -> NordpoolData
+  SolarTranslator    o- -> SolarData
+  BatteryTranslator  o- -> BatteryReading
+}
+
+class EstimatedCapacity <<primary>> {
+  value_kwh : float
+  .. injected by Coordinator ..
+}
+
+package "DAG Tier 1" #D5F5E3 {
+
+  class PricingNode {
+    tier = 1
+    ..
+    + compute(ctx : NodeContext) : PriceSeries
+  }
+  class PriceSeries <<secondary>> {
+    slots : tuple[PriceSlot]
+    resolution : timedelta
+    + slot_at(t) : PriceSlot
+    + window(t1, t2) : tuple
+  }
+
+  class BatteryStateNode {
+    tier = 1
+    ..
+    + compute(ctx : NodeContext) : BatteryState
+  }
+  class BatteryState <<secondary>> {
+    soc : float
+    estimated_capacity_kwh : float
+  }
+
+  class BatteryStatusNode {
+    tier = 1
+    ..
+    + compute(ctx : NodeContext) : BatteryStatus
+  }
+  class BatteryStatus <<secondary>> {
+    total_capacity_kwh : float
+    max_charge_power_kw : float
+    max_discharge_power_kw : float
+    soc : float
+    remaining_capacity_kwh : float
+  }
+
+  PricingNode       -[hidden]right- PriceSeries
+  BatteryStateNode  -[hidden]right- BatteryState
+  BatteryStatusNode -[hidden]right- BatteryStatus
+  PricingNode       -[hidden]down->  BatteryStateNode
+  BatteryStateNode  -[hidden]down->  BatteryStatusNode
+  PriceSeries       -[hidden]down->  BatteryState
+  BatteryState      -[hidden]down->  BatteryStatus
+
+  PricingNode       o- -> PriceSeries
+  BatteryStateNode  o- -> BatteryState
+  BatteryStatusNode o- -> BatteryStatus
+}
+
+package "DAG Tier 2" #FDFDE8 {
+
+  class GenerationNode {
+    tier = 2
+    ..
+    + compute(ctx : NodeContext) : GenerationSeries
+  }
+  class GenerationSeries <<secondary>> {
+    slots : tuple[GenerationSlot]
+    primary : str
+    + energy_between(t1, t2) : float
+  }
+
+  class DegradationNode {
+    tier = 2
+    ..
+    + compute(ctx : NodeContext) : DegradationCost
+  }
+  class DegradationCost <<secondary>> {
+    value_kwh : float
+  }
+
+  GenerationNode   -[hidden]right- GenerationSeries
+  DegradationNode  -[hidden]right- DegradationCost
+  GenerationNode   -[hidden]down->  DegradationNode
+  GenerationSeries -[hidden]down->  DegradationCost
+
+  GenerationNode  o- -> GenerationSeries
+  DegradationNode o- -> DegradationCost
+}
+
+package "DAG Tier 3" #FDEBD0 {
+
+  class LockoutNode {
+    tier = 3
+    ..
+    + compute(ctx : NodeContext) : CalculationResult
+  }
+  class CalculationResult <<secondary>> {
+    slots : tuple[SlotDecision]
+    feed_in_lockout_windows : tuple
+    total_negative_sale_kwh : float
+    computed_at : datetime
+  }
+
+  class ChargingProfileNode {
+    tier = 3
+    ..
+    + compute(ctx : NodeContext) : ChargingProfile
+  }
+  class ChargingProfile <<secondary>> {
+    slots : tuple[ChargingProfileSlot]
+    free_capacity_kwh : float
+    today_remaining_generation_kwh : float
+    solar_exceeds_capacity : bool
+    allocated_solar_kwh : float
+    total_no_export_kwh : float
+  }
+
+  LockoutNode         -[hidden]right- CalculationResult
+  ChargingProfileNode -[hidden]right- ChargingProfile
+  LockoutNode         -[hidden]down-> ChargingProfileNode
+  CalculationResult   -[hidden]down-> ChargingProfile
+
+  LockoutNode         o- -> CalculationResult
+  ChargingProfileNode o- -> ChargingProfile
+}
+
+package "DAG Tier 4" #F5EEF8 {
+
+  class OptimizerNode {
+    tier = 4
+    + compute(ctx : NodeContext) : Schedule
+    .. emits: InverterActionEvent ..
+  }
+  class Schedule <<secondary>> {
+    slots : list[ScheduleSlot]
+    total_expected_profit_eur : float
+    computed_at : datetime
+  }
+
+  OptimizerNode -[hidden]right- Schedule
+  OptimizerNode o- -> Schedule
+}
+
+package "DAG Tier 5 (sink)" #FDEDEC {
+
+  class DashboardNode {
+    tier = 5
+    ..
+    + compute(ctx : NodeContext) : DashboardData
+  }
+  class DashboardData <<secondary>> {
+    future_slots : list[dict]
+    solar_frozen_forecast : list[dict]
+  }
+
+  DashboardNode -[hidden]right- DashboardData
+  DashboardNode o- -> DashboardData
+}
+
+NordpoolData      -[hidden]right-> PricingNode
+NordpoolData      -[hidden]right-> BatteryStateNode
+PriceSeries       -[hidden]right-> GenerationNode
+BatteryState      -[hidden]right-> DegradationNode
+GenerationSeries  -[hidden]right-> LockoutNode
+CalculationResult -[hidden]right-> OptimizerNode
+Schedule          -[hidden]right-> DashboardNode
+
+
+PricingNode       ..> NordpoolData
+BatteryStateNode  ..> BatteryReading
+BatteryStateNode  ..> EstimatedCapacity
+BatteryStatusNode ..> BatteryReading
+
+GenerationNode  ..> SolarData
+GenerationNode  ..> PriceSeries
+DegradationNode ..> BatteryState
+
+LockoutNode ..> PriceSeries
+LockoutNode ..> GenerationSeries
+LockoutNode ..> BatteryState
+
+ChargingProfileNode ..> BatteryStatus
+ChargingProfileNode ..> GenerationSeries
+ChargingProfileNode ..> PriceSeries
+
+OptimizerNode ..> PriceSeries
+OptimizerNode ..> CalculationResult
+OptimizerNode ..> GenerationSeries
+OptimizerNode ..> BatteryState
+OptimizerNode ..> DegradationCost
+
+DashboardNode ..> NordpoolData
+DashboardNode ..> SolarData
+DashboardNode ..> BatteryReading
+DashboardNode ..> PriceSeries
+DashboardNode ..> GenerationSeries
+DashboardNode ..> Schedule
+
+legend right
+  <b>Notation</b>
+  o- ->  produces (class aggregates its output type)
+  ..>   depends on (class consumes this type as input)
+  <<primary>>   HA state translated to domain type
+  <<secondary>> computed by a DAG node
+endlegend
+
+@enduml
+
+PlantUML version 1.2020.02(Sun Mar 01 12:22:07 EET 2020)
+(GPL source distribution)
+Java Runtime: OpenJDK Runtime Environment
+JVM: OpenJDK 64-Bit Server VM
+Java Version: 21.0.10+7-Ubuntu-124.04
+Operating System: Linux
+Default Encoding: UTF-8
+Language: en
+Country: US
+--></g></svg>

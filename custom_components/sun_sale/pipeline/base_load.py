@@ -186,9 +186,7 @@ def estimate_battery_runtime(
             partial = SIMULATION_STEP_MINUTES * fraction
             return BatteryRuntimeEstimate(
                 remaining_kwh_usable=usable_kwh,
-                avg_drain_kw_next_hour=_mean(_pad_first_hour(
-                    drain_kw_first_hour, drain_kw, t, one_hour_after_now
-                )),
+                avg_drain_kw_next_hour=_mean(drain_kw_first_hour),
                 runtime_minutes=elapsed_minutes + partial,
                 until=t + timedelta(minutes=partial),
                 horizon_hours=horizon_hours,
@@ -231,15 +229,3 @@ def _percentile(values: list[float], p: float) -> float:
 def _mean(values: Iterable[float]) -> float:
     seq = list(values)
     return sum(seq) / len(seq) if seq else 0.0
-
-
-def _pad_first_hour(
-    accumulated: list[float],
-    current_drain: float,
-    current_t: datetime,
-    one_hour_after_now: datetime,
-) -> list[float]:
-    """Include the drain-out step in the first-hour avg when it falls in window."""
-    if current_t < one_hour_after_now:
-        return accumulated + [current_drain]
-    return accumulated
