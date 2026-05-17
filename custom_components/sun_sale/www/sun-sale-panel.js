@@ -23,7 +23,12 @@
  *   overlay-capable rendering approach is in place.
  *
  * Overlays:
- *   Red shaded bands  negative-sell lockout windows (sensor.sun_sale_calculation)
+ *   Translucent bands  ChargingProfile mode windows (today's remaining slots):
+ *                        blue   SOLAR_CHARGE
+ *                        amber  SELL
+ *                        red    NO_EXPORT
+ *                      Bands carry no inline text — the colour-coded pills
+ *                      in the profile row above the chart act as the legend.
  *   Dashed white line "Now"
  *   Dashed grey line  y = 0 price reference
  */
@@ -36,7 +41,6 @@
   const BUY_PRICE_ENTITY  = 'sensor.sunsale_current_buy_price';
   const SELL_PRICE_ENTITY = 'sensor.sunsale_current_sell_price';
   const PRICING_ENTITY    = 'sensor.sunsale_pricing';
-  const CALC_ENTITY       = 'sensor.sunsale_calculation';
   const DASHBOARD_ENTITY  = 'sensor.sunsale_dashboard';
   const APEXCHARTS_CDN    = 'https://cdn.jsdelivr.net/npm/apexcharts@3.54.0/dist/apexcharts.min.js';
 
@@ -144,26 +148,28 @@
           #profile {
             display: flex;
             flex-wrap: wrap;
-            align-items: baseline;
-            gap: 10px;
+            align-items: center;
+            gap: 8px;
             margin: 0 0 12px;
             font-size: 0.85rem;
             color: var(--primary-text-color, #fff);
           }
           #profile .label { color: var(--secondary-text-color, #888); }
-          #profile .swatch {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 2px;
-            margin-right: 4px;
-            vertical-align: middle;
-          }
-          #profile .swatch.charge   { background: #42a5f5; }
-          #profile .swatch.sell     { background: #ffb300; }
-          #profile .swatch.curtail  { background: #e53935; }
           #profile .value { font-weight: 600; }
           #profile .sep { color: var(--secondary-text-color, #444); }
+          #profile .pill {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 6px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            border-left: 3px solid;
+            line-height: 1.3;
+          }
+          #profile .pill .value { font-weight: 600; }
+          #profile .pill.charge  { background: rgba(66, 165, 245, 0.16); border-left-color: #42a5f5; }
+          #profile .pill.sell    { background: rgba(255, 179, 0, 0.16);  border-left-color: #ffb300; }
+          #profile .pill.curtail { background: rgba(229, 57, 53, 0.16);  border-left-color: #e53935; }
           #status {
             padding: 40px;
             text-align: center;
@@ -226,9 +232,9 @@
         <span class="label">Free capacity:</span>
         <span class="value">${free} kWh</span>
         <span class="sep">→</span>
-        <span><span class="swatch charge"></span>Battery <span class="value">${charge}</span> kWh</span>
-        <span><span class="swatch sell"></span>Sell <span class="value">${sell}</span> kWh</span>
-        <span><span class="swatch curtail"></span>Curtail <span class="value">${curtail}</span> kWh</span>
+        <span class="pill charge">Battery <span class="value">${charge}</span> kWh</span>
+        <span class="pill sell">Sell <span class="value">${sell}</span> kWh</span>
+        <span class="pill curtail">Curtail <span class="value">${curtail}</span> kWh</span>
       `;
     }
 
@@ -296,20 +302,6 @@
       };
     }
 
-    // ── Data: negative-sell lockout windows from calculation sensor ───────────
-
-    _readLockoutWindows() {
-      const attrs = this._hass.states[CALC_ENTITY]?.attributes;
-      if (!Array.isArray(attrs?.feed_in_lockout_windows)) return [];
-      return attrs.feed_in_lockout_windows
-        .map(w => {
-          const x  = new Date(w.start).getTime();
-          const x2 = new Date(w.end).getTime();
-          return isFinite(x) && isFinite(x2) ? { x, x2 } : null;
-        })
-        .filter(Boolean);
-    }
-
     // ── Data: 15-min forecast kWh slots from dashboard sensor ─────────────────
 
     _buildForecastSlots(dashAttrs, windowStart, windowEnd) {
@@ -354,7 +346,6 @@
 
       const history       = await this._fetchHistory(windowStart);
       const pricingSlots  = this._readPricingSlots(windowEnd);
-      const lockouts      = this._readLockoutWindows();
       const dashAttrs     = this._hass.states[DASHBOARD_ENTITY]?.attributes;
       const forecastSlots = this._buildForecastSlots(dashAttrs, windowStart, windowEnd);
       const profileSlots  = this._readChargingProfile(dashAttrs);
@@ -403,23 +394,35 @@
       this._clearStatus();
       if (this._chart) { this._chart.destroy(); this._chart = null; }
 
-      // Red shaded bands for negative-sell windows
-      const lockoutAnnotations = lockouts.map(w => ({
-        x:           w.x,
-        x2:          w.x2,
-        fillColor:   'rgba(229, 57, 53, 0.14)',
-        borderColor: 'rgba(229, 57, 53, 0.40)',
-        label: {
-          text: '⛔ sell off',
-          position: 'top',
-          offsetY: 6,
-          style: {
-            color:      '#ef9a9a',
-            background: 'transparent',
-            fontSize:   '10px',
-            padding: { top: 2, bottom: 2, left: 4, right: 4 },
-          },
-        },
+      // Translucent bands grouping contiguous ChargingProfile-mode slots.
+      // Legend lives in the pill row above the chart — no inline label here.
+      const MODE_BAND_FILL = {
+        solar_charge: 'rgba(66, 165, 245, 0.12)',
+        sell:         'rgba(255, 179, 0, 0.10)',
+        no_export:    'rgba(229, 57, 53, 0.14)',
+      };
+      const profileBands = [];
+      {
+        const sorted = [...profileSlots.entries()]
+          .filter(([, p]) => MODE_BAND_FILL[p.mode])
+          .sort((a, b) => a[0] - b[0]);
+        let run = null;
+        for (const [slotT, prof] of sorted) {
+          if (run && prof.mode === run.mode && slotT === run.x2) {
+            run.x2 = slotT + SLOT_MS;
+            continue;
+          }
+          if (run) profileBands.push(run);
+          run = { mode: prof.mode, x: slotT, x2: slotT + SLOT_MS };
+        }
+        if (run) profileBands.push(run);
+      }
+      const profileAnnotations = profileBands.map(b => ({
+        x:           b.x,
+        x2:          b.x2,
+        fillColor:   MODE_BAND_FILL[b.mode],
+        borderColor: 'transparent',
+        opacity:     1,
       }));
 
       // Series: 0=buy(line) 1=sell(line) 2=solar forecast(bar)
@@ -542,7 +545,7 @@
                 },
               },
             },
-            ...lockoutAnnotations,
+            ...profileAnnotations,
           ],
         },
 

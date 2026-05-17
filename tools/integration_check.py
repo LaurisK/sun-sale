@@ -14,6 +14,7 @@ Usage:
     HA_URL=http://host:port HA_TOKEN=... python tools/integration_check.py
     python tools/integration_check.py --json
     python tools/integration_check.py --filter pricing
+    python tools/integration_check.py --values   # dump integration/consumed/exposed values
 """
 from __future__ import annotations
 
@@ -424,6 +425,66 @@ def render_json(report: list[tuple[Snapshot, list[CheckResult]]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Values dump
+# ---------------------------------------------------------------------------
+
+# Keys inside debug["inputs"] that are integration-level configuration rather
+# than values consumed by a module each cycle.
+_INTEGRATION_INPUT_KEYS = frozenset({"tariff_config"})
+
+
+def _section(title: str, payload: Any) -> str:
+    body = json.dumps(payload, indent=2, sort_keys=True, default=str)
+    return f"[{title}]\n{body}"
+
+
+def render_values(snapshots: list[Snapshot]) -> str:
+    """Group every value the debug snapshot carries into three sections:
+
+      * INTEGRATION — config (entity bindings, tariff, etc.)
+      * CONSUMED    — raw HA entity states + translator-produced primary types
+      * EXPOSED     — pipeline secondary types + outputs + dispatch state
+
+    Within each section every key/value is printed as JSON so nothing is
+    truncated. Keys present in the coordinator-data dict but not surfaced
+    by `/api/sun_sale/debug` won't appear here — extend `debug_view.py` to
+    cover them.
+    """
+    parts: list[str] = []
+    for snap in snapshots:
+        debug = snap.debug
+        inputs = snap.inputs
+        consumed_primary = {
+            k: v for k, v in inputs.items() if k not in _INTEGRATION_INPUT_KEYS
+        }
+        integration = {
+            "entry_id": snap.entry_id,
+            "automation_enabled": debug.get("automation_enabled"),
+            "config": snap.config,
+            **{k: inputs.get(k) for k in _INTEGRATION_INPUT_KEYS if k in inputs},
+        }
+        consumed = {
+            "raw_entities": snap.raw_entities,
+            "primary": consumed_primary,
+        }
+        exposed = {
+            "pipeline": snap.pipeline,
+            "outputs": snap.outputs,
+            "last_dispatched_action": debug.get("last_dispatched_action"),
+            "last_dispatched_at": debug.get("last_dispatched_at"),
+            "timestamp": debug.get("timestamp"),
+        }
+        parts.append(f"== entry {snap.entry_id} ==\n")
+        parts.append(_section("INTEGRATION", integration))
+        parts.append("")
+        parts.append(_section("CONSUMED", consumed))
+        parts.append("")
+        parts.append(_section("EXPOSED", exposed))
+        parts.append("")
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -435,6 +496,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true", help="emit JSON report")
     p.add_argument("--filter", help="only run checks in this category")
     p.add_argument("--dump-snapshot", action="store_true", help="print raw snapshot then exit")
+    p.add_argument(
+        "--values",
+        action="store_true",
+        help="print all integration/consumed/exposed values then exit",
+    )
     args = p.parse_args(argv)
 
     client = HAClient(args.url, args.token)
@@ -453,6 +519,10 @@ def main(argv: list[str] | None = None) -> int:
             [{"entry_id": s.entry_id, "debug": s.debug, "raw_entities": s.raw_entities} for s in snapshots],
             indent=2,
         ))
+        return 0
+
+    if args.values:
+        print(render_values(snapshots))
         return 0
 
     report = run_checks(snapshots, args.filter)
