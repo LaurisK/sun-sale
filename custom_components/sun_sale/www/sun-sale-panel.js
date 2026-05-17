@@ -464,7 +464,9 @@
       // the forecast bar (y = forecast_kwh), extending UP by +error (green
       // for under-forecast) or DOWN by |error| (red for over-forecast).
       // ApexCharts can't express this via stacked / rangeBar / range-y in
-      // a mixed line+bar chart, so we paint custom <rect>s on its events.
+      // a mixed line+bar chart, so we paint custom <rect>s once after
+      // render() resolves. Wiring this into chart.events.mounted/updated
+      // collapses the bar series (cause unknown — likely re-entrant render).
       const SVG_NS    = 'http://www.w3.org/2000/svg';
       const OVL_GROUP = 'sunsale-error-overlay';
       const ERR_POS   = '#66bb6a';   // observed > forecast
@@ -530,10 +532,6 @@
           fontFamily: 'inherit',
           events: {
             beforeResetZoom: () => ({ xaxis: { min: windowStart, max: windowEnd } }),
-            mounted:         (c) => drawErrorOverlay(c),
-            updated:         (c) => drawErrorOverlay(c),
-            zoomed:          (c) => drawErrorOverlay(c),
-            scrolled:        (c) => drawErrorOverlay(c),
           },
         },
 
@@ -680,7 +678,7 @@
 
       const el = this.shadowRoot.querySelector('#chart');
       this._chart = new ApexCharts(el, options);
-      this._chart.render();
+      this._chart.render().then(() => drawErrorOverlay(this._chart));
     }
   }
 
