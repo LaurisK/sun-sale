@@ -7,7 +7,12 @@
  *   Sell price  coral  solid stepline  — past history + future from pricing sensor (one continuous line)
  *
  * Right Y axis — kWh/slot (15-min):
- *   Solar forecast  grey (25 % opacity) rangeBar from 0 → forecast_kwh — full 72 h window
+ *   Solar forecast  rangeBar from 0 → forecast_kwh — full 72 h window.
+ *                   Past + non-today-future slots: grey (25 % opacity).
+ *                   Today's remaining slots: per-bar color from charging_profile_slots —
+ *                     blue   SOLAR_CHARGE — going to battery
+ *                     amber  SELL         — exporting for €
+ *                     red    NO_EXPORT    — curtailed (sell ≤ 0)
  *   Forecast error  rangeBar overlay sitting on top of the forecast bar:
  *                     green = observed > forecast (under-forecast), drawn from forecast → observed
  *                     red   = observed < forecast (over-forecast),  drawn from observed → forecast
@@ -68,6 +73,8 @@
       if (!this._initialized) {
         this._initialized = true;
         this._boot();
+      } else {
+        this._renderBatteryRow(hass.states[DASHBOARD_ENTITY]?.attributes);
       }
     }
 
@@ -113,6 +120,47 @@
             font-size: 0.75rem;
             color: var(--secondary-text-color, #888);
           }
+          #battery {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            margin: 0 0 12px;
+            font-size: 0.95rem;
+            color: var(--primary-text-color, #fff);
+          }
+          #battery .label { color: var(--secondary-text-color, #888); }
+          #battery .state { font-weight: 600; }
+          #battery .state.charging    { color: #4caf50; }
+          #battery .state.discharging { color: #ff7043; }
+          #battery .state.idle        { color: #9e9e9e; }
+          #battery .soc { font-weight: 600; }
+          #battery .capacity {
+            font-size: 0.75rem;
+            color: var(--secondary-text-color, #888);
+          }
+          #profile {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 10px;
+            margin: 0 0 12px;
+            font-size: 0.85rem;
+            color: var(--primary-text-color, #fff);
+          }
+          #profile .label { color: var(--secondary-text-color, #888); }
+          #profile .swatch {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+            margin-right: 4px;
+            vertical-align: middle;
+          }
+          #profile .swatch.charge   { background: #42a5f5; }
+          #profile .swatch.sell     { background: #ffb300; }
+          #profile .swatch.curtail  { background: #e53935; }
+          #profile .value { font-weight: 600; }
+          #profile .sep { color: var(--secondary-text-color, #444); }
           #status {
             padding: 40px;
             text-align: center;
@@ -123,9 +171,61 @@
         <div id="card">
           <h2>☀ Sun Sale</h2>
           <div id="subtitle">Buy &amp; Sell prices · Solar — 72 h window</div>
+          <div id="battery"></div>
+          <div id="profile"></div>
           <div id="status">Loading…</div>
           <div id="chart"></div>
         </div>
+      `;
+    }
+
+    _renderBatteryRow(dashAttrs) {
+      const el = this.shadowRoot.querySelector('#battery');
+      if (!el) return;
+      if (!dashAttrs) { el.innerHTML = ''; return; }
+
+      const state    = dashAttrs.battery_state || 'idle';
+      const soc      = dashAttrs.battery_soc_pct;
+      const charged  = dashAttrs.battery_remaining_kwh;
+      const capacity = dashAttrs.battery_capacity_kwh;
+
+      const stateLabel = state.charAt(0).toUpperCase() + state.slice(1);
+      const socTxt = (typeof soc === 'number') ? soc.toFixed(1) + '%' : '—';
+      const capTxt = (typeof charged === 'number' && typeof capacity === 'number')
+        ? `${charged.toFixed(2)} / ${capacity.toFixed(2)} kWh`
+        : '';
+
+      el.innerHTML = `
+        <span class="label">Battery:</span>
+        <span class="state ${state}">${stateLabel}</span>
+        <span class="soc">${socTxt}</span>
+        ${capTxt ? `<span class="capacity">${capTxt}</span>` : ''}
+      `;
+    }
+
+    _renderProfileRow(dashAttrs) {
+      const el = this.shadowRoot.querySelector('#profile');
+      if (!el) return;
+      const sum = dashAttrs?.charging_profile_summary;
+      if (!sum) { el.innerHTML = ''; return; }
+
+      const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
+      const remaining = fmt(sum.today_remaining_generation_kwh);
+      const free      = fmt(sum.free_capacity_kwh);
+      const charge    = fmt(sum.allocated_solar_kwh);
+      const sell      = fmt(sum.total_sell_kwh);
+      const curtail   = fmt(sum.total_no_export_kwh);
+
+      el.innerHTML = `
+        <span class="label">Today remaining:</span>
+        <span class="value">${remaining} kWh</span>
+        <span class="sep">·</span>
+        <span class="label">Free capacity:</span>
+        <span class="value">${free} kWh</span>
+        <span class="sep">→</span>
+        <span><span class="swatch charge"></span>Battery <span class="value">${charge}</span> kWh</span>
+        <span><span class="swatch sell"></span>Sell <span class="value">${sell}</span> kWh</span>
+        <span><span class="swatch curtail"></span>Curtail <span class="value">${curtail}</span> kWh</span>
       `;
     }
 
@@ -228,6 +328,24 @@
     // Only past slots — the backend ForecastErrorSeries pairs forecast against
     // the inverter's cumulative-kWh counter, which has no future samples.
 
+    // ── Data: per-slot charging-profile disposition from dashboard sensor ─────
+    // Returns Map<slotStartMs, { mode, expected_kwh, sell_eur_kwh }>.
+    // Only today's remaining slots are present (backend convention).
+
+    _readChargingProfile(dashAttrs) {
+      const slots = new Map();
+      if (!Array.isArray(dashAttrs?.charging_profile_slots)) return slots;
+      for (const s of dashAttrs.charging_profile_slots) {
+        if (typeof s?.t !== 'number' || typeof s.mode !== 'string') continue;
+        slots.set(s.t, {
+          mode:          s.mode,
+          expected_kwh:  Number(s.expected_kwh)  || 0,
+          sell_eur_kwh:  Number(s.sell_eur_kwh)  || 0,
+        });
+      }
+      return slots;
+    }
+
     _readForecastErrorSlots(dashAttrs, windowStart, windowEnd) {
       const slots = new Map();
       if (!Array.isArray(dashAttrs?.forecast_error_slots)) return slots;
@@ -257,6 +375,10 @@
       const dashAttrs     = this._hass.states[DASHBOARD_ENTITY]?.attributes;
       const forecastSlots = this._buildForecastSlots(dashAttrs, windowStart, windowEnd);
       const errorSlots    = this._readForecastErrorSlots(dashAttrs, windowStart, windowEnd);
+      const profileSlots  = this._readChargingProfile(dashAttrs);
+
+      this._renderBatteryRow(dashAttrs);
+      this._renderProfileRow(dashAttrs);
 
       // Merge past history + future pricing sensor into continuous price lines.
       const _merge = (histPoints, pricingPoints, windowStartMs) => {
@@ -286,7 +408,12 @@
       //   observed < forecast  → red   band from observed → forecast (over-forecast)
       const GREEN = '#4caf50';
       const RED   = '#f44336';
-      const GREY  = '#9e9e9e';
+      const GREY_BAR = 'rgba(158,158,158,0.25)';
+      const MODE_COLORS = {
+        solar_charge: '#42a5f5',
+        sell:         '#ffb300',
+        no_export:    '#e53935',
+      };
 
       const forecastBars = [];
       const errorBars    = [];
@@ -294,7 +421,14 @@
       while (t <= windowEnd) {
         const fKwh = forecastSlots.get(t);
         if (fKwh != null && fKwh > 0.001) {
-          forecastBars.push({ x: t, y: [0, fKwh] });
+          const prof  = profileSlots.get(t);
+          const color = (prof && MODE_COLORS[prof.mode]) || GREY_BAR;
+          forecastBars.push({
+            x: t,
+            y: [0, fKwh],
+            fillColor:   color,
+            strokeColor: color,
+          });
         }
         const err = errorSlots.get(t);
         if (err) {
@@ -379,12 +513,12 @@
           dashArray: [0,          0,          0,         0],
         },
 
-        // 0:amber buy 1:coral sell 2:grey forecast 3:green default (per-point overrides for error sign)
-        colors: ['#ffb300', '#ff7043', GREY, GREEN],
+        // 0:amber buy 1:coral sell 2:forecast (per-point fillColor) 3:green default (per-point overrides for error sign)
+        colors: ['#ffb300', '#ff7043', GREY_BAR, GREEN],
 
         fill: {
           type:    ['solid', 'solid', 'solid', 'solid'],
-          opacity: [1,       1,       0.25,    1],
+          opacity: [1,       1,       1,       1],
         },
 
         xaxis: {
@@ -477,7 +611,16 @@
               const pt = w.config.series[seriesIndex].data[dataPointIndex];
               if (!pt || !Array.isArray(pt.y)) return val?.toFixed?.(3) + ' kWh';
               const [lo, hi] = pt.y;
-              if (seriesIndex === 2) return hi.toFixed(3) + ' kWh forecast';
+              if (seriesIndex === 2) {
+                const slotT = pt.x;
+                const prof  = profileSlots.get(slotT);
+                const base  = hi.toFixed(3) + ' kWh forecast';
+                if (!prof) return base;
+                if (prof.mode === 'solar_charge') return base + ' → charge battery';
+                if (prof.mode === 'sell')         return base + ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
+                if (prof.mode === 'no_export')    return base + ' → curtail (sell ≤ 0)';
+                return base;
+              }
               const signed = pt.fillColor === GREEN ? (hi - lo) : -(hi - lo);
               const tag = signed >= 0 ? 'under-forecast' : 'over-forecast';
               return (signed >= 0 ? '+' : '') + signed.toFixed(3) + ' kWh (' + tag + ')';

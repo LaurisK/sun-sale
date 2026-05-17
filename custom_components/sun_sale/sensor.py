@@ -22,6 +22,8 @@ from .contract.models import (
     BaseLoadProfile,
     BatteryRuntimeEstimate,
     CalculationResult,
+    ChargeMode,
+    ChargingProfile,
     ForecastErrorSeries,
     GenerationSeries,
     PriceSeries,
@@ -337,14 +339,57 @@ class DashboardSensor(_BaseSensor):
             }
             for s in (err.slots if err else ())
         ]
+
+        profile: ChargingProfile | None = self.coordinator.data.get("charging_profile")
+        charging_profile_slots: list[dict[str, Any]] = []
+        charging_profile_summary: dict[str, Any] | None = None
+        if profile is not None:
+            total_sell_kwh = 0.0
+            for s in profile.slots:
+                if s.mode is ChargeMode.SELL:
+                    total_sell_kwh += s.expected_kwh
+                charging_profile_slots.append({
+                    "t": int(s.start.timestamp() * 1000),
+                    "mode": s.mode.value,
+                    "expected_kwh": round(s.expected_kwh, 4),
+                    "sell_eur_kwh": round(s.sell_eur_kwh, 4),
+                })
+            charging_profile_summary = {
+                "free_capacity_kwh": round(profile.free_capacity_kwh, 3),
+                "today_remaining_generation_kwh": round(profile.today_remaining_generation_kwh, 3),
+                "allocated_solar_kwh": round(profile.allocated_solar_kwh, 3),
+                "total_sell_kwh": round(total_sell_kwh, 3),
+                "total_no_export_kwh": round(profile.total_no_export_kwh, 3),
+                "solar_exceeds_capacity": profile.solar_exceeds_capacity,
+                "computed_at": profile.computed_at.isoformat(),
+            }
+
+        status = self.coordinator.data.get("battery_status")
+        capacity_kwh = round(bc.nominal_capacity_kwh, 2) if bc else None
+        soc_pct = round(status.soc * 100.0, 1) if status else None
+        remaining_kwh = round(status.remaining_capacity_kwh, 2) if status else None
+        power_kw = self.coordinator.data.get("battery_power_kw", 0.0)
+        if power_kw is None or abs(power_kw) < 0.05:
+            battery_state = "idle"
+        elif power_kw > 0:
+            battery_state = "charging"
+        else:
+            battery_state = "discharging"
+
         return {
             "generated_at": now.isoformat(),
             "now_ts": int(now.timestamp() * 1000),
             "slots": self.coordinator.data.get("dashboard_slots", []),
             "solar_frozen_forecast": self.coordinator.data.get("solar_frozen_forecast", []),
             "forecast_error_slots": forecast_error_slots,
-            "battery_capacity_kwh": round(bc.nominal_capacity_kwh, 2) if bc else None,
+            "battery_capacity_kwh": capacity_kwh,
+            "battery_soc_pct": soc_pct,
+            "battery_remaining_kwh": remaining_kwh,
+            "battery_power_kw": round(power_kw, 3) if power_kw is not None else None,
+            "battery_state": battery_state,
             "solar_energy_entity_id": config.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
+            "charging_profile_slots": charging_profile_slots,
+            "charging_profile_summary": charging_profile_summary,
         }
 
 

@@ -133,9 +133,11 @@ All translators run in parallel via `asyncio.gather` (`run_translators` in `pipe
 
 Two more files in `inbound/` are not translators — they are pure assembly functions called by DAG nodes:
 
-- **`inbound/pricing.py`** — `build_price_series(prices, config, now, resolution=None)` applies the tariff formula to a flat list of `PriceEntry`. `build_price_series_72h(nordpool, yesterday, config, now)` is the function `PricingNode` calls: it combines `YesterdayPrices.entries + NordpoolData.entries` and uses `NordpoolData.resolution` as the source of truth. See `docs/inbound_pricing.md` for the full reference.
-- **`inbound/forecast.py`** — `build_generation_series(solar, price_series, now)` is the function `GenerationNode` calls: it resamples `SolarData.entries` onto the `PriceSeries` grid (1:1, zero-filled where solar is absent) to produce a continuous 72h `GenerationSeries`, and computes per-day totals plus `today_remaining_kwh`. Yesterday entries are prepended in the coordinator (same pattern as pricing) and are invisible to downstream consumers. See `docs/inbound_forecast.md` for the full reference.
-- **`inbound/battery.py`** — `build_battery_status(reading, config)` is the function `BatteryStatusNode` calls: it combines configured nominal capacity and charge/discharge power limits with the observed SoC into an immutable `BatteryStatus`, and derives `remaining_capacity_kwh = soc * total_capacity_kwh`. See `docs/inbound_battery.md` for the full reference.
+- **`inbound/pricing.py`** — `build_price_series(prices, config, now, resolution=None)` applies the tariff formula to a flat list of `PriceEntry`. `build_price_series_72h(nordpool, yesterday, config, now)` is the function `PricingNode` calls: it combines `YesterdayPrices.entries + NordpoolData.entries` and uses `NordpoolData.resolution` as the source of truth.
+- **`inbound/forecast.py`** — `build_generation_series(solar, price_series, now)` is the function `GenerationNode` calls: it resamples `SolarData.entries` onto the `PriceSeries` grid (1:1, zero-filled where solar is absent) to produce a continuous 72h `GenerationSeries`, and computes per-day totals plus `today_remaining_kwh`. Yesterday entries are prepended in the coordinator (same pattern as pricing) and are invisible to downstream consumers.
+- **`inbound/battery.py`** — `build_battery_status(reading, config)` is the function `BatteryStatusNode` calls: it combines configured nominal capacity and charge/discharge power limits with the observed SoC into an immutable `BatteryStatus`, and derives `remaining_capacity_kwh = soc * total_capacity_kwh`.
+
+See `docs/MODULES.md` for per-module reference (description, exposed type, dependencies, test coverage).
 
 These live in `inbound/` because they normalise translator output into the shape downstream nodes consume.
 
@@ -287,7 +289,7 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 | `Schedule` | `OptimizerNode` | `slots: list[ScheduleSlot]`, `total_expected_profit_eur`, `degradation_cost_per_kwh`, `computed_at` |
 | `DashboardData` | `DashboardNode` | `future_slots: list[dict]`, `solar_frozen_forecast: list[dict]` |
 
-`PriceSlot` carries `buy_eur_kwh`, `sell_eur_kwh` (can be negative or zero), `spot_eur_kwh`, and `sources: tuple[str, ...]` for diagnostics. Sellability (the strict `> 0` check) lives downstream in the charging-profile stage. See `docs/inbound_pricing.md`.
+`PriceSlot` carries `buy_eur_kwh`, `sell_eur_kwh` (can be negative or zero), `spot_eur_kwh`, and `sources: tuple[str, ...]` for diagnostics. Sellability (the strict `> 0` check) lives downstream in the charging-profile stage.
 
 ---
 
@@ -297,7 +299,7 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 
 **Sub-package layering enforces direction.** `contract` depends on nothing. `inbound` / `pipeline` / `outbound` depend only on `contract`. `orchestration` is the only layer allowed to glue them. This is enforced by convention (and would surface as a circular import if violated).
 
-**Inbound owns the 72h pricing assembly.** The Nordpool translator emits today + tomorrow only; the coordinator supplies yesterday from a persistent store as `YesterdayPrices`; `inbound/pricing.build_price_series_72h` combines them and applies the tariff. Downstream consumers can rely on `PriceSeries` covering yesterday→today→tomorrow when yesterday data is available. See `docs/inbound_pricing.md`.
+**Inbound owns the 72h pricing assembly.** The Nordpool translator emits today + tomorrow only; the coordinator supplies yesterday from a persistent store as `YesterdayPrices`; `inbound/pricing.build_price_series_72h` combines them and applies the tariff. Downstream consumers can rely on `PriceSeries` covering yesterday→today→tomorrow when yesterday data is available.
 
 **Tier constraint enforced at wire-time.** `add_observer()` raises `TierViolationError` if `observer.tier <= subject.tier`. This catches dependency graph mistakes during integration startup, not at runtime.
 
