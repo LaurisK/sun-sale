@@ -1,17 +1,17 @@
-"""Forecast stage: normalise SolarData into GenerationSeries.
+"""Forecast stage: solar HA-state reader + GenerationSeries assembly.
 
-Pure Python — no Home Assistant imports.
-Called by GenerationNode (Tier 2 DAG node).
-
-Produces a continuous 72h GenerationSeries (yesterday 00:00 → tomorrow 23:59)
-at PriceSeries granularity. How yesterday is obtained (persistent store, same
-pattern as pricing) is invisible to consumers: every price slot gets exactly
-one generation slot, zero-filled where solar coverage is absent. Exposes per-
-day totals (yesterday / today / tomorrow) and today_remaining — nothing else.
+The `SolarTranslator` reads forecast entities (Open Meteo watts, with a
+Forecast.Solar / Solcast fallback) and produces SolarData. The
+`build_generation_series` function then resamples it onto the price grid to
+produce a continuous 72h GenerationSeries (yesterday 00:00 → tomorrow 23:59).
+Every price slot gets exactly one generation slot, zero-filled where solar
+coverage is absent. Yesterday is stitched in upstream from the persistent
+store, invisible to consumers here.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from ..contract.models import (
     GenerationSeries,
@@ -19,6 +19,7 @@ from ..contract.models import (
     PriceSeries,
     SolarData,
     SolarEntry,
+    SunSaleConfig,
 )
 
 
@@ -125,3 +126,129 @@ def _compute_totals(slots: tuple[GenerationSlot, ...], now: datetime) -> dict[st
         "tomorrow": round(tomo_sum, 4),
         "today_remaining": round(today_remaining, 4),
     }
+
+
+# ---------------------------------------------------------------------------
+# Solar translator (HA-edge reader)
+# ---------------------------------------------------------------------------
+
+def _tomorrow_entity(entity_id: str) -> str:
+    """Derive the tomorrow forecast entity from today's entity ID."""
+    for pattern in ("_today_", "_today"):
+        if pattern in entity_id:
+            return entity_id.replace(pattern, pattern.replace("today", "tomorrow"), 1)
+    return ""
+
+
+def _watts_to_solar_entries(watts: dict[datetime, float]) -> list[SolarEntry]:
+    """Convert {slot_utc: W} dict to SolarEntry list, detecting slot duration."""
+    sorted_ts = sorted(watts.keys())
+    if len(sorted_ts) >= 2:
+        slot_dur = sorted_ts[1] - sorted_ts[0]
+    else:
+        slot_dur = timedelta(hours=1)
+    slot_h = slot_dur.total_seconds() / 3600.0
+    return [
+        SolarEntry(
+            start=ts,
+            end=ts + slot_dur,
+            expected_kwh=round(w * slot_h / 1000.0, 6),
+            source="open_meteo",
+        )
+        for ts in sorted_ts
+        for w in (watts[ts],)
+    ]
+
+
+def _make_solar_data(entries: list[SolarEntry], source: str, now: datetime) -> SolarData:
+    today = now.date()
+    total_today = sum(e.expected_kwh for e in entries if e.start.date() == today)
+    remaining = sum(e.expected_kwh for e in entries if e.start.date() == today and e.start >= now)
+    return SolarData(
+        entries=entries,
+        total_today_kwh=round(total_today, 4),
+        today_remaining_kwh=round(remaining, 4),
+        primary_source=source,
+    )
+
+
+class SolarTranslator:
+    """Reads solar forecast from HA entities; produces SolarData.
+
+    Tries Open Meteo (watts attribute) first across all entity IDs (today + tomorrow).
+    Falls back to Forecast.Solar / Solcast (forecast attribute).
+    Multiple panels (entity_1, entity_2) are combined by summing at each timestamp.
+    Coordinator prepends yesterday entries from persistent store.
+    """
+
+    output_type = SolarData
+
+    def __init__(self, entity_1: str, entity_2: str) -> None:
+        self._entity_1 = entity_1
+        self._entity_2 = entity_2
+
+    def parse(self, hass: Any, now: datetime | None = None) -> SolarData:
+        """Parse solar state into SolarData. Sync; callable from tests."""
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        # --- Open Meteo: collect watts from all entities and their tomorrow counterparts ---
+        combined_watts: dict[datetime, float] = {}
+        for base_eid in (self._entity_1, self._entity_2):
+            if not base_eid:
+                continue
+            for eid in (base_eid, _tomorrow_entity(base_eid)):
+                if not eid:
+                    continue
+                state = hass.states.get(eid)
+                if state is None:
+                    continue
+                raw_watts = state.attributes.get("watts")
+                if not isinstance(raw_watts, dict):
+                    continue
+                for ts_str, w in raw_watts.items():
+                    try:
+                        dt = datetime.fromisoformat(str(ts_str))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        slot_utc = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+                        combined_watts[slot_utc] = combined_watts.get(slot_utc, 0.0) + float(w)
+                    except (ValueError, TypeError):
+                        continue
+
+        if combined_watts:
+            entries = _watts_to_solar_entries(combined_watts)
+            return _make_solar_data(entries, "open_meteo", now)
+
+        # --- Forecast.Solar / Solcast fallback: collect from all entities ---
+        combined_kwh: dict[datetime, float] = {}
+        for base_eid in (self._entity_1, self._entity_2):
+            if not base_eid:
+                continue
+            state = hass.states.get(base_eid)
+            if state is None:
+                continue
+            for slot in state.attributes.get("forecast", []):
+                try:
+                    dt = datetime.fromisoformat(str(slot["time"]))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    slot_utc = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+                    kwh = float(slot.get("pv_estimate", slot.get("energy", 0.0)))
+                    combined_kwh[slot_utc] = combined_kwh.get(slot_utc, 0.0) + kwh
+                except (KeyError, ValueError, TypeError):
+                    continue
+
+        if combined_kwh:
+            entries = [
+                SolarEntry(start=s, end=s + timedelta(hours=1), expected_kwh=kwh, source="forecast_solar")
+                for s, kwh in sorted(combined_kwh.items())
+            ]
+            return _make_solar_data(entries, "forecast_solar", now)
+
+        return SolarData(entries=[], total_today_kwh=0.0, today_remaining_kwh=0.0, primary_source="none")
+
+    async def translate(
+        self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
+    ) -> SolarData:
+        return self.parse(hass, now)

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 from custom_components.sun_sale.orchestration.coordinator import SunSaleCoordinator
-from custom_components.sun_sale.inbound.translators import NordpoolTranslator
+from custom_components.sun_sale.inbound.pricing import NordpoolTranslator
 from custom_components.sun_sale.contract.models import BatteryReading
 from custom_components.sun_sale.contract.const import CONF_NORDPOOL_ENTITY, CONF_SOLAR_FORECAST_ENTITY
 

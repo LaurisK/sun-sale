@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from custom_components.sun_sale.inbound.forecast import build_generation_series
 from custom_components.sun_sale.contract.models import PriceSeries, SolarData, SolarEntry
 from custom_components.sun_sale.inbound.pricing import build_price_series
-from custom_components.sun_sale.inbound.translators import _tomorrow_entity
+from custom_components.sun_sale.inbound.forecast import _tomorrow_entity
 from tests.conftest import BASE_DT, default_tariff_config, make_price
 
 NOW = BASE_DT
@@ -17,7 +17,7 @@ def _empty_price_series() -> PriceSeries:
 
 def _make_solar_data_from_watts(watts_by_iso: dict[str, float], now=NOW) -> SolarData:
     """Build SolarData from {iso_str: watts} dict."""
-    from custom_components.sun_sale.inbound.translators import _watts_to_solar_entries, _make_solar_data
+    from custom_components.sun_sale.inbound.forecast import _watts_to_solar_entries, _make_solar_data
     parsed: dict[datetime, float] = {}
     for ts_str, w in watts_by_iso.items():
         dt = datetime.fromisoformat(ts_str)
@@ -40,7 +40,7 @@ def _make_solar_data_from_forecast(forecast_slots: list[dict], now=NOW) -> Solar
             entries.append(SolarEntry(start=dt, end=dt + timedelta(hours=1), expected_kwh=kwh, source="forecast_solar"))
         except (KeyError, ValueError):
             continue
-    from custom_components.sun_sale.inbound.translators import _make_solar_data
+    from custom_components.sun_sale.inbound.forecast import _make_solar_data
     return _make_solar_data(entries, "forecast_solar" if entries else "none", now)
 
 
@@ -308,7 +308,7 @@ def test_empty_solar_yields_zero_totals():
 
 
 # ---------------------------------------------------------------------------
-# _tomorrow_entity helper (now in translators.py)
+# _tomorrow_entity helper
 # ---------------------------------------------------------------------------
 
 def test_tomorrow_entity_today_suffix():

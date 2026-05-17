@@ -53,14 +53,14 @@ package "contract/  (pure data — no internal deps)" {
 }
 
 ' ══════════════════════════════════════════════════════════════
-' INBOUND LAYER
+' INBOUND LAYER  (one translator per file — old translators.py removed)
 ' ══════════════════════════════════════════════════════════════
 package "inbound/  (HA-read + normalise)" {
-  rectangle "translators.py"        as I_trans OLD
-  rectangle "pricing.py\n[refactored]"     as I_price   REFACTORED
-  rectangle "forecast.py\n[refactored]"    as I_fc      REFACTORED
-  rectangle "generation.py\n[refactored]"  as I_gen     REFACTORED
-  rectangle "battery.py\n[refactored]"     as I_bat     REFACTORED
+  rectangle "pricing.py\n[refactored]\nNordpoolTranslator"        as I_price   REFACTORED
+  rectangle "forecast.py\n[refactored]\nSolarTranslator"          as I_fc      REFACTORED
+  rectangle "generation.py\n[refactored]\nGenerationTranslator"   as I_gen     REFACTORED
+  rectangle "battery.py\n[refactored]\nBatteryTranslator"         as I_bat     REFACTORED
+  rectangle "household_load.py\nHouseholdLoadTranslator"          as I_hh      OLD
 }
 
 ' ══════════════════════════════════════════════════════════════
@@ -73,7 +73,6 @@ package "pipeline/  (pure-Python DAG)" {
   rectangle "battery.py"         as P_bat     OLD
   rectangle "calculator.py"      as P_calc    OLD
   rectangle "optimizer.py"       as P_opt     OLD
-  rectangle "ev_scheduler.py"    as P_ev      OLD
   rectangle "charging_profile.py\n[refactored]" as P_cp  REFACTORED
   rectangle "base_load.py\n[refactored]"        as P_bl  REFACTORED
   rectangle "profitability.py\n[missing — not wired]" as P_prof MISSING
@@ -85,7 +84,6 @@ package "pipeline/  (pure-Python DAG)" {
 package "outbound/  (HA-write + presentation)" {
   rectangle "event_router.py" as O_router OLD
   rectangle "inverter.py"     as O_inv    OLD
-  rectangle "ev_charger.py"   as O_ev     OLD
   rectangle "dashboard.py"    as O_dash   OLD
 }
 
@@ -111,17 +109,20 @@ package "HA root entry points" {
 ' EDGES
 ' ══════════════════════════════════════════════════════════════
 
-' HA boundary
-HA --> I_trans
+' HA boundary — each inbound translator reads hass.states directly
+HA --> I_price
+HA --> I_fc
+HA --> I_gen
+HA --> I_bat
+HA --> I_hh
 HA --> O_inv
-HA --> O_ev
 R_init --> HA
 R_cfg  --> HA
 R_sens --> HA
 R_sw   --> HA
 
 ' Contract is consumed everywhere — show one representative edge per layer
-C_models <.. I_trans
+C_models <.. I_price
 C_models <.. P_nodes
 C_models <.. O_router
 C_models <.. ORCH_coord
@@ -129,12 +130,12 @@ C_const  <.. ORCH_coord
 C_events <.. P_nodes
 C_events <.. O_router
 
-' Inbound helpers consumed by translators / nodes
-I_trans  --> I_price : "PriceEntry stream"
+' Inbound translators → DAG (each emits its typed primary into the engine)
 I_price  --> P_nodes  : "PriceSeries via PricingNode"
 I_fc     --> P_nodes  : "GenerationSeries via GenerationNode"
 I_gen    --> P_nodes  : "ObservedGenerationSeries"
 I_bat    --> P_nodes  : "BatteryStatus via BatteryStatusNode"
+I_hh     --> P_nodes  : "HouseholdLoadHistory via BaseLoadProfileNode"
 
 ' DAG engine wiring
 P_engine <.. P_nodes
@@ -142,7 +143,6 @@ P_nodes  --> P_tariff
 P_nodes  --> P_bat
 P_nodes  --> P_calc
 P_nodes  --> P_opt
-P_nodes  --> P_ev
 P_nodes  --> P_cp
 P_nodes  --> P_bl
 
@@ -152,15 +152,17 @@ P_prof ..> P_nodes #FF5252 : "**MISSING**\nno ProfitabilityNode,\nno coordinator
 ' Pipeline → Outbound via events
 P_nodes --> O_router : "ControlEvent list"
 O_router --> O_inv
-O_router --> O_ev
 P_nodes --> O_dash    : "DashboardData (pure builder)"
 
 ' Orchestration owns translators + engine + router
-ORCH_coord --> I_trans
+ORCH_coord --> I_price
+ORCH_coord --> I_fc
+ORCH_coord --> I_gen
+ORCH_coord --> I_bat
+ORCH_coord --> I_hh
 ORCH_coord --> P_engine
 ORCH_coord --> O_router
 ORCH_coord --> O_inv
-ORCH_coord --> O_ev
 ORCH_dbg   <.. ORCH_coord : "primary/secondary snapshot"
 
 ' Root entries → orchestration

@@ -52,7 +52,7 @@ DEFAULT_WINDOW_DAYS = 30
 DEFAULT_FALLBACK_PERCENTILE = 0.20
 
 # Last-resort default when there is no history at all (fresh install).
-# Matches `inbound/translators._DEFAULT_HOUSEHOLD_LOAD_KW`.
+# Matches `inbound/battery._DEFAULT_HOUSEHOLD_LOAD_KW`.
 DEFAULT_STUB_KW = 0.2
 
 # How far ahead the runtime estimate simulates.

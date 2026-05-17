@@ -127,13 +127,11 @@ from ..pipeline.nodes import (
     PricingNode,
     make_last_ref,
 )
+from ..inbound.battery import BatteryTranslator
+from ..inbound.forecast import SolarTranslator
+from ..inbound.generation import GenerationTranslator
 from ..inbound.household_load import HouseholdLoadTranslator
-from ..inbound.translators import (
-    BatteryTranslator,
-    GenerationTranslator,
-    NordpoolTranslator,
-    SolarTranslator,
-)
+from ..inbound.pricing import NordpoolTranslator
 
 _LOGGER = logging.getLogger(__name__)
 

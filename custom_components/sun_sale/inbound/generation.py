@@ -1,11 +1,10 @@
-"""Generation stage: per-slot observed generation from the cumulative today-total counter.
+"""Generation stage: today-total HA-edge reader + ObservedGenerationSeries assembly.
 
-Pure Python — no Home Assistant imports.
-
-The inverter exposes a daily-resetting cumulative kWh counter. We take a
-snapshot each coordinator cycle, persist a rolling sample history, and here
-turn that history into a per-slot kWh series spanning yesterday 00:00 → now
-at the same granularity as the price grid (Nordpool resolution).
+The `GenerationTranslator` snapshots the inverter's daily-resetting cumulative
+kWh counter, producing a `GenerationReading` per coordinator cycle. The
+`build_observed_generation_series` function then turns the persisted rolling
+sample history into a per-slot kWh series spanning yesterday 00:00 → now at
+the price grid (Nordpool resolution).
 
 Per slot: `generated_kwh = today_total(slot.end) - today_total(slot.start)`,
 where `today_total(t)` is estimated by linear interpolation across the
@@ -15,6 +14,7 @@ midnight). Slots whose end falls past `now` are clamped to `now`.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from ..contract.models import (
     GenerationHistory,
@@ -22,6 +22,7 @@ from ..contract.models import (
     ObservedGenerationSeries,
     ObservedGenerationSlot,
     PriceSeries,
+    SunSaleConfig,
 )
 
 
@@ -152,3 +153,41 @@ def _compute_totals(
 
 def _utc_midnight(t: datetime) -> datetime:
     return datetime(t.year, t.month, t.day, 0, 0, 0, tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Generation translator (HA-edge reader)
+# ---------------------------------------------------------------------------
+
+class GenerationTranslator:
+    """Reads the inverter today-total generation sensor; produces GenerationReading.
+
+    The sensor is a cumulative kWh counter that resets at local midnight; this
+    translator only takes a snapshot. Differencing across samples is done by
+    `build_observed_generation_series` after the coordinator stitches the
+    persisted history.
+    """
+
+    output_type = GenerationReading
+
+    def __init__(self, entity_id: str) -> None:
+        self._entity_id = entity_id
+
+    def parse(self, hass: Any, now: datetime | None = None) -> GenerationReading | None:
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if not self._entity_id:
+            return None
+        state = hass.states.get(self._entity_id)
+        if state is None or state.state in ("unavailable", "unknown", ""):
+            return None
+        try:
+            value = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        return GenerationReading(today_total_kwh=value, timestamp=now)
+
+    async def translate(
+        self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
+    ) -> GenerationReading | None:
+        return self.parse(hass, now)
