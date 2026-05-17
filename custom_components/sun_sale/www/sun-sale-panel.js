@@ -489,11 +489,14 @@
           axisTicks:  { show: false },
         },
 
-        // yaxis[n] matches series[n]; shared axes use seriesName + show: false.
-        // Series 1 (Sell price) shares the price axis (series 0).
+        // Two y-axes: left = EUR/kWh shared by both price lines; right = kWh/slot
+        // for the solar-forecast bar. seriesName as an array binds multiple
+        // series to one axis (the canonical ApexCharts pattern); the previous
+        // "duplicate seriesName + show:false" trick left 'Sell price' with no
+        // explicit axis match, which silently dragged the bar onto the price axis.
         yaxis: [
           {
-            seriesName: 'Buy price',
+            seriesName: ['Buy price', 'Sell price'],
             title: {
               text:  'EUR / kWh',
               style: { color: '#ffb300', fontSize: '11px' },
@@ -505,7 +508,6 @@
               formatter: v => (v != null ? v.toFixed(3) : ''),
             },
           },
-          { seriesName: 'Buy price', show: false },
           {
             seriesName: 'Solar forecast',
             opposite:   true,
@@ -610,6 +612,32 @@
       try {
         await this._chart.render();
         console.log('sunSale: ApexCharts.render() resolved');
+
+        // Post-render SVG introspection — confirm bars actually painted.
+        requestAnimationFrame(() => {
+          const root = el.querySelector('svg.apexcharts-svg');
+          if (!root) { console.warn('sunSale: no apexcharts SVG found'); return; }
+          const barSeries = root.querySelectorAll('g.apexcharts-bar-series');
+          const allRects  = root.querySelectorAll('g.apexcharts-bar-series rect');
+          console.groupCollapsed('sunSale: SVG inspection');
+          console.log('bar-series groups:', barSeries.length);
+          console.log('total bar rects:',    allRects.length);
+          if (allRects.length) {
+            const first = allRects[0].getBoundingClientRect();
+            const peak  = [...allRects].reduce((a, b) =>
+              b.getBoundingClientRect().height > a.getBoundingClientRect().height ? b : a
+            );
+            const pb = peak.getBoundingClientRect();
+            console.log('first rect bbox:', first);
+            console.log('tallest rect bbox:', pb,
+              'attrs:', { x: peak.getAttribute('x'), y: peak.getAttribute('y'),
+                          width: peak.getAttribute('width'), height: peak.getAttribute('height'),
+                          fill: peak.getAttribute('fill') });
+          }
+          // Confirm which y-axis the bars are anchored on (which scale element).
+          console.log('y-axis groups:', root.querySelectorAll('g.apexcharts-yaxis').length);
+          console.groupEnd();
+        });
       } catch (e) {
         console.error('sunSale: ApexCharts.render() threw', e);
         this._setStatus('⚠ chart render failed: ' + e.message);
