@@ -82,7 +82,9 @@
         this._initialized = true;
         this._boot();
       } else {
-        this._renderBatteryRow(hass.states[DASHBOARD_ENTITY]?.attributes);
+        const dashAttrs = hass.states[DASHBOARD_ENTITY]?.attributes;
+        this._renderBatteryRow(dashAttrs);
+        this._renderProfileRow(dashAttrs);
       }
     }
 
@@ -290,12 +292,10 @@
       const buy  = [];
       const sell = [];
       for (const slot of attrs.slots) {
-        try {
-          const t = new Date(slot.start).getTime();
-          if (t > beforeMs) continue;
-          if (typeof slot.buy_eur_kwh  === 'number') buy.push([t, slot.buy_eur_kwh]);
-          if (typeof slot.sell_eur_kwh === 'number') sell.push([t, slot.sell_eur_kwh]);
-        } catch { /* skip bad entries */ }
+        const t = new Date(slot.start).getTime();
+        if (!isFinite(t) || t > beforeMs) continue;
+        if (typeof slot.buy_eur_kwh  === 'number') buy.push([t, slot.buy_eur_kwh]);
+        if (typeof slot.sell_eur_kwh === 'number') sell.push([t, slot.sell_eur_kwh]);
       }
       return {
         buy:  buy.sort((a, b)  => a[0] - b[0]),
@@ -507,9 +507,8 @@
           if (!(xMax > xMin) || !(yMax > yMin) || !gw || !gh) return;
           const xPx   = t => ((t - xMin) / (xMax - xMin)) * gw;
           const yPx   = v => gh - ((v - yMin) / (yMax - yMin)) * gh;
-          // Match the forecast bar width: columnWidth% of one slot.
-          const slotW = (SLOT_MS / (xMax - xMin)) * gw;
-          const colW  = slotW * 1.0; // mirrors plotOptions.bar.columnWidth: '100%'
+          // Match the forecast bar width: plotOptions.bar.columnWidth = '100%'.
+          const colW = (SLOT_MS / (xMax - xMin)) * gw;
 
           const g = document.createElementNS(SVG_NS, 'g');
           g.setAttribute('class', OVL_GROUP);

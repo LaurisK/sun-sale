@@ -108,9 +108,8 @@ def build_future_slots(
         for s in schedule.slots:
             sched_by_hour[s.start.replace(minute=0, second=0, microsecond=0)] = s
 
-    current_soc = reading.soc * 100.0
     load_w = reading.household_load_kw * 1000.0
-    soc = current_soc
+    soc = reading.soc * 100.0
 
     # End at "day-after-tomorrow UTC 23:45". The +2-day reach absorbs the
     # UTC↔local boundary skew: when the coordinator runs in the early-UTC-
