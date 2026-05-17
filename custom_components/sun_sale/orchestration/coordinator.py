@@ -161,9 +161,18 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._event_router: EventRouter | None = None
         self._last_battery_reading: BatteryReading | None = None
         self._yesterday_store: Store | None = None
+        # Persisted across cycles, rotated only at local-day rollover. The
+        # "today" bucket is overwritten each cycle (catches the latest forecast);
+        # the "yesterday" bucket is what gets prepended to solar.entries so the
+        # chart can render yesterday's column. Rotation: when a save fires with
+        # today_str != _today_stored_date, the previous _today_* becomes
+        # _yesterday_*, and the new data becomes _today_*.
         self._yesterday_nordpool: list[PriceEntry] = []
         self._yesterday_solar: list[SolarEntry] = []
-        self._yesterday_stored_date: str | None = None  # date string the stored entries represent
+        self._yesterday_stored_date: str | None = None
+        self._today_nordpool: list[PriceEntry] = []
+        self._today_solar: list[SolarEntry] = []
+        self._today_stored_date: str | None = None
         self._generation_store: Store | None = None
         self._generation_samples: list[GenerationReading] = []
         self._household_load_store: Store | None = None
@@ -315,24 +324,42 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._yesterday_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_YESTERDAY)
         yesterday_stored = await self._yesterday_store.async_load()
         if yesterday_stored:
-            self._yesterday_stored_date = yesterday_stored.get("date")
-            self._yesterday_nordpool = [
-                PriceEntry(
-                    start=datetime.fromisoformat(e["start"]),
-                    end=datetime.fromisoformat(e["end"]),
-                    price_eur_kwh=e["price"],
-                )
-                for e in yesterday_stored.get("nordpool", [])
-            ]
-            self._yesterday_solar = [
-                SolarEntry(
-                    start=datetime.fromisoformat(e["start"]),
-                    end=datetime.fromisoformat(e["end"]),
-                    expected_kwh=e["kwh"],
-                    source=e["source"],
-                )
-                for e in yesterday_stored.get("solar", [])
-            ]
+            # New layout: {"yesterday": {date,nordpool,solar}, "today": {…}}.
+            # Older single-bucket layout {"date","nordpool","solar"} also still
+            # loaded into "yesterday" so a fresh install upgrades cleanly.
+            def _load_solar(payload):
+                return [
+                    SolarEntry(
+                        start=datetime.fromisoformat(e["start"]),
+                        end=datetime.fromisoformat(e["end"]),
+                        expected_kwh=e["kwh"],
+                        source=e["source"],
+                    )
+                    for e in payload.get("solar", [])
+                ]
+            def _load_nordpool(payload):
+                return [
+                    PriceEntry(
+                        start=datetime.fromisoformat(e["start"]),
+                        end=datetime.fromisoformat(e["end"]),
+                        price_eur_kwh=e["price"],
+                    )
+                    for e in payload.get("nordpool", [])
+                ]
+            if "yesterday" in yesterday_stored or "today" in yesterday_stored:
+                y = yesterday_stored.get("yesterday") or {}
+                t = yesterday_stored.get("today") or {}
+                self._yesterday_stored_date = y.get("date")
+                self._yesterday_nordpool    = _load_nordpool(y)
+                self._yesterday_solar       = _load_solar(y)
+                self._today_stored_date     = t.get("date")
+                self._today_nordpool        = _load_nordpool(t)
+                self._today_solar           = _load_solar(t)
+            else:
+                # Legacy single-bucket store — treat as yesterday.
+                self._yesterday_stored_date = yesterday_stored.get("date")
+                self._yesterday_nordpool    = _load_nordpool(yesterday_stored)
+                self._yesterday_solar       = _load_solar(yesterday_stored)
 
     async def _async_update_data(self) -> dict:
         """One DAG cycle: translate → capacity update → DAG → event routing."""
@@ -369,29 +396,45 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             if self._yesterday_stored_date == yesterday_str and solar_data is not None:
                 solar_data.entries = self._yesterday_solar + solar_data.entries
 
-            # Save today's entries to the yesterday store (will be valid as yesterday tomorrow).
-            # Filter on LOCAL start.date() so the persisted "today" matches the
-            # local-tz today_str used by the loader.
+            # Persist today's slice; rotate yesterday at LOCAL date rollover.
+            # Without rotation, the single-bucket save kept overwriting whatever
+            # the "yesterday" lookup needed, dropping yesterday's column from
+            # the chart after the first cycle of any new day.
             if nordpool_data is not None and solar_data is not None:
                 _local = self._sun_sale_config.local_tz
                 today_nordpool = [e for e in nordpool_data.entries
                                    if e.start.astimezone(_local).date().isoformat() == today_str]
                 today_solar = [e for e in solar_data.entries
                                 if e.start.astimezone(_local).date().isoformat() == today_str]
+
+                # Rotation: only on the first save of a new local day.
+                # _today_stored_date is the date of the previously-saved "today".
+                if self._today_stored_date is not None and self._today_stored_date != today_str:
+                    self._yesterday_stored_date = self._today_stored_date
+                    self._yesterday_nordpool    = self._today_nordpool
+                    self._yesterday_solar       = self._today_solar
+                self._today_stored_date = today_str
+                self._today_nordpool    = today_nordpool
+                self._today_solar       = today_solar
+
+                def _ser_solar(xs):
+                    return [{"start": e.start.isoformat(), "end": e.end.isoformat(),
+                             "kwh": e.expected_kwh, "source": e.source} for e in xs]
+                def _ser_nordpool(xs):
+                    return [{"start": e.start.isoformat(), "end": e.end.isoformat(),
+                             "price": e.price_eur_kwh} for e in xs]
                 await self._yesterday_store.async_save({
-                    "date": today_str,
-                    "nordpool": [
-                        {"start": e.start.isoformat(), "end": e.end.isoformat(), "price": e.price_eur_kwh}
-                        for e in today_nordpool
-                    ],
-                    "solar": [
-                        {"start": e.start.isoformat(), "end": e.end.isoformat(), "kwh": e.expected_kwh, "source": e.source}
-                        for e in today_solar
-                    ],
+                    "yesterday": {
+                        "date":     self._yesterday_stored_date,
+                        "nordpool": _ser_nordpool(self._yesterday_nordpool),
+                        "solar":    _ser_solar(self._yesterday_solar),
+                    },
+                    "today": {
+                        "date":     self._today_stored_date,
+                        "nordpool": _ser_nordpool(self._today_nordpool),
+                        "solar":    _ser_solar(self._today_solar),
+                    },
                 })
-                self._yesterday_stored_date = today_str
-                self._yesterday_nordpool = today_nordpool
-                self._yesterday_solar = today_solar
 
             current_generation: GenerationReading | None = primary.get(GenerationReading)
             if current_generation is not None:
