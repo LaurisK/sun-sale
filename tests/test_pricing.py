@@ -3,10 +3,12 @@ from datetime import datetime, timedelta, timezone
 
 from custom_components.sun_sale.contract.models import (
     NordpoolData,
+    PriceEntry,
     TariffConfig,
     YesterdayPrices,
 )
 from custom_components.sun_sale.inbound.pricing import (
+    _zero_fill_tomorrow,
     build_price_series,
     build_price_series_72h,
 )
@@ -177,6 +179,90 @@ def test_72h_empty_yesterday_returns_only_today_tomorrow():
     )
     assert len(ps.slots) == 48
     assert ps.slots[0].start == BASE_DT
+
+
+# ---------------------------------------------------------------------------
+# _zero_fill_tomorrow — gap regression tests
+#
+# Regression: the original implementation derived "tomorrow" from a UTC date.
+# Nordpool reports in local time, so for any timezone east of UTC the early
+# slots of the local-tomorrow day land on UTC-today's date — the fill then
+# started at UTC midnight, leaving a gap. These tests pin the contiguous,
+# resolution-agnostic behavior.
+# ---------------------------------------------------------------------------
+
+def _q(start_utc: datetime, value: float, resolution: timedelta) -> PriceEntry:
+    return PriceEntry(start=start_utc, end=start_utc + resolution, price_eur_kwh=value)
+
+
+def test_zero_fill_no_gap_when_tomorrow_partial_in_local_tz():
+    # LT (UTC+3): raw_today covers UTC 21:00 16 May → UTC 21:00 17 May; the
+    # first 4 raw_tomorrow entries (LT 00:00–01:00 18 May) land on UTC-today.
+    res = timedelta(minutes=15)
+    today_start_utc = datetime(2026, 5, 16, 21, 0, tzinfo=timezone.utc)
+    today = [_q(today_start_utc + i * res, 0.10, res) for i in range(96)]
+    tomorrow_partial = [_q(today_start_utc + (96 + i) * res, 0.15, res) for i in range(4)]
+    now = datetime(2026, 5, 17, 14, 15, tzinfo=timezone.utc)
+
+    out = _zero_fill_tomorrow(today + tomorrow_partial, res, now)
+
+    for prev, cur in zip(out, out[1:]):
+        assert cur.start - prev.start == res, f"gap before {cur.start}"
+    assert out[0].start == today_start_utc
+    assert out[-1].end == today_start_utc + timedelta(hours=48)
+    assert all(e.price_eur_kwh == 0.10 for e in out[:96])
+    assert all(e.price_eur_kwh == 0.15 for e in out[96:100])
+    assert all(e.price_eur_kwh == 0.0 for e in out[100:])
+
+
+def test_zero_fill_no_gap_when_raw_tomorrow_empty_in_local_tz():
+    # Only raw_today published. Fill must start where raw_today ends, not at
+    # UTC midnight (the old buggy anchor).
+    res = timedelta(minutes=15)
+    today_start_utc = datetime(2026, 5, 16, 21, 0, tzinfo=timezone.utc)
+    today = [_q(today_start_utc + i * res, 0.10, res) for i in range(96)]
+    now = datetime(2026, 5, 17, 14, 15, tzinfo=timezone.utc)
+
+    out = _zero_fill_tomorrow(today, res, now)
+
+    for prev, cur in zip(out, out[1:]):
+        assert cur.start - prev.start == res
+    assert len(out) == 192
+    assert out[96].start == today_start_utc + timedelta(hours=24)
+
+
+def test_zero_fill_30min_resolution_produces_correct_slot_count():
+    # The old branch hard-coded 96/24 slots-per-day; a 30-min sensor would be
+    # mis-sized. The new fill is resolution-driven.
+    res = timedelta(minutes=30)
+    start = datetime(2026, 5, 16, 21, 0, tzinfo=timezone.utc)
+    real = [_q(start + i * res, 0.10, res) for i in range(48)]
+    now = datetime(2026, 5, 17, 14, 15, tzinfo=timezone.utc)
+
+    out = _zero_fill_tomorrow(real, res, now)
+
+    assert len(out) == 96
+    assert out[0].start == start
+    assert out[-1].end == start + timedelta(hours=48)
+    for prev, cur in zip(out, out[1:]):
+        assert cur.start - prev.start == res
+
+
+def test_zero_fill_passthrough_when_already_covers_48h():
+    res = timedelta(hours=1)
+    start = datetime(2026, 5, 16, 21, 0, tzinfo=timezone.utc)
+    full = [_q(start + i * res, 0.10, res) for i in range(48)]
+    now = datetime(2026, 5, 17, 14, 15, tzinfo=timezone.utc)
+
+    out = _zero_fill_tomorrow(full, res, now)
+
+    assert out == full
+
+
+def test_zero_fill_empty_input_passthrough():
+    res = timedelta(hours=1)
+    now = datetime(2026, 5, 17, 14, 15, tzinfo=timezone.utc)
+    assert _zero_fill_tomorrow([], res, now) == []
 
 
 def test_72h_applies_tariff_to_all_segments():

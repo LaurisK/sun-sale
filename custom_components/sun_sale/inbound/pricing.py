@@ -86,26 +86,28 @@ def build_price_series_72h(
 def _zero_fill_tomorrow(
     entries: list[PriceEntry], resolution: timedelta, now: datetime
 ) -> list[PriceEntry]:
-    """Append zero-price entries for tomorrow if tomorrow has no entries yet."""
-    tomorrow_date = (now + timedelta(days=1)).date()
-    has_tomorrow = any(e.start.date() == tomorrow_date for e in entries)
-    if has_tomorrow:
-        return entries
+    """Pad with zero-price entries so the series covers 48h from its first slot.
 
-    tomorrow_start = datetime(
-        tomorrow_date.year, tomorrow_date.month, tomorrow_date.day,
-        0, 0, 0, tzinfo=timezone.utc,
-    )
-    slots_per_day = 96 if resolution <= timedelta(minutes=15) else 24
-    zero_entries = [
-        PriceEntry(
-            start=tomorrow_start + i * resolution,
-            end=tomorrow_start + (i + 1) * resolution,
+    Nordpool reports in local time; deriving "tomorrow" from a UTC date leaves
+    a gap whenever the local day starts before UTC midnight (e.g. raw_tomorrow
+    is published an hour early). Filling from the last entry's end until
+    first_start + 48h is timezone- and resolution-agnostic and never opens a
+    gap regardless of how much of `raw_tomorrow` has been published.
+    """
+    if not entries:
+        return entries
+    target_end = entries[0].start + timedelta(hours=48)
+    last_end = max(e.end for e in entries)
+    fill: list[PriceEntry] = []
+    cur = last_end
+    while cur < target_end:
+        fill.append(PriceEntry(
+            start=cur,
+            end=cur + resolution,
             price_eur_kwh=0.0,
-        )
-        for i in range(slots_per_day)
-    ]
-    return entries + zero_entries
+        ))
+        cur += resolution
+    return entries + fill
 
 
 class NordpoolTranslator:

@@ -57,11 +57,11 @@ def test_nordpool_parses_raw_today():
     entry = {"start": "2024-01-15T10:00:00+00:00", "value": 0.10}
     hass = _hass_with("sensor.nordpool", {"raw_today": [entry], "raw_tomorrow": []})
     result = t.parse(hass, now=BASE)
-    # At least one entry is parsed; zero-fill may add more for tomorrow
+    # At least one entry is parsed; zero-fill may add more to reach 48h coverage
     assert len(result.entries) >= 1
-    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
-    assert len(today_entries) == 1
-    assert abs(today_entries[0].price_eur_kwh - 0.10) < 1e-9
+    real_entries = [e for e in result.entries if e.price_eur_kwh != 0.0]
+    assert len(real_entries) == 1
+    assert abs(real_entries[0].price_eur_kwh - 0.10) < 1e-9
 
 
 def test_nordpool_resolution_detected():
@@ -80,9 +80,9 @@ def test_nordpool_deduplicates_slots():
     dup = {"start": "2024-01-15T10:00:00+00:00", "value": 0.10}
     hass = _hass_with("sensor.nordpool", {"raw_today": [dup, dup], "raw_tomorrow": []})
     result = t.parse(hass, now=BASE)
-    # Only one unique today entry; zero-fill may add tomorrow entries
-    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
-    assert len(today_entries) == 1
+    # Only one unique non-fill entry; the 48h fill adds zero-priced entries.
+    real_entries = [e for e in result.entries if e.price_eur_kwh != 0.0]
+    assert len(real_entries) == 1
 
 
 def test_nordpool_includes_tomorrow():
@@ -113,17 +113,17 @@ def test_nordpool_legacy_parses_today():
     t = _make_translator()
     hass = _hass_with("sensor.nordpool", {"today": [0.10, 0.12, 0.08], "tomorrow": []})
     result = t.parse(hass, now=BASE)
-    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
-    assert len(today_entries) == 3
-    assert abs(today_entries[0].price_eur_kwh - 0.10) < 1e-9
+    real_entries = [e for e in result.entries if e.price_eur_kwh != 0.0]
+    assert len(real_entries) == 3
+    assert abs(real_entries[0].price_eur_kwh - 0.10) < 1e-9
 
 
 def test_nordpool_legacy_skips_none_entries():
     t = _make_translator()
     hass = _hass_with("sensor.nordpool", {"today": [0.10, None, 0.08], "tomorrow": []})
     result = t.parse(hass, now=BASE)
-    today_entries = [e for e in result.entries if e.start.date().isoformat() == "2024-01-15"]
-    assert len(today_entries) == 2
+    real_entries = [e for e in result.entries if e.price_eur_kwh != 0.0]
+    assert len(real_entries) == 2
 
 
 def test_nordpool_legacy_slot_spans_one_hour():
