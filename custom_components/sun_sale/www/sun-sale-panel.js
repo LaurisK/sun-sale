@@ -493,14 +493,11 @@
           axisTicks:  { show: false },
         },
 
-        // Two y-axes: left = EUR/kWh shared by both price lines; right = kWh/slot
-        // for the solar-forecast bar. seriesName as an array binds multiple
-        // series to one axis (the canonical ApexCharts pattern); the previous
-        // "duplicate seriesName + show:false" trick left 'Sell price' with no
-        // explicit axis match, which silently dragged the bar onto the price axis.
+        // yaxis[n] matches series[n]; shared axes use seriesName + show: false.
+        // Series 1 (Sell price) shares the price axis (series 0).
         yaxis: [
           {
-            seriesName: ['Buy price', 'Sell price'],
+            seriesName: 'Buy price',
             title: {
               text:  'EUR / kWh',
               style: { color: '#ffb300', fontSize: '11px' },
@@ -512,6 +509,7 @@
               formatter: v => (v != null ? v.toFixed(3) : ''),
             },
           },
+          { seriesName: 'Buy price', show: false },
           {
             seriesName: 'Solar forecast',
             opposite:   true,
@@ -596,90 +594,10 @@
       };
 
       const el = this.shadowRoot.querySelector('#chart');
-
-      console.groupCollapsed('sunSale: render inputs');
-      console.log('buyData.length =',  buyData.length,  buyData[0],  buyData[buyData.length - 1]);
-      console.log('sellData.length =', sellData.length, sellData[0], sellData[sellData.length - 1]);
-      console.log('forecastBars.length =', forecastBars.length, forecastBars[0], forecastBars[forecastBars.length - 1]);
-      console.log('profileAnnotations.length =', profileAnnotations.length, profileAnnotations[0]);
-      console.log('window =', new Date(windowStart).toISOString(), '→', new Date(windowEnd).toISOString());
-      console.log('options =', options);
-      console.groupEnd();
-
-      try {
-        this._chart = new ApexCharts(el, options);
-      } catch (e) {
-        console.error('sunSale: ApexCharts constructor threw', e);
-        this._setStatus('⚠ chart constructor failed: ' + e.message);
-        return;
-      }
-      try {
-        await this._chart.render();
-        console.log('sunSale: ApexCharts.render() resolved');
-
-        // Post-render introspection — surface what ApexCharts actually built.
-        requestAnimationFrame(() => {
-          const root = el.querySelector('svg.apexcharts-svg');
-          const w = this._chart?.w;
-
-          console.groupCollapsed('sunSale: SVG inspection');
-          if (!root) {
-            console.warn('no apexcharts SVG found');
-          } else {
-            const barSeries = root.querySelectorAll('g.apexcharts-bar-series');
-            const allRects  = root.querySelectorAll('g.apexcharts-bar-series rect');
-            console.log('bar-series groups:', barSeries.length);
-            console.log('total bar rects:',    allRects.length);
-            // Dump the bar-series group's actual HTML — see exactly what is/isn't inside it.
-            barSeries.forEach((g, i) => {
-              console.log(`bar-series[${i}] childCount=${g.childElementCount}, outerHTML(first 400ch):`,
-                g.outerHTML.slice(0, 400));
-            });
-            // Are there ANY rect children in the plot area we missed?
-            const allG = root.querySelectorAll('g');
-            const groupsWithRects = [...allG].filter(g => g.querySelector(':scope > rect'));
-            console.log('all <g> with direct <rect> children:', groupsWithRects.length);
-            groupsWithRects.slice(0, 6).forEach(g => console.log('  class:', g.getAttribute('class'),
-              'rect count:', g.querySelectorAll(':scope > rect').length));
-            console.log('y-axis groups:', root.querySelectorAll('g.apexcharts-yaxis').length);
-            console.log('line-series paths:', root.querySelectorAll('g.apexcharts-line-series path').length);
-          }
-
-          // ApexCharts internal state — definitive answer about what the chart "thinks" is in the bar series.
-          if (w) {
-            console.log('w.config.chart.type:', w.config.chart.type);
-            console.log('w.config.series shapes:', w.config.series.map(s => ({
-              name: s.name, type: s.type, len: (s.data || []).length,
-              firstData: s.data?.[0], lastData: s.data?.[s.data.length - 1],
-            })));
-            // Normalised series arrays — what gets fed to the renderer.
-            console.log('w.globals.series (y values):',  w.globals.series?.map(arr => arr?.length));
-            console.log('w.globals.seriesX (x values):', w.globals.seriesX?.map(arr => arr?.length));
-            console.log('w.globals.seriesX[2] sample:',  w.globals.seriesX?.[2]?.slice(0, 3),
-              '...', w.globals.seriesX?.[2]?.slice(-3));
-            console.log('w.globals.series[2] sample:',   w.globals.series?.[2]?.slice(0, 3),
-              '...', w.globals.series?.[2]?.slice(-3));
-            console.log('w.globals.minX/maxX:', w.globals.minX, w.globals.maxX);
-            console.log('w.globals.minXDiff:', w.globals.minXDiff);
-            console.log('w.globals.barWidth / dataXY:', w.globals.barWidth, w.globals.dataXY);
-            console.log('w.globals.gridWidth/gridHeight:', w.globals.gridWidth, w.globals.gridHeight);
-            console.log('w.globals.collapsedSeries:', w.globals.collapsedSeries);
-            console.log('w.globals.collapsedSeriesIndices:', w.globals.collapsedSeriesIndices);
-          } else {
-            console.warn('no chart.w available');
-          }
-          console.groupEnd();
-        });
-      } catch (e) {
-        console.error('sunSale: ApexCharts.render() threw', e);
-        this._setStatus('⚠ chart render failed: ' + e.message);
-      }
+      this._chart = new ApexCharts(el, options);
+      this._chart.render();
     }
   }
 
-  if (!customElements.get('sun-sale-panel')) {
-    customElements.define('sun-sale-panel', SunSalePanel);
-  } else {
-    console.warn('sunSale: <sun-sale-panel> already registered — this script load is a duplicate, the older copy is what actually runs. Clear the Service Worker cache to pick up the new file.');
-  }
+  customElements.define('sun-sale-panel', SunSalePanel);
 })();
