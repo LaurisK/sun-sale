@@ -4,6 +4,14 @@ Reference for `custom_components/sun_sale/inbound/forecast.py`.
 
 The forecast module owns the **72h yesterday→today→tomorrow `GenerationSeries`** that downstream consumers (calculator, optimizer, sensors, dashboard) read for expected solar generation. It is pure Python with no Home Assistant imports.
 
+## Summary
+
+`SolarTranslator` reads Open-Meteo `watts` (preferred) or Forecast.Solar/Solcast `forecast`; sums multi-source / today+tomorrow entities. `build_generation_series` resamples onto the `PriceSeries` grid 1:1 (zero-filled), computes per-day totals and `today_remaining_kwh`.
+
+- **Exposes:** `SolarData` (translator), `GenerationSeries` (helper).
+- **Depends on:** `contract.models`.
+- **Tests:** `tests/test_forecast.py` — full per-test coverage table in §8.
+
 ## Contents
 
 1. [Responsibilities](#1-responsibilities)

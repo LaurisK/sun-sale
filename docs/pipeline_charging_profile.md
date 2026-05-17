@@ -4,6 +4,14 @@ Reference for `custom_components/sun_sale/pipeline/charging_profile.py`.
 
 The charging-profile module decides, slot by slot for the rest of today, what to do with predicted solar generation: store it in the battery, export it to the grid, or curtail it. It is pure Python with no Home Assistant imports.
 
+## Summary
+
+Per-slot disposition of today's remaining solar — `solar_charge`, `sell`, `no_export`, or `idle` — driven by free battery capacity vs. forecast generation; negative-sell slots get no-export priority.
+
+- **Exposes:** `ChargingProfile`.
+- **Depends on:** `contract.models`.
+- **Tests:** `tests/test_charging_profile.py` — full per-test coverage table in §7.
+
 ## Contents
 
 1. [Responsibilities](#1-responsibilities)

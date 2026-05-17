@@ -166,95 +166,17 @@ Control-event types emitted by pipeline nodes and consumed by `outbound/event_ro
 
 Translators read HA state; helpers normalise translator output into pipeline-ready shapes. Translators do not import `homeassistant` — they accept a duck-typed `hass`.
 
-### `inbound/pricing.py`
-`NordpoolTranslator` reads `raw_today`/`raw_tomorrow` (or legacy flat arrays) with auto-detected resolution. `build_price_series_72h(nordpool, yesterday, config, now)` combines `YesterdayPrices.entries + NordpoolData.entries`, applies the tariff formula, and yields the 72h `PriceSeries` `PricingNode` returns.
-- **Exposes:** `NordpoolData` (translator), `PriceSeries` (helper).
-- **Depends on:** `contract.models`, `pipeline.tariff`.
-- **Tests:** `tests/test_pricing.py`
-  - `test_empty_prices_returns_empty_series` — Empty input yields empty series.
-  - `test_slot_count_matches_input` — Preserves price-slot count.
-  - `test_computed_at_is_set` — Sets `computed_at` timestamp.
-  - `test_sources_tuple` — Sources list includes `nordpool` and `tariff`.
-  - `test_buy_price_formula` — Applies correct buy-price formula.
-  - `test_sell_price_formula` — Applies correct sell-price formula.
-  - `test_spot_price_preserved` — Original spot price is kept.
-  - `test_negative_spot_produces_negative_sell` — Negative spot yields negative sell.
-  - `test_positive_spot_produces_positive_sell` — Positive spot yields positive sell.
-  - `test_sell_price_can_be_exactly_zero` — Sell price may land on zero.
-  - `test_hourly_resolution_detected` — Auto-detects hourly slot stride.
-  - `test_single_slot_defaults_to_hourly_resolution` — Single slot defaults to hourly.
-  - `test_slot_at_returns_correct_slot` — `slot_at(t)` resolves to the right slot.
-  - `test_slot_at_returns_none_outside_range` — Returns None outside coverage.
-  - `test_window_returns_overlapping_slots` — `window(t1,t2)` returns overlapping slots.
-  - `test_72h_combines_yesterday_today_tomorrow` — Assembles full 72h series.
-  - `test_72h_uses_nordpool_resolution_not_derived` — Preserves explicit resolution.
-  - `test_72h_empty_yesterday_returns_only_today_tomorrow` — Omits missing yesterday.
-  - `test_72h_applies_tariff_to_all_segments` — Tariff applied across all days.
+### `inbound/pricing.py` 🟩
+`NordpoolTranslator` + 72h `PriceSeries` assembly with tariff applied. → **[inbound_pricing.md](inbound_pricing.md)** for description, exposed types, dependencies, and test coverage.
 
-  Translator-side covered in `tests/test_coordinator.py`: `test_nordpool_*` (empty, raw, resolution, dedupe, tomorrow, slot duration, legacy parse, legacy nulls, legacy hourly spans).
+### `inbound/forecast.py` 🟩
+`SolarTranslator` + `GenerationSeries` assembly resampled onto the price grid. → **[inbound_forecast.md](inbound_forecast.md)** for description, exposed types, dependencies, and test coverage.
 
-### `inbound/forecast.py`
-`SolarTranslator` reads Open-Meteo `watts` (preferred) or Forecast.Solar/Solcast `forecast`; sums multi-source / today+tomorrow entities. `build_generation_series` resamples onto the `PriceSeries` grid 1:1 (zero-filled), computes per-day totals and `today_remaining_kwh`.
-- **Exposes:** `SolarData` (translator), `GenerationSeries` (helper).
-- **Depends on:** `contract.models`.
-- **Tests:** `tests/test_forecast.py`
-  - `test_empty_when_no_data` — Returns empty when no solar data.
-  - `test_empty_when_empty_forecast_slots` — Returns empty on empty slots.
-  - `test_open_meteo_watts_parsed` — Parses Open-Meteo watts into kWh.
-  - `test_open_meteo_15min_aggregated_to_hourly` — Aggregates 15-min to hourly.
-  - `test_open_meteo_two_arrays_summed` — Sums multiple solar arrays.
-  - `test_forecast_solar_pv_estimate_parsed` — Parses `pv_estimate` field.
-  - `test_forecast_solar_energy_fallback` — Falls back to `energy` field.
-  - `test_forecast_solar_skips_bad_entries` — Skips malformed entries.
-  - `test_primary_is_set_for_forecast_solar` — Marks forecast.solar as primary.
-  - `test_primary_is_open_meteo_when_watts_present` — Open-Meteo wins when watts present.
-  - `test_energy_between_full_slot` — Computes full-slot energy.
-  - `test_energy_between_partial_slot` — Interpolates partial-slot energy.
-  - `test_energy_between_no_overlap` — Returns zero on no overlap.
-  - `test_hourly_forecast_upsampled_to_quarter_hour_grid` — Upsamples to finer grid.
-  - `test_resampled_slots_match_price_grid_one_to_one` — Matches price grid 1:1.
-  - `test_continuous_72h_coverage_with_zero_fill` — Zero-fills missing coverage.
-  - `test_per_day_totals_split_across_yesterday_today_tomorrow` — Splits daily totals.
-  - `test_today_remaining_excludes_past_slots` — Excludes past slots from remaining.
-  - `test_empty_solar_yields_zero_totals` — Totals are zero with no data.
-  - `test_tomorrow_entity_today_suffix` — Transforms `…_today` → `…_tomorrow`.
-  - `test_tomorrow_entity_today_infix` — Transforms `…today…` → `…tomorrow…`.
-  - `test_tomorrow_entity_no_today` — Returns empty when no `today` token.
+### `inbound/generation.py` 🟩
+`GenerationTranslator` + `ObservedGenerationSeries` from differenced inverter daily-total samples. → **[inbound_generation.md](inbound_generation.md)** for description, exposed types, dependencies, and test coverage.
 
-### `inbound/generation.py`
-`GenerationTranslator` snapshots the inverter's daily-total-kWh counter. Helper differences successive samples (with daily-reset handling) and resamples onto the price grid to produce `ObservedGenerationSeries` for past slots only.
-- **Exposes:** `GenerationReading` (translator), `ObservedGenerationSeries` (helper).
-- **Depends on:** `contract.models`.
-- **Tests:** `tests/test_generation_inbound.py`
-  - `test_empty_history_yields_empty_series` — Empty history → empty series.
-  - `test_single_sample_cannot_be_differenced` — Single sample yields no generation.
-  - `test_empty_price_grid_yields_empty_series` — No grid → empty output.
-  - `test_one_interval_fully_inside_one_slot` — Assigns interval to a single slot.
-  - `test_interval_spanning_two_slots_split_by_overlap` — Splits at slot boundary.
-  - `test_multiple_intervals_aggregate_within_slot` — Sums intervals in a slot.
-  - `test_reset_handled_by_per_day_grouping` — Tolerates daily meter reset.
-  - `test_slots_in_tomorrow_excluded` — Excludes future-day slots.
-  - `test_slots_starting_at_or_after_now_excluded` — Excludes current/future slots.
-  - `test_slots_before_yesterday_midnight_excluded` — Excludes pre-yesterday slots.
-  - `test_totals_split_between_yesterday_and_today` — Splits yesterday/today totals.
-  - `test_source_is_inverter_on_every_slot` — Marks every slot source `inverter`.
-  - `test_resamples_onto_quarter_hour_grid` — Resamples to quarter-hour grid.
-  - `test_observed_generation_node_produces_series_from_primary_and_secondary` — `ObservedGenerationNode` wires inputs correctly.
-
-### `inbound/battery.py`
-`BatteryTranslator` reads SoC/power from `InverterController` and household-load from HA state (with default fallback). `build_battery_status` snapshots configured capacity + power limits + observed SoC into immutable `BatteryStatus`.
-- **Exposes:** `BatteryReading` (translator), `BatteryStatus` (helper).
-- **Depends on:** `contract.models`, `outbound.inverter`.
-- **Tests:** `tests/test_battery_inbound.py`
-  - `test_total_capacity_from_config` — Reads capacity from config.
-  - `test_max_charge_power_from_config` — Reads charge limit from config.
-  - `test_max_discharge_power_from_config` — Reads discharge limit from config.
-  - `test_soc_passthrough` — Passes SoC unchanged.
-  - `test_remaining_capacity_at_half_soc` — Computes remaining at 50% SoC.
-  - `test_remaining_capacity_at_empty` — Remaining is zero when empty.
-  - `test_remaining_capacity_at_full` — Remaining equals nominal at full.
-  - `test_status_is_immutable` — `BatteryStatus` is frozen.
-  - `test_battery_status_node_produces_status_from_primary` — Node transforms reading → status.
+### `inbound/battery.py` 🟩
+`BatteryTranslator` + `BatteryStatus` snapshot combining configured limits with observed SoC. → **[inbound_battery.md](inbound_battery.md)** for description, exposed types, dependencies, and test coverage.
 
 ### `inbound/household_load.py`
 `HouseholdLoadTranslator` reads the household-load sensor and returns `None` when unavailable (deliberately distinct from `BatteryTranslator`'s 0.2 kW stub — see `base_load_missing.md`).
@@ -360,48 +282,11 @@ Greedy pair-match scheduler — pairs cheap charge slots with profitable dischar
   - `test_no_discharge_inside_lockout_window` — No discharge in negative-sell window.
   - `test_discharge_allowed_outside_lockout_window` — Discharge OK outside lockout.
 
-### `pipeline/charging_profile.py`
-Per-slot disposition of today's remaining solar — `solar_charge`, `sell`, `no_export`, or `idle` — driven by free battery capacity vs. forecast generation; negative-sell slots get no-export priority.
-- **Exposes:** `ChargingProfile`.
-- **Depends on:** `contract.models`.
-- **Tests:** `tests/test_charging_profile.py`
-  - `test_case1_all_solar_charge_when_generation_fits` — All slots charge when capacity fits.
-  - `test_case1_free_capacity_uses_max_soc_not_one` — Free capacity respects max_soc.
-  - `test_case2_lowest_sell_price_slots_fill_battery` — Lowest-priced slots fill first.
-  - `test_case2_marginal_slot_kept_whole_overfills` — Marginal slot kept whole (overfills).
-  - `test_case2_multiple_slots_summed_to_reach_free_capacity` — Slots sum to free capacity.
-  - `test_no_export_when_sell_price_negative` — Negative-sell slots → no_export.
-  - `test_no_export_when_battery_full_and_sell_negative` — Battery-full + negative sell → no_export.
-  - `test_zero_generation_all_idle` — Zero generation → all idle.
-  - `test_past_slots_excluded` — Past slots dropped.
-  - `test_tomorrow_slots_excluded` — Tomorrow slots dropped.
-  - `test_today_remaining_generation_kwh_matches_sum` — Reported total = sum of slots.
-  - `test_profile_is_immutable` — Profile and slots are frozen.
-  - `test_charging_profile_node_produces_profile_from_inputs` — Node wires inputs correctly.
+### `pipeline/charging_profile.py` 🟩
+Per-slot disposition of today's remaining solar (`solar_charge` / `sell` / `no_export` / `idle`). → **[pipeline_charging_profile.md](pipeline_charging_profile.md)** for description, exposed types, dependencies, and test coverage.
 
-### `pipeline/base_load.py`
-24h hour-of-day baseload profile from `HouseholdLoadReading` history (P10 per bucket, local-time keyed) plus battery-runtime worst-case estimate.
-- **Exposes:** `BaseLoadProfile`, `BatteryRuntimeEstimate`.
-- **Depends on:** `contract.models`.
-- **Tests:** `tests/test_base_load.py`
-  - `test_percentile_empty_returns_zero` — Empty → 0.0.
-  - `test_percentile_single_value` — Single value returned for any percentile.
-  - `test_percentile_p10_of_ten_values` — Interpolates P10 correctly.
-  - `test_percentile_p100_returns_max` — P100 returns max.
-  - `test_percentile_p0_returns_min` — P0 returns min.
-  - `test_empty_history_returns_sparse_profile_with_stub` — Sparse stub on no data.
-  - `test_below_min_history_days_returns_sparse` — Sparse below min-history threshold.
-  - `test_minimum_history_yields_confidence` — Confidence set at minimum history.
-  - `test_buckets_by_local_hour_not_utc` — Buckets by local hour.
-  - `test_sparse_bucket_uses_fallback` — Sparse bucket falls back.
-  - `test_p10_rejects_outlier_spikes` — P10 resists spikes.
-  - `test_samples_outside_window_excluded` — Drops samples outside retention.
-  - `test_profile_at_uses_local_hour` — Lookup uses local hour.
-  - `test_runtime_zero_when_soc_at_min` — Runtime zero at min SoC.
-  - `test_runtime_constant_drain` — Constant drain → linear runtime.
-  - `test_runtime_partial_step_interpolation` — Interpolates partial step.
-  - `test_runtime_horizon_limits_simulation` — Returns None past horizon.
-  - `test_runtime_drain_follows_profile_per_hour` — Drain follows per-hour profile.
+### `pipeline/base_load.py` 🟩
+24h baseload profile (P10 per local-hour bucket) + battery-runtime estimate. → **[pipeline_base_load.md](pipeline_base_load.md)** for description, exposed types, dependencies, and test coverage.
 
 ### `pipeline/forecast_accuracy.py`
 Pairs forecast vs. observed generation slot-by-slot; computes MAE / bias / MAPE.

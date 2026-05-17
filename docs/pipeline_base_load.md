@@ -4,6 +4,14 @@ Reference for `custom_components/sun_sale/pipeline/base_load.py`.
 
 The base-load module produces two values: a **`BaseLoadProfile`** (24-hour low-percentile floor of household consumption, keyed by local hour-of-day) and a **`BatteryRuntimeEstimate`** (how long the battery can sustain that baseload before hitting `min_soc`). It is pure Python with no Home Assistant imports.
 
+## Summary
+
+24h hour-of-day baseload profile from `HouseholdLoadReading` history (P10 per bucket, local-time keyed) plus battery-runtime worst-case estimate.
+
+- **Exposes:** `BaseLoadProfile`, `BatteryRuntimeEstimate`.
+- **Depends on:** `contract.models`.
+- **Tests:** `tests/test_base_load.py` — full per-test coverage table in §9.
+
 ## Contents
 
 1. [Responsibilities](#1-responsibilities)

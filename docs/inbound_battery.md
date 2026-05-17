@@ -4,6 +4,14 @@ Reference for `custom_components/sun_sale/inbound/battery.py`.
 
 The battery module produces a normalised **`BatteryStatus`** snapshot that combines the user-configured battery limits with the live inverter telemetry. It is pure Python with no Home Assistant imports.
 
+## Summary
+
+`BatteryTranslator` reads SoC/power from `InverterController` and household-load from HA state (with default fallback). `build_battery_status(reading, config)` snapshots configured capacity + power limits + observed SoC into immutable `BatteryStatus` and derives `remaining_capacity_kwh = soc * total_capacity_kwh`.
+
+- **Exposes:** `BatteryReading` (translator), `BatteryStatus` (helper).
+- **Depends on:** `contract.models`, `outbound.inverter`.
+- **Tests:** `tests/test_battery_inbound.py` — full per-test coverage table in §8.
+
 ## Contents
 
 1. [Responsibilities](#1-responsibilities)

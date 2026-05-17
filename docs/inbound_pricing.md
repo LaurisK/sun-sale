@@ -4,6 +4,14 @@ Reference for `custom_components/sun_sale/inbound/pricing.py`.
 
 The pricing module owns the **72h yesterday→today→tomorrow `PriceSeries`** that every downstream consumer (calculator, optimizer, dashboard, sensors) reads. It is pure Python with no Home Assistant imports.
 
+## Summary
+
+`NordpoolTranslator` reads `raw_today`/`raw_tomorrow` (or legacy flat arrays) with auto-detected resolution. `build_price_series_72h(nordpool, yesterday, config, now)` combines `YesterdayPrices.entries + NordpoolData.entries`, applies the tariff formula, and yields the 72h `PriceSeries` `PricingNode` returns.
+
+- **Exposes:** `NordpoolData` (translator), `PriceSeries` (helper).
+- **Depends on:** `contract.models`, `pipeline.tariff`.
+- **Tests:** `tests/test_pricing.py` (helper) + `tests/test_coordinator.py::test_nordpool_*` (translator). Full per-test coverage table in §8.
+
 ## Contents
 
 1. [Responsibilities](#1-responsibilities)

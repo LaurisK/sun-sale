@@ -6,6 +6,14 @@ The generation module produces an **`ObservedGenerationSeries`** — per-slot kW
 
 It is the *observed* counterpart to `inbound/forecast.py`: forecast predicts future generation; this module measures past generation.
 
+## Summary
+
+`GenerationTranslator` snapshots the inverter's daily-total-kWh counter. The helper differences successive samples (with daily-reset handling) and resamples onto the price grid to produce `ObservedGenerationSeries` for past slots only.
+
+- **Exposes:** `GenerationReading` (translator), `ObservedGenerationSeries` (helper).
+- **Depends on:** `contract.models`.
+- **Tests:** `tests/test_generation_inbound.py` — full per-test coverage table in §9.
+
 ## Contents
 
 1. [Responsibilities](#1-responsibilities)
