@@ -28,9 +28,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
+from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import ScrollableContainer
-from textual.widgets import Collapsible, Footer, Header, Rule, Static
+from textual.widgets import Collapsible, DataTable, Footer, Static
 
 DEFAULT_HA_URL = "http://85.206.57.75:8124"
 DEFAULT_HA_TOKEN = (
@@ -128,6 +128,21 @@ def _day_eid(entity_id: str, n: int) -> str:
     return ""
 
 
+def _remaining_eid(entity_id: str) -> str:
+    """Derive the today-remaining forecast entity ID by substituting 'today' → 'today_remaining'.
+
+    Args:
+        entity_id: Entity ID containing '_today_' or '_today' substring.
+
+    Returns:
+        Modified entity ID, or empty string if no substitution pattern is found.
+    """
+    for pattern in ("_today_", "_today"):
+        if pattern in entity_id:
+            return entity_id.replace(pattern, pattern.replace("today", "today_remaining"), 1)
+    return ""
+
+
 def collect(client: HAClient) -> list[Snapshot]:
     """Build snapshots for every coordinator the integration has registered."""
     snapshots: list[Snapshot] = []
@@ -146,6 +161,9 @@ def collect(client: HAClient) -> list[Snapshot]:
             t_eid = _tomorrow_eid(eid)
             if t_eid:
                 snap.raw_entities[t_eid] = client.state(t_eid)
+            r_eid = _remaining_eid(eid)
+            if r_eid:
+                snap.raw_entities[r_eid] = client.state(r_eid)
             for n in range(2, 7):
                 d_eid = _day_eid(eid, n)
                 if d_eid:
@@ -421,6 +439,9 @@ class ForecastCheckResult:
     module_totals: dict[str, float] = field(default_factory=dict)
     module_slot_count: int = 0
     module_today_remaining_kwh: float | None = None
+    entity_remaining: dict[str, float] = field(default_factory=dict)
+    module_slots: list[dict] = field(default_factory=list)
+    negative_slots: list[str] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
     overall_ok: bool = True
 
@@ -514,6 +535,7 @@ def check_forecast(snap: Snapshot) -> ForecastCheckResult:
     forecast = snap.pipeline.get("forecast") or {}
     result.module_slot_count = forecast.get("slot_count", 0)
     result.module_today_remaining_kwh = forecast.get("today_remaining_kwh")
+    result.module_slots = forecast.get("slots") or []
     result.module_totals = {
         "today":    forecast.get("total_today_kwh", 0.0),
         "tomorrow": forecast.get("total_tomorrow_kwh", 0.0),
@@ -524,7 +546,30 @@ def check_forecast(snap: Snapshot) -> ForecastCheckResult:
         "d6":       forecast.get("total_d6_kwh", 0.0),
     }
 
+    for base_eid in arrays_with_data:
+        r_eid = _remaining_eid(base_eid)
+        if not r_eid:
+            continue
+        state = snap.raw_entities.get(r_eid)
+        if state is None:
+            continue
+        try:
+            result.entity_remaining[r_eid] = float(state["state"])
+        except (KeyError, ValueError, TypeError):
+            pass
+
+    for s in result.module_slots:
+        if s.get("expected_kwh", 0.0) < -1e-6:
+            result.negative_slots.append(s["start"])
+            result.overall_ok = False
+
     TOL = 0.001
+    if result.entity_remaining and result.module_today_remaining_kwh is not None:
+        expected_rem = sum(result.entity_remaining.values())
+        if abs(expected_rem - result.module_today_remaining_kwh) > TOL:
+            result.mismatches.append("remaining")
+            result.overall_ok = False
+
     for day_label, _ in day_plan:
         exp = combined_by_day.get(day_label, 0.0)
         act = result.module_totals.get(day_label, 0.0)
@@ -536,95 +581,294 @@ def check_forecast(snap: Snapshot) -> ForecastCheckResult:
 
 
 # ---------------------------------------------------------------------------
-# Textual TUI — forecast widget
+# Textual TUI — inline mode
 # ---------------------------------------------------------------------------
 
 
-class ForecastCheck(Static):
-    """Expandable Collapsible widget showing the full forecast deep-check."""
+class ForecastSlotsTable(Static):
+    """DataTable widget: array_1 | array_2 | total | target | module, today + tomorrow."""
 
-    DEFAULT_CSS = "ForecastCheck { height: auto; }"
+    DEFAULT_CSS = """
+    ForecastSlotsTable { height: auto; }
+    ForecastSlotsTable DataTable { height: 25; }
+    """
+
+    def __init__(
+        self,
+        entity_slots: list[EntitySlots],
+        array_eids: list[str],
+        module_slots: list[dict],
+    ) -> None:
+        """Initialise with forecast check data.
+
+        Args:
+            entity_slots: All parsed raw entity slots from check_forecast.
+            array_eids: Base (today) entity IDs for up to two solar arrays.
+            module_slots: Module GenerationSlot dicts from the pipeline debug endpoint.
+        """
+        super().__init__()
+        self._entity_slots = entity_slots
+        self._array_eids = array_eids
+        self._module_slots = module_slots
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with slot rows for today and tomorrow."""
+        now_utc = datetime.now(timezone.utc)
+        today_d = now_utc.date()
+        tomorrow_d = today_d + timedelta(days=1)
+        in_range = frozenset((today_d, tomorrow_d))
+
+        array_data: list[dict[datetime, float]] = []
+        for base_eid in (list(self._array_eids) + ["", ""])[:2]:
+            tomorrow_eid = _tomorrow_eid(base_eid) if base_eid else ""
+            dmap: dict[datetime, float] = {}
+            for es in self._entity_slots:
+                if es.entity_id in (base_eid, tomorrow_eid) and es.day_label in ("today", "tomorrow"):
+                    for dt, w in es.slots:
+                        if dt.date() in in_range:
+                            dmap[dt] = w
+            array_data.append(dmap)
+
+        all_ent_times: set[datetime] = set()
+        for dmap in array_data:
+            all_ent_times.update(dmap.keys())
+        sorted_ent = sorted(all_ent_times)
+        unit = "W"
+        if len(sorted_ent) >= 2:
+            delta_s = (sorted_ent[1] - sorted_ent[0]).total_seconds()
+            unit = "W" if abs(delta_s - 900) < 60 else "kWh"
+
+        module_data: dict[datetime, float] = {}
+        for s in self._module_slots:
+            try:
+                dt = datetime.fromisoformat(s["start"])
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                dt_utc = dt.astimezone(timezone.utc)
+                if dt_utc.date() in in_range:
+                    module_data[dt_utc] = s.get("expected_kwh", 0.0)
+            except (KeyError, ValueError):
+                continue
+
+        all_times = sorted(
+            t for t in (all_ent_times | module_data.keys())
+            if t.date() in in_range
+        )
+
+        def _short(eid: str) -> str:
+            return eid.removeprefix("sensor.") if eid else "—"
+
+        col1 = _short(self._array_eids[0]) if self._array_eids else "array_1"
+        col2 = _short(self._array_eids[1]) if len(self._array_eids) > 1 else "array_2"
+
+        table = self.query_one(DataTable)
+        table.add_columns(
+            "Time",
+            f"{col1} ({unit})",
+            f"{col2} ({unit})",
+            f"total ({unit})",
+            "target (/4)",
+            "module (kWh)",
+        )
+
+        dim = "dim"
+        prev_date: date | None = None
+        for dt in all_times:
+            v1 = array_data[0].get(dt, 0.0)
+            v2 = array_data[1].get(dt, 0.0)
+            v_mod = module_data.get(dt)
+            total = v1 + v2
+            target = total / 4
+
+            if dt.date() != prev_date:
+                if prev_date is not None:
+                    table.add_row(*[Text("─", style=dim)] * 6)
+                label = "today" if dt.date() == today_d else "tomorrow"
+                table.add_row(Text(label, style="bold"), *[""] * 5)
+                prev_date = dt.date()
+
+            table.add_row(
+                Text(dt.strftime("%H:%M"), style="cyan"),
+                Text(f"{v1:.0f}", style=dim if v1 == 0 else ""),
+                Text(f"{v2:.0f}", style=dim if v2 == 0 else ""),
+                Text(f"{total:.0f}", style=dim if total == 0 else ""),
+                Text(f"{target:.2f}", style=dim if target == 0 else ""),
+                Text(f"{v_mod:.3f}", style=dim if v_mod == 0 else "") if v_mod is not None
+                else Text("—", style=dim),
+            )
+
+
+class ForecastSummaryTable(Static):
+    """DataTable of per-day totals: array_1 | array_2 | total | module | check."""
+
+    DEFAULT_CSS = """
+    ForecastSummaryTable { height: auto; }
+    ForecastSummaryTable DataTable { height: 12; }
+    """
 
     def __init__(self, fc: ForecastCheckResult) -> None:
+        """Initialise with the forecast check result.
+
+        Args:
+            fc: Result of check_forecast() containing entity slots and module totals.
+        """
         super().__init__()
         self._fc = fc
 
     def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per day (today → d6) plus remaining."""
+        fc = self._fc
+
+        slot_lookup: dict[tuple[str, str], float] = {
+            (es.entity_id, es.day_label): es.total_kwh
+            for es in fc.entity_slots
+        }
+
+        def _short(eid: str) -> str:
+            return eid.removeprefix("sensor.") if eid else "—"
+
+        col1 = _short(fc.array_eids[0]) if fc.array_eids else "array_1"
+        col2 = _short(fc.array_eids[1]) if len(fc.array_eids) > 1 else "array_2"
+
+        table = self.query_one(DataTable)
+        table.add_columns(
+            "day",
+            f"{col1} (kWh)",
+            f"{col2} (kWh)",
+            "total (kWh)",
+            "module (kWh)",
+            "",
+        )
+
+        day_plan: list[tuple[str, int | None]] = (
+            [("today", None), ("tomorrow", None)]
+            + [(f"d{n}", n) for n in range(2, 7)]
+        )
+        dim = "dim"
+
+        for day_label, n in day_plan:
+            a_kwh: list[float] = []
+            for base_eid in (list(fc.array_eids) + ["", ""])[:2]:
+                if not base_eid:
+                    a_kwh.append(0.0)
+                    continue
+                if day_label == "today":
+                    eid = base_eid
+                elif day_label == "tomorrow":
+                    eid = _tomorrow_eid(base_eid)
+                else:
+                    eid = _day_eid(base_eid, n)  # type: ignore[arg-type]
+                a_kwh.append(slot_lookup.get((eid, day_label), 0.0))
+
+            total = a_kwh[0] + a_kwh[1]
+            mod = fc.module_totals.get(day_label, 0.0)
+            is_bad = day_label in fc.mismatches
+            check_style = "red" if is_bad else "green"
+
+            table.add_row(
+                Text(day_label, style="bold"),
+                Text(f"{a_kwh[0]:.4f}", style=dim if a_kwh[0] == 0 else ""),
+                Text(f"{a_kwh[1]:.4f}", style=dim if a_kwh[1] == 0 else ""),
+                Text(f"{total:.4f}", style=dim if total == 0 else ""),
+                Text(f"{mod:.4f}", style=dim if mod == 0 else ""),
+                Text("✗" if is_bad else "✓", style=check_style),
+            )
+
+            if day_label == "today":
+                rem_mod = fc.module_today_remaining_kwh
+                rem_arr: list[float | None] = []
+                for base_eid in (list(fc.array_eids) + ["", ""])[:2]:
+                    r_eid = _remaining_eid(base_eid) if base_eid else ""
+                    rem_arr.append(fc.entity_remaining.get(r_eid) if r_eid else None)
+                rem_total = (
+                    sum(v for v in rem_arr if v is not None)
+                    if any(v is not None for v in rem_arr) else None
+                )
+                is_rem_bad = "remaining" in fc.mismatches
+                rem_check_style = "red" if is_rem_bad else "green"
+
+                def _fmt(v: float | None) -> Text:
+                    if v is None:
+                        return Text("—", style=dim)
+                    return Text(f"{v:.4f}", style=dim if v == 0 else "")
+
+                table.add_row(
+                    Text("  remaining", style=dim),
+                    _fmt(rem_arr[0]),
+                    _fmt(rem_arr[1]),
+                    _fmt(rem_total),
+                    _fmt(rem_mod),
+                    Text("✗" if is_rem_bad else "✓", style=rem_check_style)
+                    if rem_mod is not None else Text(""),
+                )
+
+        if fc.negative_slots:
+            table.add_row(
+                Text("negative slots", style="red bold"),
+                Text(""), Text(""), Text(""),
+                Text(str(len(fc.negative_slots)), style="red"),
+                Text("✗", style="red"),
+            )
+
+
+class ForecastCheckWidget(Static):
+    """Collapsible forecast deep-check with two sub-sections: Slots and Summary."""
+
+    DEFAULT_CSS = "ForecastCheckWidget { height: auto; }"
+
+    def __init__(self, fc: ForecastCheckResult) -> None:
+        """Initialise with the pre-computed forecast check result.
+
+        Args:
+            fc: Result of check_forecast() for one coordinator.
+        """
+        super().__init__()
+        self._fc = fc
+
+    def compose(self) -> ComposeResult:
+        """Render two sub-Collapsibles: Slots (time-level) and Summary (day-level)."""
         fc = self._fc
 
         if fc.skipped:
-            title = f"⚠  [forecast] forecast_check   SKIP   {fc.skip_reason}"
-            with Collapsible(title=title):
-                yield Static("No Open-Meteo Solar Forecast data found on configured entities.")
+            yield Static(f"  ⚠  forecast_check   SKIP   {fc.skip_reason}")
             return
 
+        color = "green" if fc.overall_ok else "red"
         mark = "✓" if fc.overall_ok else "✗"
         status = "PASS" if fc.overall_ok else "FAIL"
-        title = f"{mark}  [forecast] forecast_check   {status}   Tested {fc.n_arrays} array(s)"
+        title = f"[{color}]{mark}[/{color}]  forecast_check   [{color}]{status}[/{color}]   {fc.n_arrays} array(s)"
 
-        with Collapsible(title=title):
-            yield Static("  ─── Arrays ───")
-            for eid in fc.array_eids:
-                yield Static(f"    • {eid}")
-            yield Static("")
+        with Collapsible(title=title, collapsed=True):
+            yield Static(f"  Arrays: {', '.join(fc.array_eids)}")
 
-            yield Static("  ─── Raw entity data ───")
+            with Collapsible(title="Slots", collapsed=False):
+                yield ForecastSlotsTable(fc.entity_slots, fc.array_eids, fc.module_slots)
+                if fc.negative_slots:
+                    yield Static(f"  ⚠ {len(fc.negative_slots)} negative slot(s): {fc.negative_slots[:3]}")
 
-            for es in fc.entity_slots:
-                unit = "W" if es.resolution_min == 15 else "Wh"
-                label = f"{es.resolution_min}min"
-                yield Static(
-                    f"    {es.entity_id}  [{es.day_label} | {label}]   total: {es.total_kwh:.4f} kWh"
-                )
-                if es.day_label in ("today", "tomorrow") and es.slots:
-                    non_zero = [(dt, w) for dt, w in es.slots if w > 0]
-                    if non_zero:
-                        parts = [f"{dt.strftime('%H:%M')} {w:.0f}{unit}" for dt, w in non_zero[:18]]
-                        if len(non_zero) > 18:
-                            parts.append(f"…+{len(non_zero) - 18}")
-                        yield Static(f"      {' │ '.join(parts)}")
-
-            yield Static("")
-            yield Static("  Combined expected totals from raw entities:")
-            for day_label, _ in [("today", None), ("tomorrow", None)] + [(f"d{n}", None) for n in range(2, 7)]:
-                exp = fc.expected_totals.get(day_label, 0.0)
-                yield Static(f"    {day_label:10s}  {exp:.4f} kWh")
-
-            if fc.module_today_remaining_kwh is not None:
-                yield Static(f"  Module today_remaining_kwh: {fc.module_today_remaining_kwh:.4f} kWh")
-
-            yield Static("")
-
-            yield Static("  ─── Module output (GenerationSeries) ───")
-            yield Static(f"    slot_count: {fc.module_slot_count}")
-            yield Static("")
-            yield Static("    day        expected      module        check")
-            yield Static("    " + "─" * 54)
-
-            for day_label, _ in [("today", None), ("tomorrow", None)] + [(f"d{n}", None) for n in range(2, 7)]:
-                exp = fc.expected_totals.get(day_label, 0.0)
-                act = fc.module_totals.get(day_label, 0.0)
-                is_mismatch = day_label in fc.mismatches
-                if is_mismatch:
-                    check_mark = "✗ MISMATCH"
-                    line = f"    [red]{day_label:10s}  {exp:9.4f} kWh  {act:9.4f} kWh  {check_mark}[/red]"
-                else:
-                    check_mark = "✓"
-                    line = f"    [green]{day_label:10s}  {exp:9.4f} kWh  {act:9.4f} kWh  {check_mark}[/green]"
-                yield Static(line, markup=True)
-
-
-# ---------------------------------------------------------------------------
-# Textual TUI — main app
-# ---------------------------------------------------------------------------
+            with Collapsible(title="Summary", collapsed=False):
+                yield Static(f"  slot_count: {fc.module_slot_count}")
+                yield ForecastSummaryTable(fc)
 
 
 class IntegrationCheckApp(App):
-    TITLE = "sunSale Integration Check"
+    """Textual TUI running in inline mode for the sunSale integration check."""
+
     BINDINGS = [("q", "quit", "Quit")]
     CSS = """
-    Screen { background: $background; }
-    ScrollableContainer { padding: 1 2; }
+    Screen { height: auto; }
+    Collapsible { height: auto; }
+    ForecastCheckWidget { height: auto; }
+    ForecastSlotsTable DataTable { height: 25; }
+    ForecastSummaryTable DataTable { height: 12; }
     """
 
     def __init__(
@@ -632,56 +876,60 @@ class IntegrationCheckApp(App):
         report: list[tuple[Snapshot, list[CheckResult]]],
         forecast_results: dict[str, ForecastCheckResult],
     ) -> None:
+        """Initialise with validator report and forecast check results.
+
+        Args:
+            report: Per-snapshot check results from run_checks().
+            forecast_results: Per-entry forecast deep-check results.
+        """
         super().__init__()
         self._report = report
         self._forecast_results = forecast_results
         self.exit_code = 0
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with ScrollableContainer():
-            for snap, results in self._report:
-                fc = self._forecast_results.get(snap.entry_id)
+        """Yield check result lines, forecast Collapsible, separator, and summary."""
+        for snap, results in self._report:
+            cur_cat: str | None = None
+            for res in results:
+                if res.category == "forecast":
+                    continue
+                if res.category != cur_cat:
+                    yield Static(f"  [dim][{res.category}][/dim]", markup=True)
+                    cur_cat = res.category
+                color = "green" if res.ok else "red"
+                mark = "✓" if res.ok else "✗"
+                yield Static(
+                    f"  [{color}]{mark}[/{color}]  {res.name}  [dim]{res.detail[:90]}[/dim]",
+                    markup=True,
+                )
 
-                cur_cat: str | None = None
-                for res in results:
-                    if res.category == "forecast":
-                        continue
-                    if res.category != cur_cat:
-                        yield Static(f"  [dim][{res.category}][/dim]", markup=True)
-                        cur_cat = res.category
-                    icon = "[green]✓[/green]" if res.ok else "[red]✗[/red]"
-                    detail = res.detail[:90]
-                    yield Static(f"  {icon}  {res.name}  [dim]{detail}[/dim]", markup=True)
+            fc = self._forecast_results.get(snap.entry_id)
+            if fc is not None:
+                yield Static("  [dim][forecast][/dim]", markup=True)
+                yield ForecastCheckWidget(fc)
 
-                if fc is not None:
-                    yield Static("  [dim][forecast][/dim]", markup=True)
-                    yield ForecastCheck(fc)
+            yield Static("─" * 60)
 
-                yield Rule()
-
-            non_fc_total = sum(
-                1 for _, rs in self._report for r in rs if r.category != "forecast"
-            )
-            non_fc_passed = sum(
-                1 for _, rs in self._report for r in rs
-                if r.category != "forecast" and r.ok
-            )
-            fc_total = sum(1 for fc in self._forecast_results.values() if not fc.skipped)
-            fc_passed = sum(
-                1 for fc in self._forecast_results.values()
-                if not fc.skipped and fc.overall_ok
-            )
-            all_total = non_fc_total + fc_total
-            all_passed = non_fc_passed + fc_passed
-            color = "green" if all_passed == all_total else "red"
-            yield Static(
-                f"  [{color}]{all_passed}/{all_total} checks passed[/{color}]",
-                markup=True,
-            )
+        non_fc_total = sum(1 for _, rs in self._report for r in rs if r.category != "forecast")
+        non_fc_passed = sum(
+            1 for _, rs in self._report for r in rs if r.category != "forecast" and r.ok
+        )
+        fc_total = sum(1 for fc in self._forecast_results.values() if not fc.skipped)
+        fc_passed = sum(
+            1 for fc in self._forecast_results.values() if not fc.skipped and fc.overall_ok
+        )
+        all_total = non_fc_total + fc_total
+        all_passed = non_fc_passed + fc_passed
+        color = "green" if all_passed == all_total else "red"
+        yield Static(
+            f"[{color}]{all_passed}/{all_total} checks passed[/{color}]  [dim](q to quit)[/dim]",
+            markup=True,
+        )
         yield Footer()
 
     def on_mount(self) -> None:
+        """Set exit code based on check results."""
         any_failed = any(
             not r.ok for _, rs in self._report for r in rs if r.category != "forecast"
         )
@@ -839,7 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
 
     forecast_results = {snap.entry_id: check_forecast(snap) for snap in snapshots}
     app = IntegrationCheckApp(report, forecast_results)
-    app.run()
+    app.run(inline=True)
     return app.exit_code
 
 
