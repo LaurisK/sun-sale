@@ -178,12 +178,18 @@ class PriceSeries:
 
 @dataclass(frozen=True)
 class GenerationSlot:
-    """Predicted solar generation for one time slot."""
+    """One price-grid-aligned forecast slot (start, end, expected_kwh, source, confidence).
+
+    start/end mirror the pricing grid (1h or 15-min). expected_kwh is overlap-weighted
+    when the raw forecast resolution differs from the grid. source is "open_meteo",
+    "forecast_solar", or "frozen_morning". confidence is 0–1 when the source provides
+    it, None otherwise.
+    """
     start: datetime
     end: datetime
     expected_kwh: float
-    source: str           # "open_meteo" | "forecast_solar" | "frozen_morning"
-    confidence: float | None  # 0..1 if source provides it, else None
+    source: str
+    confidence: float | None
 
 
 @dataclass(frozen=True)
@@ -192,31 +198,38 @@ class SolarEntry:
     start: datetime
     end: datetime
     expected_kwh: float
-    source: str    # "open_meteo" | "forecast_solar"
+    source: str
 
 
 @dataclass(frozen=True)
 class GenerationSeries:
-    """Normalised generation forecast from one or more sources.
+    """Output of the forecast stage. Deliverables:
 
-    Slots are resampled onto PriceSeries.resolution so the grid matches the
-    pricing slots 1:1. Per-day totals are bucketed by slot.start date (UTC).
+    - slots: price-grid-aligned GenerationSlots covering yesterday 00:00 → tomorrow 23:59,
+      one per pricing slot. Consumed by calculator (energy_between, per-slot expected solar
+      for lockout logic) and charging_profile (today's remaining slots to decide store vs sell).
+    - today_remaining_kwh: sum of expected_kwh for today's slots with start >= now.
+      Consumed by charging_profile to select case 1 (fits in battery) vs case 2 (sell excess).
+    - total_yesterday_kwh, total_today_kwh, total_tomorrow_kwh: full-day sums over the slot
+      grid, sensor attributes only.
+    - total_d2_kwh … total_d6_kwh: daily totals for days 2–6 ahead, summed directly from raw
+      HA entity watts (outside the price grid, no per-slot data). Sensor attributes only.
     """
     slots: tuple[GenerationSlot, ...]
-    primary: str          # which source the calculator should consume by default
-    overlays: tuple[str, ...]  # other sources kept for chart overlay
-    computed_at: datetime
     total_yesterday_kwh: float = 0.0
     total_today_kwh: float = 0.0
     total_tomorrow_kwh: float = 0.0
-    today_remaining_kwh: float = 0.0    # slots with start >= now on today's date
+    today_remaining_kwh: float = 0.0
+    total_d2_kwh: float = 0.0
+    total_d3_kwh: float = 0.0
+    total_d4_kwh: float = 0.0
+    total_d5_kwh: float = 0.0
+    total_d6_kwh: float = 0.0
 
     def energy_between(self, t1: datetime, t2: datetime) -> float:
-        """Return expected kWh from the primary source between t1 and t2."""
+        """Return expected kWh between t1 and t2."""
         total = 0.0
         for s in self.slots:
-            if s.source != self.primary:
-                continue
             overlap_start = max(s.start, t1)
             overlap_end = min(s.end, t2)
             if overlap_start >= overlap_end:

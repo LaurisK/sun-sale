@@ -449,10 +449,9 @@ class ForecastPipelineSensor(_BaseSensor):
         gen: GenerationSeries | None = (self.coordinator.data or {}).get("forecast")
         if not gen:
             return 0.0
-        from datetime import date
         today = datetime.now(timezone.utc).date()
         return round(
-            sum(s.expected_kwh for s in gen.slots if s.source == gen.primary and s.start.date() == today),
+            sum(s.expected_kwh for s in gen.slots if s.start.date() == today),
             2,
         )
 
@@ -467,10 +466,15 @@ class ForecastPipelineSensor(_BaseSensor):
             for src in sources
         }
         return {
-            "primary": gen.primary,
-            "overlays": list(gen.overlays),
-            "computed_at": gen.computed_at.isoformat(),
             "source_totals": source_totals,
+            "total_yesterday_kwh": round(gen.total_yesterday_kwh, 4),
+            "total_today_kwh": round(gen.total_today_kwh, 4),
+            "total_tomorrow_kwh": round(gen.total_tomorrow_kwh, 4),
+            "total_d2_kwh": round(gen.total_d2_kwh, 4),
+            "total_d3_kwh": round(gen.total_d3_kwh, 4),
+            "total_d4_kwh": round(gen.total_d4_kwh, 4),
+            "total_d5_kwh": round(gen.total_d5_kwh, 4),
+            "total_d6_kwh": round(gen.total_d6_kwh, 4),
             "slots": [
                 {
                     "start": s.start.isoformat(),

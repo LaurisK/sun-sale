@@ -16,7 +16,6 @@ from typing import Any
 from ..contract.models import (
     GenerationSeries,
     GenerationSlot,
-    PriceSeries,
     SolarData,
     SolarEntry,
     SunSaleConfig,
@@ -25,33 +24,39 @@ from ..contract.models import (
 
 def build_generation_series(
     solar: SolarData,
-    price_series: PriceSeries,
+    price_slots: tuple,
     now: datetime | None = None,
 ) -> GenerationSeries:
     """Convert SolarData into a GenerationSeries aligned to the price grid."""
     if now is None:
         now = datetime.now(timezone.utc)
 
-    if not solar.entries or not price_series.slots:
+    ext = _compute_extended_day_totals(solar.entries, now)
+
+    if not solar.entries or not price_slots:
         return GenerationSeries(
             slots=(),
-            primary=solar.primary_source if solar.entries else "none",
-            overlays=(),
-            computed_at=now,
+            total_d2_kwh=ext[2],
+            total_d3_kwh=ext[3],
+            total_d4_kwh=ext[4],
+            total_d5_kwh=ext[5],
+            total_d6_kwh=ext[6],
         )
 
-    resampled = _resample_to_grid(solar.entries, price_series.slots, solar.primary_source)
+    resampled = _resample_to_grid(solar.entries, price_slots, solar.primary_source)
     totals = _compute_totals(resampled, now)
 
     return GenerationSeries(
         slots=resampled,
-        primary=solar.primary_source,
-        overlays=(),
-        computed_at=now,
         total_yesterday_kwh=totals["yesterday"],
         total_today_kwh=totals["today"],
         total_tomorrow_kwh=totals["tomorrow"],
         today_remaining_kwh=totals["today_remaining"],
+        total_d2_kwh=ext[2],
+        total_d3_kwh=ext[3],
+        total_d4_kwh=ext[4],
+        total_d5_kwh=ext[5],
+        total_d6_kwh=ext[6],
     )
 
 
@@ -99,6 +104,15 @@ def _resample_to_grid(
     return tuple(out)
 
 
+def _compute_extended_day_totals(entries: list[SolarEntry], now: datetime) -> dict[int, float]:
+    """Sum solar entries into daily kWh totals for d2..d6."""
+    today = now.date()
+    return {
+        n: round(sum(e.expected_kwh for e in entries if e.start.date() == today + timedelta(days=n)), 4)
+        for n in range(2, 7)
+    }
+
+
 def _compute_totals(slots: tuple[GenerationSlot, ...], now: datetime) -> dict[str, float]:
     """Bucket resampled slots into yesterday/today/tomorrow by start.date()."""
     today = now.date()
@@ -137,6 +151,14 @@ def _tomorrow_entity(entity_id: str) -> str:
     for pattern in ("_today_", "_today"):
         if pattern in entity_id:
             return entity_id.replace(pattern, pattern.replace("today", "tomorrow"), 1)
+    return ""
+
+
+def _day_entity(entity_id: str, n: int) -> str:
+    """Derive the day-n (d2..d6) forecast entity from today's entity ID."""
+    for pattern in ("_today_", "_today"):
+        if pattern in entity_id:
+            return entity_id.replace(pattern, pattern.replace("today", f"d{n}"), 1)
     return ""
 
 
@@ -192,12 +214,12 @@ class SolarTranslator:
         if now is None:
             now = datetime.now(timezone.utc)
 
-        # --- Open Meteo: collect watts from all entities and their tomorrow counterparts ---
         combined_watts: dict[datetime, float] = {}
         for base_eid in (self._entity_1, self._entity_2):
             if not base_eid:
                 continue
-            for eid in (base_eid, _tomorrow_entity(base_eid)):
+            eids = [base_eid, _tomorrow_entity(base_eid)] + [_day_entity(base_eid, n) for n in range(2, 7)]
+            for eid in eids:
                 if not eid:
                     continue
                 state = hass.states.get(eid)

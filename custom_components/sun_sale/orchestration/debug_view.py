@@ -79,9 +79,15 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
             } if pricing is not None else None,
             "forecast": {
                 "slot_count": len(forecast.slots),
-                "primary": forecast.primary,
-                "overlays": list(forecast.overlays),
-                "computed_at": forecast.computed_at.isoformat(),
+                "total_yesterday_kwh": round(forecast.total_yesterday_kwh, 4),
+                "total_today_kwh": round(forecast.total_today_kwh, 4),
+                "total_tomorrow_kwh": round(forecast.total_tomorrow_kwh, 4),
+                "today_remaining_kwh": round(forecast.today_remaining_kwh, 4),
+                "total_d2_kwh": round(forecast.total_d2_kwh, 4),
+                "total_d3_kwh": round(forecast.total_d3_kwh, 4),
+                "total_d4_kwh": round(forecast.total_d4_kwh, 4),
+                "total_d5_kwh": round(forecast.total_d5_kwh, 4),
+                "total_d6_kwh": round(forecast.total_d6_kwh, 4),
                 "slots": [
                     {
                         "start": s.start.isoformat(),

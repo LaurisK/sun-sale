@@ -21,28 +21,27 @@ from ..contract.models import (
     GenerationReading,
     ObservedGenerationSeries,
     ObservedGenerationSlot,
-    PriceSeries,
     SunSaleConfig,
 )
 
 
 def build_observed_generation_series(
     history: GenerationHistory,
-    price_series: PriceSeries,
+    price_slots: tuple,
     now: datetime | None = None,
 ) -> ObservedGenerationSeries:
     """Emit one slot per price-grid slot in [yesterday 00:00, now)."""
     if now is None:
         now = datetime.now(timezone.utc)
 
-    if not price_series.slots or not history.samples:
+    if not price_slots or not history.samples:
         return ObservedGenerationSeries(slots=(), computed_at=now)
 
     yesterday_start = _utc_midnight(now) - timedelta(days=1)
     samples_by_day = _group_samples_by_day(history.samples)
 
     slots: list[ObservedGenerationSlot] = []
-    for ps in price_series.slots:
+    for ps in price_slots:
         if ps.start < yesterday_start or ps.start >= now:
             continue
         end_t = ps.end if ps.end < now else now

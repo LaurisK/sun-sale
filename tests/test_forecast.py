@@ -50,14 +50,13 @@ def _make_solar_data_from_forecast(forecast_slots: list[dict], now=NOW) -> Solar
 
 def test_empty_when_no_data():
     solar = SolarData(entries=[], total_today_kwh=0.0, today_remaining_kwh=0.0, primary_source="none")
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     assert gen.slots == ()
-    assert gen.primary == "none"
 
 
 def test_empty_when_empty_forecast_slots():
     solar = SolarData(entries=[], total_today_kwh=0.0, today_remaining_kwh=0.0, primary_source="none")
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     assert gen.slots == ()
 
 
@@ -70,8 +69,7 @@ def test_open_meteo_watts_parsed():
         "2024-01-15T10:00:00+00:00": 2000.0,
         "2024-01-15T11:00:00+00:00": 3000.0,
     })
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
-    assert gen.primary == "open_meteo"
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     starts = {s.start.hour for s in gen.slots}
     assert 10 in starts
     assert 11 in starts
@@ -86,7 +84,7 @@ def test_open_meteo_15min_aggregated_to_hourly():
         "2024-01-15T10:30:00+00:00": 1000.0,
         "2024-01-15T10:45:00+00:00": 1000.0,
     })
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     slots_10 = [s for s in gen.slots if s.start.hour == 10]
     assert len(slots_10) == 1
     assert abs(slots_10[0].expected_kwh - 1.0) < 1e-5
@@ -96,7 +94,7 @@ def test_open_meteo_15min_aggregated_to_hourly():
 def test_open_meteo_two_arrays_summed():
     # Simulate two arrays combined: translator already sums → 2000 W total
     solar = _make_solar_data_from_watts({"2024-01-15T10:00:00+00:00": 2000.0})
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     slot_10 = next(s for s in gen.slots if s.start.hour == 10)
     # 2000 W × 1 h / 1000 = 2.0 kWh (hourly slot)
     assert abs(slot_10.expected_kwh - 2.0) < 1e-5
@@ -111,8 +109,7 @@ def test_forecast_solar_pv_estimate_parsed():
         {"time": "2024-01-15T10:00:00", "pv_estimate": 1.5},
         {"time": "2024-01-15T11:00:00", "pv_estimate": 2.0},
     ])
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
-    assert gen.primary == "forecast_solar"
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     by_hour = {s.start.hour: s.expected_kwh for s in gen.slots}
     assert abs(by_hour[10] - 1.5) < 1e-9
     assert abs(by_hour[11] - 2.0) < 1e-9
@@ -122,7 +119,7 @@ def test_forecast_solar_energy_fallback():
     solar = _make_solar_data_from_forecast([
         {"time": "2024-01-15T10:00:00", "energy": 1.2},
     ])
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     slot_10 = next(s for s in gen.slots if s.start.hour == 10)
     assert abs(slot_10.expected_kwh - 1.2) < 1e-9
 
@@ -132,28 +129,10 @@ def test_forecast_solar_skips_bad_entries():
         {"time": "bad-date", "pv_estimate": 1.0},
         {"time": "2024-01-15T10:00:00", "pv_estimate": 2.0},
     ])
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     non_zero = [s for s in gen.slots if s.expected_kwh > 0]
     assert len(non_zero) == 1
     assert abs(non_zero[0].expected_kwh - 2.0) < 1e-9
-
-
-# ---------------------------------------------------------------------------
-# primary selection
-# ---------------------------------------------------------------------------
-
-def test_primary_is_set_for_forecast_solar():
-    solar = _make_solar_data_from_forecast([
-        {"time": "2024-01-15T10:00:00", "pv_estimate": 1.0},
-    ])
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
-    assert gen.primary == "forecast_solar"
-
-
-def test_primary_is_open_meteo_when_watts_present():
-    solar = _make_solar_data_from_watts({"2024-01-15T10:00:00+00:00": 1000.0})
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
-    assert gen.primary == "open_meteo"
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +143,7 @@ def test_energy_between_full_slot():
     solar = _make_solar_data_from_forecast([
         {"time": "2024-01-15T10:00:00", "pv_estimate": 3.0},
     ])
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     t1 = NOW.replace(hour=10)
     t2 = NOW.replace(hour=11)
     assert abs(gen.energy_between(t1, t2) - 3.0) < 1e-9
@@ -174,7 +153,7 @@ def test_energy_between_partial_slot():
     solar = _make_solar_data_from_forecast([
         {"time": "2024-01-15T10:00:00", "pv_estimate": 4.0},
     ])
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     t1 = NOW.replace(hour=10, minute=30)
     t2 = NOW.replace(hour=11)
     assert abs(gen.energy_between(t1, t2) - 2.0) < 1e-6
@@ -184,7 +163,7 @@ def test_energy_between_no_overlap():
     solar = _make_solar_data_from_forecast([
         {"time": "2024-01-15T10:00:00", "pv_estimate": 3.0},
     ])
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     t1 = NOW.replace(hour=12)
     t2 = NOW.replace(hour=13)
     assert gen.energy_between(t1, t2) == 0.0
@@ -210,7 +189,7 @@ def test_hourly_forecast_upsampled_to_quarter_hour_grid():
     solar = _make_solar_data_from_forecast([
         {"time": "2024-01-15T10:00:00", "pv_estimate": 4.0},
     ])
-    gen = build_generation_series(solar, _quarter_hour_price_series(), now=NOW)
+    gen = build_generation_series(solar, _quarter_hour_price_series().slots, now=NOW)
     slots_10 = [s for s in gen.slots if s.start.hour == 10]
     assert len(slots_10) == 4
     for s in slots_10:
@@ -225,7 +204,7 @@ def test_resampled_slots_match_price_grid_one_to_one():
         {"time": "2024-01-15T11:00:00", "pv_estimate": 1.0},
     ])
     ps = _empty_price_series()
-    gen = build_generation_series(solar, ps, now=NOW)
+    gen = build_generation_series(solar, ps.slots, now=NOW)
     assert len(gen.slots) == len(ps.slots)
     for g, p in zip(gen.slots, ps.slots):
         assert g.start == p.start
@@ -247,7 +226,7 @@ def test_continuous_72h_coverage_with_zero_fill():
     solar = _make_solar_data_from_forecast([
         {"time": "2024-01-15T12:00:00", "pv_estimate": 4.0},  # only today noon
     ])
-    gen = build_generation_series(solar, ps, now=NOW)
+    gen = build_generation_series(solar, ps.slots, now=NOW)
     assert len(gen.slots) == 72
     # nighttime/yesterday slots zero-filled
     nighttime_slot = next(s for s in gen.slots if s.start.hour == 3 and s.start.date().day == 14)
@@ -279,7 +258,7 @@ def test_per_day_totals_split_across_yesterday_today_tomorrow():
         for h in range(72)
     ]
     ps = build_price_series(entries, default_tariff_config(), now=NOW)
-    gen = build_generation_series(solar, ps, now=NOW)
+    gen = build_generation_series(solar, ps.slots, now=NOW)
     assert abs(gen.total_yesterday_kwh - 2.0) < 1e-6
     assert abs(gen.total_today_kwh - 4.0) < 1e-6
     assert abs(gen.total_tomorrow_kwh - 5.0) < 1e-6
@@ -293,14 +272,14 @@ def test_today_remaining_excludes_past_slots():
         {"time": "2024-01-15T11:00:00", "pv_estimate": 3.0},   # future, today
         {"time": "2024-01-15T12:00:00", "pv_estimate": 4.0},   # future, today
     ], now=now)
-    gen = build_generation_series(solar, _empty_price_series(), now=now)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=now)
     assert abs(gen.total_today_kwh - 9.0) < 1e-6
     assert abs(gen.today_remaining_kwh - 7.0) < 1e-6
 
 
 def test_empty_solar_yields_zero_totals():
     solar = SolarData(entries=[], total_today_kwh=0.0, today_remaining_kwh=0.0, primary_source="none")
-    gen = build_generation_series(solar, _empty_price_series(), now=NOW)
+    gen = build_generation_series(solar, _empty_price_series().slots, now=NOW)
     assert gen.total_yesterday_kwh == 0.0
     assert gen.total_today_kwh == 0.0
     assert gen.total_tomorrow_kwh == 0.0

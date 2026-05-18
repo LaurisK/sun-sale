@@ -24,7 +24,7 @@ def _make_gen_series(solar: list[SolarForecast]) -> GenerationSeries:
                        source="forecast_solar", confidence=None)
         for sf in solar
     )
-    return GenerationSeries(slots=slots, primary="forecast_solar", overlays=(), computed_at=NOW)
+    return GenerationSeries(slots=slots)
 
 
 def run(prices, solar=None, soc=0.50, battery_config=None, tariff_config=None):

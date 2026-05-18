@@ -25,8 +25,12 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
+
+from textual.app import App, ComposeResult
+from textual.containers import ScrollableContainer
+from textual.widgets import Collapsible, Footer, Header, Rule, Static
 
 DEFAULT_HA_URL = "http://85.206.57.75:8124"
 DEFAULT_HA_TOKEN = (
@@ -105,15 +109,48 @@ class Snapshot:
         return self.debug.get("outputs", {}) or {}
 
 
+# ---------------------------------------------------------------------------
+# Entity ID helpers
+# ---------------------------------------------------------------------------
+
+
+def _tomorrow_eid(entity_id: str) -> str:
+    for pattern in ("_today_", "_today"):
+        if pattern in entity_id:
+            return entity_id.replace(pattern, pattern.replace("today", "tomorrow"), 1)
+    return ""
+
+
+def _day_eid(entity_id: str, n: int) -> str:
+    for pattern in ("_today_", "_today"):
+        if pattern in entity_id:
+            return entity_id.replace(pattern, pattern.replace("today", f"d{n}"), 1)
+    return ""
+
+
 def collect(client: HAClient) -> list[Snapshot]:
     """Build snapshots for every coordinator the integration has registered."""
     snapshots: list[Snapshot] = []
     for entry in client.debug():
         snap = Snapshot(entry_id=entry.get("entry_id", "?"), debug=entry)
-        for key in ("nordpool_entity", "solar_forecast_entity", "solar_forecast_entity_2"):
+
+        nordpool_eid = snap.config.get("nordpool_entity")
+        if nordpool_eid:
+            snap.raw_entities[nordpool_eid] = client.state(nordpool_eid)
+
+        for key in ("solar_forecast_entity", "solar_forecast_entity_2"):
             eid = snap.config.get(key)
-            if eid:
-                snap.raw_entities[eid] = client.state(eid)
+            if not eid:
+                continue
+            snap.raw_entities[eid] = client.state(eid)
+            t_eid = _tomorrow_eid(eid)
+            if t_eid:
+                snap.raw_entities[t_eid] = client.state(t_eid)
+            for n in range(2, 7):
+                d_eid = _day_eid(eid, n)
+                if d_eid:
+                    snap.raw_entities[d_eid] = client.state(d_eid)
+
         snapshots.append(snap)
     return snapshots
 
@@ -177,7 +214,6 @@ def _pricing_spot_matches_nordpool(snap: Snapshot) -> tuple[bool, str]:
         return False, "nordpool entity not fetched"
     attrs = nordpool.get("attributes", {}) or {}
     source_entries = (attrs.get("raw_today") or []) + (attrs.get("raw_tomorrow") or [])
-    # Normalise source timestamps to UTC ISO for comparison.
     source_by_start: dict[str, float] = {}
     for entry in source_entries:
         try:
@@ -252,7 +288,7 @@ def _tariff_math(snap: Snapshot) -> tuple[bool, str]:
     s_tax = tariff["sell_tax_rate"]
     tol = 1e-3
     mismatches: list[str] = []
-    for s in slots[:96]:  # cap detail noise
+    for s in slots[:96]:
         spot = s["spot"]
         expected_buy = (spot + dist + markup) * (1 + tax)
         expected_sell = (spot - s_dist - s_markup) * (1 - s_tax)
@@ -282,19 +318,6 @@ def _pricing_contiguous(snap: Snapshot) -> tuple[bool, str]:
             return False, f"gap at {s['start']}: {delta:.0f}s (expected {res_s}s)"
         prev = cur
     return True, f"{len(slots)} slots contiguous at {res_s}s"
-
-
-@validator("forecast_has_data", "forecast")
-def _forecast_has_data(snap: Snapshot) -> tuple[bool, str]:
-    forecast = snap.pipeline.get("forecast")
-    if forecast is None:
-        return False, "pipeline.forecast is null"
-    primary_eid = snap.config.get("solar_forecast_entity")
-    primary_state = snap.raw_entities.get(primary_eid) if primary_eid else None
-    has_source = primary_state is not None and primary_state.get("state") not in (None, "unavailable", "unknown")
-    if has_source and forecast.get("slot_count", 0) == 0:
-        return False, f"primary forecast entity has state {primary_state.get('state')} but 0 slots produced"
-    return True, f"slot_count={forecast.get('slot_count')}, primary={forecast.get('primary')}"
 
 
 @validator("calculation_within_pricing_window", "calculation")
@@ -374,6 +397,301 @@ def _degradation_cost(snap: Snapshot) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# Forecast check (TUI-specific deep validation)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EntitySlots:
+    entity_id: str
+    day_label: str
+    resolution_min: int
+    slots: list[tuple[datetime, float]]
+    total_kwh: float
+
+
+@dataclass
+class ForecastCheckResult:
+    skipped: bool = False
+    skip_reason: str = ""
+    n_arrays: int = 0
+    array_eids: list[str] = field(default_factory=list)
+    entity_slots: list[EntitySlots] = field(default_factory=list)
+    expected_totals: dict[str, float] = field(default_factory=dict)
+    module_totals: dict[str, float] = field(default_factory=dict)
+    module_slot_count: int = 0
+    module_today_remaining_kwh: float | None = None
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def _parse_watts(watts: dict) -> tuple[list[tuple[datetime, float]], int]:
+    """Parse {iso_str: watts} dict into sorted (datetime, watts) list + resolution_min."""
+    parsed: list[tuple[datetime, float]] = []
+    for ts_str, w in watts.items():
+        try:
+            dt = datetime.fromisoformat(str(ts_str))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            parsed.append((dt.astimezone(timezone.utc), float(w)))
+        except (ValueError, TypeError):
+            continue
+    parsed.sort(key=lambda x: x[0])
+    if len(parsed) >= 2:
+        delta = (parsed[1][0] - parsed[0][0]).total_seconds()
+        res = 15 if abs(delta - 900) < 60 else 60
+    else:
+        res = 60
+    return parsed, res
+
+
+def check_forecast(snap: Snapshot) -> ForecastCheckResult:
+    """Deep forecast validation: raw entity data → expected totals → vs module output."""
+    result = ForecastCheckResult()
+
+    entity_1 = snap.config.get("solar_forecast_entity", "")
+    entity_2 = snap.config.get("solar_forecast_entity_2", "")
+    base_eids = [eid for eid in [entity_1, entity_2] if eid]
+
+    if not base_eids:
+        result.skipped = True
+        result.skip_reason = "No solar forecast entities configured"
+        return result
+
+    arrays_with_data = [
+        eid for eid in base_eids
+        if isinstance(((snap.raw_entities.get(eid) or {}).get("attributes") or {}).get("watts"), dict)
+    ]
+    if not arrays_with_data:
+        result.skipped = True
+        result.skip_reason = "Open-Meteo Solar Forecast not present (no 'watts' attribute on entity)"
+        return result
+
+    result.n_arrays = len(arrays_with_data)
+    result.array_eids = list(arrays_with_data)
+
+    now = datetime.now(timezone.utc)
+    today = now.date()
+
+    day_plan: list[tuple[str, date]] = [
+        ("today", today),
+        ("tomorrow", today + timedelta(days=1)),
+    ] + [(f"d{n}", today + timedelta(days=n)) for n in range(2, 7)]
+
+    combined_by_day: dict[str, float] = {label: 0.0 for label, _ in day_plan}
+
+    for base_eid in arrays_with_data:
+        eid_day_pairs: list[tuple[str, str]] = [
+            (base_eid, "today"),
+            (_tomorrow_eid(base_eid), "tomorrow"),
+        ] + [(_day_eid(base_eid, n), f"d{n}") for n in range(2, 7)]
+
+        for eid, day_label in eid_day_pairs:
+            if not eid:
+                continue
+            state = snap.raw_entities.get(eid)
+            if not state:
+                continue
+            watts = (state.get("attributes") or {}).get("watts")
+            if not isinstance(watts, dict):
+                continue
+
+            slots, res = _parse_watts(watts)
+            slot_h = res / 60.0
+            total = round(sum(w * slot_h / 1000.0 for _, w in slots), 4)
+            combined_by_day[day_label] = round(combined_by_day[day_label] + total, 4)
+
+            result.entity_slots.append(EntitySlots(
+                entity_id=eid,
+                day_label=day_label,
+                resolution_min=res,
+                slots=slots,
+                total_kwh=total,
+            ))
+
+    result.expected_totals = dict(combined_by_day)
+
+    forecast = snap.pipeline.get("forecast") or {}
+    result.module_slot_count = forecast.get("slot_count", 0)
+    result.module_today_remaining_kwh = forecast.get("today_remaining_kwh")
+    result.module_totals = {
+        "today":    forecast.get("total_today_kwh", 0.0),
+        "tomorrow": forecast.get("total_tomorrow_kwh", 0.0),
+        "d2":       forecast.get("total_d2_kwh", 0.0),
+        "d3":       forecast.get("total_d3_kwh", 0.0),
+        "d4":       forecast.get("total_d4_kwh", 0.0),
+        "d5":       forecast.get("total_d5_kwh", 0.0),
+        "d6":       forecast.get("total_d6_kwh", 0.0),
+    }
+
+    TOL = 0.001
+    for day_label, _ in day_plan:
+        exp = combined_by_day.get(day_label, 0.0)
+        act = result.module_totals.get(day_label, 0.0)
+        if abs(exp - act) > TOL:
+            result.mismatches.append(day_label)
+            result.overall_ok = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Textual TUI — forecast widget
+# ---------------------------------------------------------------------------
+
+
+class ForecastCheck(Static):
+    """Expandable Collapsible widget showing the full forecast deep-check."""
+
+    DEFAULT_CSS = "ForecastCheck { height: auto; }"
+
+    def __init__(self, fc: ForecastCheckResult) -> None:
+        super().__init__()
+        self._fc = fc
+
+    def compose(self) -> ComposeResult:
+        fc = self._fc
+
+        if fc.skipped:
+            title = f"⚠  [forecast] forecast_check   SKIP   {fc.skip_reason}"
+            with Collapsible(title=title):
+                yield Static("No Open-Meteo Solar Forecast data found on configured entities.")
+            return
+
+        mark = "✓" if fc.overall_ok else "✗"
+        status = "PASS" if fc.overall_ok else "FAIL"
+        title = f"{mark}  [forecast] forecast_check   {status}   Tested {fc.n_arrays} array(s)"
+
+        with Collapsible(title=title):
+            yield Static("  ─── Arrays ───")
+            for eid in fc.array_eids:
+                yield Static(f"    • {eid}")
+            yield Static("")
+
+            yield Static("  ─── Raw entity data ───")
+
+            for es in fc.entity_slots:
+                unit = "W" if es.resolution_min == 15 else "Wh"
+                label = f"{es.resolution_min}min"
+                yield Static(
+                    f"    {es.entity_id}  [{es.day_label} | {label}]   total: {es.total_kwh:.4f} kWh"
+                )
+                if es.day_label in ("today", "tomorrow") and es.slots:
+                    non_zero = [(dt, w) for dt, w in es.slots if w > 0]
+                    if non_zero:
+                        parts = [f"{dt.strftime('%H:%M')} {w:.0f}{unit}" for dt, w in non_zero[:18]]
+                        if len(non_zero) > 18:
+                            parts.append(f"…+{len(non_zero) - 18}")
+                        yield Static(f"      {' │ '.join(parts)}")
+
+            yield Static("")
+            yield Static("  Combined expected totals from raw entities:")
+            for day_label, _ in [("today", None), ("tomorrow", None)] + [(f"d{n}", None) for n in range(2, 7)]:
+                exp = fc.expected_totals.get(day_label, 0.0)
+                yield Static(f"    {day_label:10s}  {exp:.4f} kWh")
+
+            if fc.module_today_remaining_kwh is not None:
+                yield Static(f"  Module today_remaining_kwh: {fc.module_today_remaining_kwh:.4f} kWh")
+
+            yield Static("")
+
+            yield Static("  ─── Module output (GenerationSeries) ───")
+            yield Static(f"    slot_count: {fc.module_slot_count}")
+            yield Static("")
+            yield Static("    day        expected      module        check")
+            yield Static("    " + "─" * 54)
+
+            for day_label, _ in [("today", None), ("tomorrow", None)] + [(f"d{n}", None) for n in range(2, 7)]:
+                exp = fc.expected_totals.get(day_label, 0.0)
+                act = fc.module_totals.get(day_label, 0.0)
+                is_mismatch = day_label in fc.mismatches
+                if is_mismatch:
+                    check_mark = "✗ MISMATCH"
+                    line = f"    [red]{day_label:10s}  {exp:9.4f} kWh  {act:9.4f} kWh  {check_mark}[/red]"
+                else:
+                    check_mark = "✓"
+                    line = f"    [green]{day_label:10s}  {exp:9.4f} kWh  {act:9.4f} kWh  {check_mark}[/green]"
+                yield Static(line, markup=True)
+
+
+# ---------------------------------------------------------------------------
+# Textual TUI — main app
+# ---------------------------------------------------------------------------
+
+
+class IntegrationCheckApp(App):
+    TITLE = "sunSale Integration Check"
+    BINDINGS = [("q", "quit", "Quit")]
+    CSS = """
+    Screen { background: $background; }
+    ScrollableContainer { padding: 1 2; }
+    """
+
+    def __init__(
+        self,
+        report: list[tuple[Snapshot, list[CheckResult]]],
+        forecast_results: dict[str, ForecastCheckResult],
+    ) -> None:
+        super().__init__()
+        self._report = report
+        self._forecast_results = forecast_results
+        self.exit_code = 0
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with ScrollableContainer():
+            for snap, results in self._report:
+                fc = self._forecast_results.get(snap.entry_id)
+
+                cur_cat: str | None = None
+                for res in results:
+                    if res.category == "forecast":
+                        continue
+                    if res.category != cur_cat:
+                        yield Static(f"  [dim][{res.category}][/dim]", markup=True)
+                        cur_cat = res.category
+                    icon = "[green]✓[/green]" if res.ok else "[red]✗[/red]"
+                    detail = res.detail[:90]
+                    yield Static(f"  {icon}  {res.name}  [dim]{detail}[/dim]", markup=True)
+
+                if fc is not None:
+                    yield Static("  [dim][forecast][/dim]", markup=True)
+                    yield ForecastCheck(fc)
+
+                yield Rule()
+
+            non_fc_total = sum(
+                1 for _, rs in self._report for r in rs if r.category != "forecast"
+            )
+            non_fc_passed = sum(
+                1 for _, rs in self._report for r in rs
+                if r.category != "forecast" and r.ok
+            )
+            fc_total = sum(1 for fc in self._forecast_results.values() if not fc.skipped)
+            fc_passed = sum(
+                1 for fc in self._forecast_results.values()
+                if not fc.skipped and fc.overall_ok
+            )
+            all_total = non_fc_total + fc_total
+            all_passed = non_fc_passed + fc_passed
+            color = "green" if all_passed == all_total else "red"
+            yield Static(
+                f"  [{color}]{all_passed}/{all_total} checks passed[/{color}]",
+                markup=True,
+            )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        any_failed = any(
+            not r.ok for _, rs in self._report for r in rs if r.category != "forecast"
+        )
+        any_fc_failed = any(
+            not fc.overall_ok and not fc.skipped for fc in self._forecast_results.values()
+        )
+        self.exit_code = 1 if (any_failed or any_fc_failed) else 0
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -428,8 +746,6 @@ def render_json(report: list[tuple[Snapshot, list[CheckResult]]]) -> str:
 # Values dump
 # ---------------------------------------------------------------------------
 
-# Keys inside debug["inputs"] that are integration-level configuration rather
-# than values consumed by a module each cycle.
 _INTEGRATION_INPUT_KEYS = frozenset({"tariff_config"})
 
 
@@ -439,17 +755,6 @@ def _section(title: str, payload: Any) -> str:
 
 
 def render_values(snapshots: list[Snapshot]) -> str:
-    """Group every value the debug snapshot carries into three sections:
-
-      * INTEGRATION — config (entity bindings, tariff, etc.)
-      * CONSUMED    — raw HA entity states + translator-produced primary types
-      * EXPOSED     — pipeline secondary types + outputs + dispatch state
-
-    Within each section every key/value is printed as JSON so nothing is
-    truncated. Keys present in the coordinator-data dict but not surfaced
-    by `/api/sun_sale/debug` won't appear here — extend `debug_view.py` to
-    cover them.
-    """
     parts: list[str] = []
     for snap in snapshots:
         debug = snap.debug
@@ -493,7 +798,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="sunSale integration validation harness")
     p.add_argument("--url", default=os.environ.get("HA_URL", DEFAULT_HA_URL))
     p.add_argument("--token", default=os.environ.get("HA_TOKEN", DEFAULT_HA_TOKEN))
-    p.add_argument("--json", action="store_true", help="emit JSON report")
+    p.add_argument("--json", action="store_true", help="emit JSON report (no TUI)")
     p.add_argument("--filter", help="only run checks in this category")
     p.add_argument("--dump-snapshot", action="store_true", help="print raw snapshot then exit")
     p.add_argument(
@@ -526,9 +831,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     report = run_checks(snapshots, args.filter)
-    print(render_json(report) if args.json else render_text(report))
-    any_failed = any(not r.ok for _, results in report for r in results)
-    return 1 if any_failed else 0
+
+    if args.json:
+        print(render_json(report))
+        any_failed = any(not r.ok for _, results in report for r in results)
+        return 1 if any_failed else 0
+
+    forecast_results = {snap.entry_id: check_forecast(snap) for snap in snapshots}
+    app = IntegrationCheckApp(report, forecast_results)
+    app.run()
+    return app.exit_code
 
 
 if __name__ == "__main__":

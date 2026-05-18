@@ -133,7 +133,7 @@ class GenerationNode(DagNode):
     ) -> tuple[GenerationSeries, list[ControlEvent]]:
         solar = ctx.require(SolarData)
         price_series = ctx.require(PriceSeries)
-        gen = forecast_module.build_generation_series(solar, price_series, now=ctx.now)
+        gen = forecast_module.build_generation_series(solar, price_series.slots, now=ctx.now)
         return gen, []
 
 
@@ -155,7 +155,7 @@ class ObservedGenerationNode(DagNode):
         history = ctx.require(GenerationHistory)
         price_series = ctx.require(PriceSeries)
         series = generation_module.build_observed_generation_series(
-            history, price_series, now=ctx.now
+            history, price_series.slots, now=ctx.now
         )
         return series, []
 

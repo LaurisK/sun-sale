@@ -37,12 +37,7 @@ def _obs_slot(hour: int, kwh: float) -> ObservedGenerationSlot:
 
 
 def _forecast(*slots: GenerationSlot) -> GenerationSeries:
-    return GenerationSeries(
-        slots=tuple(slots),
-        primary="open_meteo",
-        overlays=(),
-        computed_at=NOW,
-    )
+    return GenerationSeries(slots=tuple(slots))
 
 
 def _observed(*slots: ObservedGenerationSlot) -> ObservedGenerationSeries:

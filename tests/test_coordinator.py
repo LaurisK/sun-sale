@@ -202,7 +202,7 @@ def _make_pipeline_data() -> dict:
     now = BASE
     prices = [make_price(h, 0.10) for h in range(4)]
     ps = build_price_series(prices, default_tariff_config(), now=now)
-    gen = GenerationSeries(slots=(), primary="none", overlays=(), computed_at=now)
+    gen = GenerationSeries(slots=())
     bs = default_battery_state()
     calc = calculate(ps, gen, bs, now)
     bc = default_battery_config()

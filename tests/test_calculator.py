@@ -22,11 +22,11 @@ def _gen_series(hour_kwh: dict[int, float]) -> GenerationSeries:
         )
         for h, kwh in sorted(hour_kwh.items())
     )
-    return GenerationSeries(slots=slots, primary="forecast_solar", overlays=(), computed_at=NOW)
+    return GenerationSeries(slots=slots)
 
 
 def _empty_gen() -> GenerationSeries:
-    return GenerationSeries(slots=(), primary="none", overlays=(), computed_at=NOW)
+    return GenerationSeries(slots=())
 
 
 def run(prices, gen=None, battery_state=None):

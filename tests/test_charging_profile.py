@@ -46,12 +46,7 @@ def _price_slot(hour: int, sell: float, buy: float = 0.20) -> PriceSlot:
 
 
 def _gen_series(slots: list[GenerationSlot]) -> GenerationSeries:
-    return GenerationSeries(
-        slots=tuple(slots),
-        primary="open_meteo",
-        overlays=(),
-        computed_at=NOW,
-    )
+    return GenerationSeries(slots=tuple(slots))
 
 
 def _price_series(slots: list[PriceSlot]) -> PriceSeries:

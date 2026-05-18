@@ -49,7 +49,7 @@ def _make_price_series() -> PriceSeries:
 
 
 def _make_gen_series() -> GenerationSeries:
-    return GenerationSeries(slots=(), primary="none", overlays=(), computed_at=NOW)
+    return GenerationSeries(slots=())
 
 
 def _make_calculation(price_series: PriceSeries) -> CalculationResult:
@@ -181,7 +181,6 @@ def test_pipeline_forecast_present():
     result = _coordinator_to_dict("e", coord)
     forecast = result["pipeline"]["forecast"]
     assert forecast is not None
-    assert forecast["primary"] == "none"
     assert forecast["slots"] == []
 
 

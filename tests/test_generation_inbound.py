@@ -51,7 +51,7 @@ def _reading(t: datetime, kwh: float) -> GenerationReading:
 
 def test_empty_history_yields_empty_series():
     series = build_observed_generation_series(
-        GenerationHistory(samples=()), _empty_hourly_today(), now=NOW
+        GenerationHistory(samples=()), _empty_hourly_today().slots, now=NOW
     )
     assert series.slots == ()
     assert series.total_yesterday_kwh == 0.0
@@ -60,18 +60,17 @@ def test_empty_history_yields_empty_series():
 
 def test_single_sample_cannot_be_differenced():
     history = GenerationHistory(samples=(_reading(NOW.replace(hour=10), 1.0),))
-    series = build_observed_generation_series(history, _empty_hourly_today(), now=NOW)
+    series = build_observed_generation_series(history, _empty_hourly_today().slots, now=NOW)
     assert series.slots == ()
 
 
 def test_empty_price_grid_yields_empty_series():
     base = NOW
-    empty_grid = PriceSeries(slots=(), resolution=timedelta(hours=1), computed_at=NOW)
     history = GenerationHistory(samples=(
         _reading(base, 0.0),
         _reading(base + timedelta(hours=1), 2.0),
     ))
-    series = build_observed_generation_series(history, empty_grid, now=NOW)
+    series = build_observed_generation_series(history, (), now=NOW)
     assert series.slots == ()
 
 
@@ -86,7 +85,7 @@ def test_one_interval_fully_inside_one_slot():
         _reading(NOW.replace(hour=10), 0.0),
         _reading(NOW.replace(hour=11), 2.0),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     by_hour = {(s.start.date(), s.start.hour): s.generated_kwh for s in series.slots}
     assert abs(by_hour[(TODAY, 10)] - 2.0) < 1e-6
     # Other today slots are zero
@@ -100,7 +99,7 @@ def test_interval_spanning_two_slots_split_by_overlap():
         _reading(NOW.replace(hour=10, minute=30), 0.0),
         _reading(NOW.replace(hour=11, minute=30), 4.0),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     by_hour = {(s.start.date(), s.start.hour): s.generated_kwh for s in series.slots}
     assert abs(by_hour[(TODAY, 10)] - 2.0) < 1e-6
     assert abs(by_hour[(TODAY, 11)] - 2.0) < 1e-6
@@ -114,7 +113,7 @@ def test_multiple_intervals_aggregate_within_slot():
         _reading(NOW.replace(hour=10, minute=15), 0.5),
         _reading(NOW.replace(hour=10, minute=30), 1.2),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     slot_10 = next(s for s in series.slots if s.start == NOW.replace(hour=10))
     assert abs(slot_10.generated_kwh - 1.2) < 1e-6
 
@@ -136,7 +135,7 @@ def test_reset_handled_by_per_day_grouping():
         _reading(NOW.replace(hour=0, minute=30), 0.5),
         _reading(NOW.replace(hour=1, minute=30), 1.5),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     by_hour = {(s.start.date(), s.start.hour): s.generated_kwh for s in series.slots}
     # Yesterday hour-20 covered the 6→8 delta = 2 kWh
     assert abs(by_hour[(YESTERDAY, 20)] - 2.0) < 1e-6
@@ -161,7 +160,7 @@ def test_slots_in_tomorrow_excluded():
         _reading(NOW.replace(hour=8), 0.0),
         _reading(NOW.replace(hour=9), 1.5),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     tomorrow_date = (TODAY + timedelta(days=1))
     assert all(s.start.date() != tomorrow_date for s in series.slots)
 
@@ -172,7 +171,7 @@ def test_slots_starting_at_or_after_now_excluded():
         _reading(NOW.replace(hour=9), 0.0),
         _reading(NOW.replace(hour=10), 1.0),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     # Hour-10 slot starts at 10:00 (< 10:30), so it's included.
     # Hour-11 starts at 11:00 (>= 10:30), so it's excluded.
     starts = {s.start for s in series.slots}
@@ -190,7 +189,7 @@ def test_slots_before_yesterday_midnight_excluded():
         _reading(NOW.replace(hour=8), 0.0),
         _reading(NOW.replace(hour=9), 1.0),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     assert all(s.start >= NOW - timedelta(days=1) for s in series.slots)
 
 
@@ -207,7 +206,7 @@ def test_totals_split_between_yesterday_and_today():
         _reading(NOW.replace(hour=10), 0.0),
         _reading(NOW.replace(hour=11), 2.0),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     assert abs(series.total_yesterday_kwh - 3.0) < 1e-6
     assert abs(series.total_today_so_far_kwh - 2.0) < 1e-6
 
@@ -218,7 +217,7 @@ def test_source_is_inverter_on_every_slot():
         _reading(NOW.replace(hour=10), 0.0),
         _reading(NOW.replace(hour=11), 1.0),
     ))
-    series = build_observed_generation_series(history, _hourly_72h_price_series(), now=now)
+    series = build_observed_generation_series(history, _hourly_72h_price_series().slots, now=now)
     assert all(s.source == "inverter" for s in series.slots)
 
 
@@ -242,7 +241,7 @@ def test_resamples_onto_quarter_hour_grid():
         _reading(NOW.replace(hour=10), 0.0),
         _reading(NOW.replace(hour=11), 4.0),
     ))
-    series = build_observed_generation_series(history, ps, now=now)
+    series = build_observed_generation_series(history, ps.slots, now=now)
     slots_10 = [s for s in series.slots if NOW.replace(hour=10) <= s.start < NOW.replace(hour=11)]
     assert len(slots_10) == 4
     for s in slots_10:
