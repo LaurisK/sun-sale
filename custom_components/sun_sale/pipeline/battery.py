@@ -11,10 +11,17 @@ from ..contract.models import BatteryConfig, BatteryState, CapacityObservation
 
 
 def degradation_cost_per_kwh(config: BatteryConfig, state: BatteryState) -> float:
-    """Cost of cycling 1 kWh through the battery.
+    """Compute the wear cost per kWh cycled through the battery.
 
-    = purchase_price / (rated_cycle_life * estimated_capacity_kwh * 2)
+    Formula: purchase_price / (rated_cycle_life * estimated_capacity_kwh * 2).
     The *2 accounts for one full cycle = one charge + one discharge.
+
+    Args:
+        config: Battery configuration including purchase price and cycle life.
+        state: Current battery state containing the learned capacity estimate.
+
+    Returns:
+        Degradation cost in EUR/kWh.
     """
     return config.purchase_price_eur / (
         config.rated_cycle_life * state.estimated_capacity_kwh * 2.0
@@ -27,10 +34,19 @@ def trade_profit_per_kwh(
     deg_cost: float,
     efficiency: float,
 ) -> float:
-    """Net profit per kWh stored: sell_revenue - buy_cost - degradation.
+    """Compute net profit per kWh charged: sell_revenue - buy_cost - degradation.
 
     Degradation is counted twice (once charging, once discharging).
     Efficiency reduces the kWh available to sell.
+
+    Args:
+        buy_tariff: Effective buy price in EUR/kWh.
+        sell_tariff: Effective sell price in EUR/kWh.
+        deg_cost: Degradation cost per kWh (from degradation_cost_per_kwh).
+        efficiency: Round-trip efficiency (0.0–1.0).
+
+    Returns:
+        Net profit in EUR per kWh charged; negative means unprofitable.
     """
     return sell_tariff * efficiency - buy_tariff - deg_cost * 2.0
 
@@ -49,11 +65,23 @@ class CapacityEstimator:
         nominal_capacity_kwh: float,
         observations: list[CapacityObservation] | None = None,
     ) -> None:
+        """Initialise estimator with the nameplate capacity and optional history.
+
+        Args:
+            nominal_capacity_kwh: Nameplate battery capacity; used as fallback
+                when no observations are available.
+            observations: Previously recorded charge/discharge observations to
+                seed the estimator on startup.
+        """
         self._nominal = nominal_capacity_kwh
         self._observations: list[CapacityObservation] = list(observations or [])
 
     def add_observation(self, obs: CapacityObservation) -> None:
-        """Record one charge/discharge observation. Discards noisy small-delta data."""
+        """Record a charge/discharge observation; silently discards small SoC deltas.
+
+        Args:
+            obs: Observation to append; ignored when |soc_delta| < CAPACITY_OBS_MIN_SOC_DELTA.
+        """
         if abs(obs.soc_end - obs.soc_start) < CAPACITY_OBS_MIN_SOC_DELTA:
             return
         self._observations.append(obs)
@@ -97,7 +125,14 @@ class CapacityEstimator:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CapacityEstimator":
-        """Deserialize from HA persistent storage."""
+        """Deserialise from the HA persistent-storage dict format.
+
+        Args:
+            data: Dict previously produced by to_dict().
+
+        Returns:
+            Restored CapacityEstimator with all historical observations.
+        """
         observations = [
             CapacityObservation(
                 timestamp=datetime.fromisoformat(o["timestamp"]),

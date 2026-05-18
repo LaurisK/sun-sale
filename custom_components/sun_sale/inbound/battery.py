@@ -26,7 +26,15 @@ def build_battery_status(
     reading: BatteryReading,
     config: BatteryConfig,
 ) -> BatteryStatus:
-    """Combine live telemetry with configured limits into a BatteryStatus."""
+    """Combine live inverter telemetry with configured limits into a BatteryStatus snapshot.
+
+    Args:
+        reading: Current per-cycle inverter reading (SoC, power).
+        config: Battery configuration (nominal capacity, power limits).
+
+    Returns:
+        BatteryStatus with remaining_capacity_kwh derived from SoC × nominal capacity.
+    """
     return BatteryStatus(
         total_capacity_kwh=config.nominal_capacity_kwh,
         max_charge_power_kw=config.max_charge_power_kw,
@@ -41,6 +49,18 @@ def build_battery_status(
 # ---------------------------------------------------------------------------
 
 def _read_household_load(hass: Any, entity_id: str) -> float:
+    """Read household load from a HA power sensor in watts; returns kW.
+
+    Falls back to _DEFAULT_HOUSEHOLD_LOAD_KW when the entity is absent,
+    unavailable, or unparseable, so downstream consumers always receive a number.
+
+    Args:
+        hass: Home Assistant instance.
+        entity_id: Entity ID of the household load sensor (watts); empty → fallback.
+
+    Returns:
+        Current household load in kW.
+    """
     if not entity_id:
         return _DEFAULT_HOUSEHOLD_LOAD_KW
     state = hass.states.get(entity_id)
@@ -62,12 +82,29 @@ class BatteryTranslator:
         inverter: InverterController,
         household_load_entity: str,
     ) -> None:
+        """Initialise translator with the inverter controller and load sensor entity.
+
+        Args:
+            inverter: Platform-agnostic inverter abstraction.
+            household_load_entity: HA entity ID of the household power sensor (watts).
+        """
         self._inverter = inverter
         self._load_entity = household_load_entity
 
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
     ) -> BatteryReading:
+        """Read inverter telemetry and household load; produce a BatteryReading.
+
+        Args:
+            hass: Home Assistant instance.
+            config: Structured SunSale config (unused here).
+            raw_config: Raw config-entry dict (unused here).
+            now: Cycle timestamp (unused here).
+
+        Returns:
+            BatteryReading with current SoC, power flows, and household load.
+        """
         soc = self._inverter.get_battery_soc()
         power_kw = self._inverter.get_battery_power()
         grid_kw = self._inverter.get_grid_power()

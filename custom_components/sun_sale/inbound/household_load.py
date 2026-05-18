@@ -20,11 +20,28 @@ class HouseholdLoadTranslator:
     output_type = HouseholdLoadReading
 
     def __init__(self, entity_id: str) -> None:
+        """Initialise with the HA entity ID of the household power sensor.
+
+        Args:
+            entity_id: Entity ID of the household load sensor (watts).
+        """
         self._entity_id = entity_id
 
     def parse(
         self, hass: Any, now: datetime | None = None
     ) -> HouseholdLoadReading | None:
+        """Read the household load sensor and return a timestamped reading in kW.
+
+        Returns None (not a fallback value) when the sensor is absent or
+        unavailable, so the persisted load history is not polluted.
+
+        Args:
+            hass: Home Assistant instance.
+            now: Snapshot timestamp; defaults to UTC now.
+
+        Returns:
+            HouseholdLoadReading in kW, or None when unavailable.
+        """
         if now is None:
             now = datetime.now(timezone.utc)
         if not self._entity_id:
@@ -43,4 +60,15 @@ class HouseholdLoadTranslator:
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
     ) -> HouseholdLoadReading | None:
+        """DAG translator entry-point; delegates to parse().
+
+        Args:
+            hass: Home Assistant instance.
+            config: Structured SunSale config (unused here).
+            raw_config: Raw config-entry dict (unused here).
+            now: Cycle timestamp.
+
+        Returns:
+            HouseholdLoadReading or None when unavailable.
+        """
         return self.parse(hass, now)

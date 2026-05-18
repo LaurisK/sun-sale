@@ -50,6 +50,15 @@ class InverterController:
         entity_ids: dict[str, str],
         battery_config: BatteryConfig | None = None,
     ) -> None:
+        """Initialise controller with platform, entity map, and optional battery config.
+
+        Args:
+            hass: Home Assistant instance for service calls and state reads.
+            platform: Inverter platform enum determining the dispatch path.
+            entity_ids: Platform-specific entity-ID map (see class docstring).
+            battery_config: Battery parameters for current/voltage calculations
+                (required for Solis; optional for other platforms).
+        """
         self._hass = hass
         self._platform = platform
         self._entity_ids = entity_ids
@@ -94,6 +103,16 @@ class InverterController:
     def _read_float(
         self, key: str, fallback: float, normalize_pct: bool = False
     ) -> float:
+        """Read a numeric HA sensor state; return fallback on any failure.
+
+        Args:
+            key: Entity-ID map key (e.g. "battery_soc").
+            fallback: Value returned when the entity is absent or unparseable.
+            normalize_pct: When True, divide values > 1.0 by 100 (% → fraction).
+
+        Returns:
+            Float sensor value, or fallback.
+        """
         entity_id = self._entity_ids.get(key, "")
         state = self._hass.states.get(entity_id)
         if state is None or state.state in ("unavailable", "unknown", ""):
@@ -107,6 +126,12 @@ class InverterController:
             return fallback
 
     async def _async_dispatch(self, mode: str, power_kw: float) -> None:
+        """Route a charge/discharge/idle command to the platform-specific handler.
+
+        Args:
+            mode: One of "charge", "discharge", or "idle".
+            power_kw: Requested power in kW (ignored for "idle").
+        """
         if self._platform == InverterPlatform.HUAWEI_SOLAR:
             # Huawei Solar: positive W = charge, negative W = discharge, 0 = idle
             if mode == "charge":

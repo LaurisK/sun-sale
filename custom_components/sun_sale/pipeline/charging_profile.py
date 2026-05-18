@@ -42,7 +42,18 @@ def build_charging_profile(
     battery_config: BatteryConfig,
     now: datetime,
 ) -> ChargingProfile:
-    """Produce a ChargingProfile for today's remaining slots."""
+    """Decide per-slot solar disposition (charge/sell/curtail) for today's remaining slots.
+
+    Args:
+        battery_status: Live SoC and configured capacity limits.
+        generation: Price-grid-aligned GenerationSeries (today slots consumed here).
+        prices: PriceSeries used to look up sell_eur_kwh per slot.
+        battery_config: Battery limits (min_soc, max_soc, capacity).
+        now: Cycle timestamp; only slots with start >= now are included.
+
+    Returns:
+        ChargingProfile with a ChargingProfileSlot per remaining today slot.
+    """
     free_capacity = max(
         0.0,
         (battery_config.max_soc - battery_status.soc) * battery_status.total_capacity_kwh,

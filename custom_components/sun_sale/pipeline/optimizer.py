@@ -35,9 +35,20 @@ def optimize_schedule(
     degradation_cost: float,
     now: datetime,
 ) -> Schedule:
-    """Produce an hourly action schedule that maximises profit.
+    """Produce a future action schedule that maximises profit via greedy pair-matching.
 
     Slots flagged sell_allowed=False in calc are excluded from discharge pairs.
+
+    Args:
+        price_series: Full 72h price series (only future slots are scheduled).
+        calc: Calculator output with per-slot sell_allowed flags and solar estimates.
+        battery_config: Battery limits (capacity, power, SoC bounds, efficiency).
+        battery_state: Current SoC and estimated usable capacity.
+        degradation_cost: EUR/kWh cycle wear cost (from DegradationNode).
+        now: Cycle timestamp; slots at or before now are skipped.
+
+    Returns:
+        Schedule with one ScheduleSlot per future price slot.
     """
     if not price_series.slots:
         return Schedule(slots=[], total_expected_profit_eur=0.0,
@@ -167,9 +178,18 @@ def _rank_trade_pairs(
     degradation_cost: float,
     efficiency: float,
 ) -> list[tuple[int, int, float]]:
-    """Return (buy_idx, sell_idx, profit_per_kwh) sorted by profit descending.
+    """Enumerate all profitable (buy, sell) index pairs sorted by profit descending.
 
     Sell slots with sell_allowed=False are excluded from the search.
+
+    Args:
+        slots: Future (price_slot, decision) pairs in chronological order.
+        degradation_cost: EUR/kWh wear cost applied to every trade.
+        efficiency: Round-trip efficiency (0.0–1.0).
+
+    Returns:
+        List of (buy_idx, sell_idx, profit_per_kwh) tuples, highest profit first.
+        Only positive-profit pairs are included.
     """
     pairs = []
     n = len(slots)
@@ -196,7 +216,18 @@ def _simulate_soc(
     min_soc: float,
     max_soc: float,
 ) -> list[float] | None:
-    """Forward-simulate SoC through a schedule. Returns None if any bound is violated."""
+    """Forward-simulate SoC through a committed-kWh schedule.
+
+    Args:
+        committed_kwh: Per-slot net energy (positive = charge, negative = discharge).
+        initial_soc: Starting state-of-charge (0.0–1.0).
+        capacity: Usable battery capacity in kWh.
+        min_soc: Minimum permitted SoC (0.0–1.0).
+        max_soc: Maximum permitted SoC (0.0–1.0).
+
+    Returns:
+        Per-slot SoC values after each slot, or None if any bound is violated.
+    """
     soc = initial_soc
     result = []
     for kwh in committed_kwh:

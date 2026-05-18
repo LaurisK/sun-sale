@@ -30,7 +30,20 @@ def build_observed_generation_series(
     price_slots: tuple,
     now: datetime | None = None,
 ) -> ObservedGenerationSeries:
-    """Emit one slot per price-grid slot in [yesterday 00:00, now)."""
+    """Derive per-slot observed generation from persisted today-total counter samples.
+
+    Emits one ObservedGenerationSlot per price-grid slot in [yesterday 00:00, now).
+    Energy per slot is the difference of linearly-interpolated counter values at
+    slot boundaries.
+
+    Args:
+        history: Persisted rolling sample history of the today-total counter.
+        price_slots: Price-grid slots defining the output resolution.
+        now: Cycle timestamp; defaults to UTC now.
+
+    Returns:
+        ObservedGenerationSeries covering yesterday 00:00 → now, grid-aligned.
+    """
     if now is None:
         now = datetime.now(timezone.utc)
 
@@ -71,11 +84,17 @@ def build_observed_generation_series(
 def _group_samples_by_day(
     samples: tuple[GenerationReading, ...],
 ) -> dict[datetime, list[GenerationReading]]:
-    """Group samples by UTC-midnight day; keep only the post-last-reset segment.
+    """Group samples by UTC-midnight day, retaining only the post-last-reset segment.
 
     Within a day, a reset (curr.today_total_kwh < prev.today_total_kwh) starts
-    a new segment. We retain the segment ending the day so interpolation uses
+    a new segment. We keep the segment that ends the day so interpolation uses
     the live counter rather than a stale pre-reset value.
+
+    Args:
+        samples: Tuple of GenerationReadings in any order.
+
+    Returns:
+        Dict mapping each UTC-midnight datetime to its cleaned sample list.
     """
     by_day: dict[datetime, list[GenerationReading]] = {}
     for s in sorted(samples, key=lambda x: x.timestamp):
@@ -99,11 +118,18 @@ def _group_samples_by_day(
 def _total_at(
     t: datetime, samples_by_day: dict[datetime, list[GenerationReading]]
 ) -> float:
-    """Estimate the cumulative today-counter at time `t`.
+    """Estimate the cumulative today-total counter value at time t via linear interpolation.
 
-    Anchored at (UTC midnight, 0); linearly interpolated to the first sample
-    of the day; linearly interpolated between adjacent samples; clamped to the
-    last sample's value after it. Returns 0 when the day has no samples.
+    Anchored at (UTC midnight, 0.0); linearly interpolated to the first sample;
+    linearly interpolated between adjacent samples; clamped to the last sample
+    after it. Returns 0.0 when the day has no samples.
+
+    Args:
+        t: Time at which to estimate the counter (tz-aware UTC).
+        samples_by_day: Output of _group_samples_by_day.
+
+    Returns:
+        Estimated cumulative kWh at time t.
     """
     day = _utc_midnight(t)
     day_samples = samples_by_day.get(day)
@@ -137,6 +163,15 @@ def _total_at(
 def _compute_totals(
     slots: list[ObservedGenerationSlot], now: datetime
 ) -> dict[str, float]:
+    """Sum observed generation slots into yesterday/today totals.
+
+    Args:
+        slots: ObservedGenerationSlots in any order.
+        now: Reference time used to determine today's and yesterday's dates.
+
+    Returns:
+        Dict with keys "yesterday" and "today" in kWh.
+    """
     today = now.date()
     yesterday = today - timedelta(days=1)
     yest_sum = 0.0
@@ -151,6 +186,14 @@ def _compute_totals(
 
 
 def _utc_midnight(t: datetime) -> datetime:
+    """Return the UTC midnight (00:00:00 UTC) of the day containing t.
+
+    Args:
+        t: Any datetime (tz-aware or naive; naive treated as UTC).
+
+    Returns:
+        Timezone-aware UTC datetime at midnight of t's UTC date.
+    """
     return datetime(t.year, t.month, t.day, 0, 0, 0, tzinfo=timezone.utc)
 
 
@@ -170,9 +213,24 @@ class GenerationTranslator:
     output_type = GenerationReading
 
     def __init__(self, entity_id: str) -> None:
+        """Initialise with the HA entity ID of the inverter solar-energy today sensor.
+
+        Args:
+            entity_id: Entity ID of the cumulative today-total kWh sensor.
+        """
         self._entity_id = entity_id
 
     def parse(self, hass: Any, now: datetime | None = None) -> GenerationReading | None:
+        """Read the today-total sensor and return a timestamped snapshot.
+
+        Args:
+            hass: Home Assistant instance.
+            now: Snapshot timestamp; defaults to UTC now.
+
+        Returns:
+            GenerationReading with the current counter value, or None when the
+            entity is absent, unavailable, or not configured.
+        """
         if now is None:
             now = datetime.now(timezone.utc)
         if not self._entity_id:
@@ -189,4 +247,15 @@ class GenerationTranslator:
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
     ) -> GenerationReading | None:
+        """DAG translator entry-point; delegates to parse().
+
+        Args:
+            hass: Home Assistant instance.
+            config: Structured SunSale config (unused here).
+            raw_config: Raw config-entry dict (unused here).
+            now: Cycle timestamp.
+
+        Returns:
+            GenerationReading or None when the sensor is unavailable.
+        """
         return self.parse(hass, now)

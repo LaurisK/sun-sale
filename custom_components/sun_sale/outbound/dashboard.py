@@ -29,6 +29,14 @@ _SLOT_H = _SLOT_MIN / 60.0
 
 
 def _floor_15min(dt: datetime) -> datetime:
+    """Truncate datetime to the nearest 15-minute boundary.
+
+    Args:
+        dt: Any datetime (tz-aware or naive).
+
+    Returns:
+        datetime with minutes floored to 0, 15, 30, or 45 and seconds cleared.
+    """
     return dt.replace(minute=(dt.minute // 15) * 15, second=0, microsecond=0)
 
 
@@ -80,6 +88,16 @@ def _project_soc(
     net_batt_kwh: float,
     battery_config: BatteryConfig,
 ) -> float:
+    """Apply a net energy delta to a SoC percentage and clamp to configured limits.
+
+    Args:
+        soc_pct: Current SoC in percent (0–100).
+        net_batt_kwh: Net kWh delta over the 15-min slot (positive = charging).
+        battery_config: Battery limits and round-trip efficiency.
+
+    Returns:
+        Updated SoC in percent, clamped to [min_soc*100, max_soc*100].
+    """
     eff = battery_config.round_trip_efficiency
     delta = net_batt_kwh * eff if net_batt_kwh >= 0 else net_batt_kwh / eff
     new_soc = soc_pct + (delta / battery_config.nominal_capacity_kwh) * 100.0
@@ -98,10 +116,24 @@ def build_future_slots(
     tariff_config: TariffConfig,
     now: datetime,
 ) -> list[dict[str, Any]]:
-    """Build 15-min future slots from now to end of local-tomorrow.
+    """Build 15-min dashboard slots from now through end of local tomorrow+1.
 
-    Each slot: {t, buy_price, sell_price, solar_forecast_w, battery_soc_pct,
-                inverter_mode, grid_operation}
+    Each slot dict: {t, buy_price, sell_price, solar_forecast_w,
+                     solar_forecast_kwh, battery_soc_pct, inverter_mode,
+                     grid_operation}.
+
+    Args:
+        nordpool: Nordpool entries used to look up spot prices per 15-min step.
+        solar: SolarData entries used to derive per-step watts.
+        reading: Current BatteryReading (SoC and household load).
+        schedule: Optimizer schedule or None; controls inverter_mode derivation.
+        battery_config: Battery limits for SoC projection and clamping.
+        tariff_config: Tariff parameters for buy/sell price calculation.
+        now: Cycle start timestamp.
+
+    Returns:
+        List of slot dicts covering now → end of day+2 UTC, skipping slots
+        with no Nordpool price coverage.
     """
     sched_by_hour: dict[datetime, ScheduleSlot] = {}
     if schedule:
@@ -155,12 +187,18 @@ def build_solar_frozen_forecast(
     solar: SolarData,
     now: datetime,
 ) -> list[dict[str, Any]]:
-    """Return the yesterday/today/tomorrow solar forecast as
-    [{t_ms, forecast_w, forecast_kwh}]. Yesterday is included so the chart
-    can render the full 72 h window — yesterday's entries come from the
-    coordinator's persisted yesterday store (re-attached to `solar.entries`
-    on each cycle); today and tomorrow come straight from the live HA
-    forecast entities.
+    """Return the 72h solar forecast as [{t_ms, forecast_w, forecast_kwh}].
+
+    Covers yesterday/today/tomorrow. Yesterday's entries come from the
+    coordinator's persisted yesterday store re-attached to solar.entries;
+    today and tomorrow come from the live HA forecast entities.
+
+    Args:
+        solar: SolarData with entries spanning yesterday through tomorrow.
+        now: Cycle timestamp used to derive the 3-day window.
+
+    Returns:
+        List of dicts with t_ms (epoch ms), forecast_w, and forecast_kwh.
     """
     today = now.date()
     yesterday = today - timedelta(days=1)

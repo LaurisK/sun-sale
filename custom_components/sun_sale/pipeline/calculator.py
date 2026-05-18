@@ -22,12 +22,21 @@ def calculate(
     battery_state: BatteryState,
     now: datetime,
 ) -> CalculationResult:
-    """Produce a CalculationResult from price and generation data.
+    """Derive per-slot decision flags and feed-in lockout windows from price/generation data.
 
     v1 responsibility: feed-in lockout.
       - Slots with sell_eur_kwh <= 0 are flagged sell_allowed=False.
       - Contiguous locked-out slots are coalesced into feed_in_lockout_windows.
       - Expected solar production in locked-out slots is reported (no decision taken).
+
+    Args:
+        prices: Full PriceSeries covering the scheduling horizon.
+        generation: Expected solar generation aligned to the price grid.
+        battery_state: Current SoC and estimated capacity (for headroom check).
+        now: Cycle timestamp.
+
+    Returns:
+        CalculationResult with per-slot SlotDecisions and coalesced lockout windows.
     """
     slots: list[SlotDecision] = []
 
@@ -71,6 +80,14 @@ def calculate(
 def _coalesce_lockout_windows(
     slots: list[SlotDecision],
 ) -> tuple[tuple[datetime, datetime], ...]:
+    """Merge contiguous sell_allowed=False slots into (start, end) windows.
+
+    Args:
+        slots: Per-slot decisions in chronological order.
+
+    Returns:
+        Tuple of (window_start, window_end) pairs for each contiguous locked-out run.
+    """
     windows: list[tuple[datetime, datetime]] = []
     win_start: datetime | None = None
     win_end: datetime | None = None

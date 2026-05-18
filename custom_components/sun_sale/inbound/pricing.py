@@ -31,10 +31,19 @@ def build_price_series(
     now: datetime | None = None,
     resolution: timedelta | None = None,
 ) -> PriceSeries:
-    """Apply tariff formulas to a list of Nordpool entries → PriceSeries.
+    """Apply tariff formulas to Nordpool entries and return a PriceSeries.
 
-    If `resolution` is provided it is recorded verbatim; otherwise it is
+    If resolution is provided it is recorded verbatim; otherwise it is
     derived from the first two slots (or defaults to 1h for single-slot input).
+
+    Args:
+        prices: Sorted Nordpool price entries.
+        config: User-configured tariff parameters.
+        now: Cycle timestamp for computed_at; defaults to UTC now.
+        resolution: Slot resolution override; auto-detected from data when None.
+
+    Returns:
+        PriceSeries with buy/sell/spot populated for each entry.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -68,12 +77,20 @@ def build_price_series_72h(
     config: TariffConfig,
     now: datetime | None = None,
 ) -> PriceSeries:
-    """Assemble the full yesterday→today→tomorrow PriceSeries.
+    """Assemble the 72h yesterday→today→tomorrow PriceSeries with tariff applied.
 
     Combines persisted yesterday entries with today+tomorrow from the Nordpool
-    translator, then applies the tariff. Resolution is taken from
-    `nordpool.resolution` so the inbound translator stays the single source of
-    truth for slot granularity.
+    translator. Resolution is taken from nordpool.resolution so the translator
+    remains the single source of truth for slot granularity.
+
+    Args:
+        nordpool: Today + tomorrow entries from NordpoolTranslator.
+        yesterday: Persisted yesterday entries from the coordinator store.
+        config: User-configured tariff parameters.
+        now: Cycle timestamp; defaults to UTC now.
+
+    Returns:
+        PriceSeries spanning yesterday 00:00 → tomorrow 23:59.
     """
     combined = list(yesterday.entries) + list(nordpool.entries)
     return build_price_series(combined, config, now=now, resolution=nordpool.resolution)
@@ -86,13 +103,19 @@ def build_price_series_72h(
 def _zero_fill_tomorrow(
     entries: list[PriceEntry], resolution: timedelta, now: datetime
 ) -> list[PriceEntry]:
-    """Pad with zero-price entries so the series covers 48h from its first slot.
+    """Extend the entry list with zero-price stubs so the series spans 48h from its start.
 
-    Nordpool reports in local time; deriving "tomorrow" from a UTC date leaves
-    a gap whenever the local day starts before UTC midnight (e.g. raw_tomorrow
-    is published an hour early). Filling from the last entry's end until
-    first_start + 48h is timezone- and resolution-agnostic and never opens a
-    gap regardless of how much of `raw_tomorrow` has been published.
+    Nordpool reports in local time; deriving "tomorrow" from a UTC date can leave
+    a gap when the local day starts before UTC midnight. Filling forward from the
+    last entry's end to first_start + 48h is timezone- and resolution-agnostic.
+
+    Args:
+        entries: Existing price entries (must not be empty).
+        resolution: Slot duration to use for stub entries.
+        now: Unused; kept for signature compatibility.
+
+    Returns:
+        entries extended with zero-price PriceEntry stubs up to 48h coverage.
     """
     if not entries:
         return entries
@@ -121,10 +144,26 @@ class NordpoolTranslator:
     output_type = NordpoolData
 
     def __init__(self, entity_id: str) -> None:
+        """Initialise with the HA entity ID of the Nordpool sensor.
+
+        Args:
+            entity_id: HA entity ID (e.g. "sensor.nordpool_kwh_lt_eur_3_10_025").
+        """
         self._entity_id = entity_id
 
     def parse(self, hass: Any, now: datetime | None = None) -> NordpoolData:
-        """Parse Nordpool state into NordpoolData (today + tomorrow). Sync; callable from tests."""
+        """Parse the Nordpool HA sensor state into NordpoolData (today + tomorrow).
+
+        Synchronous; callable directly from tests.
+
+        Args:
+            hass: Home Assistant instance.
+            now: Reference time for zero-fill logic; defaults to UTC now.
+
+        Returns:
+            NordpoolData with today + tomorrow entries zero-filled to 48h.
+            Returns an empty NordpoolData on missing or unparseable state.
+        """
         if now is None:
             now = datetime.now(timezone.utc)
 
@@ -145,6 +184,15 @@ class NordpoolTranslator:
         return self._parse_legacy(state, now)
 
     def _parse_raw_entries(self, raw_entries: list[dict], now: datetime) -> NordpoolData:
+        """Parse the modern raw_today/raw_tomorrow dict-list format.
+
+        Args:
+            raw_entries: Combined list of {"start": …, "value": …} dicts.
+            now: Reference time for zero-fill.
+
+        Returns:
+            NordpoolData with auto-detected resolution and 48h zero-fill.
+        """
         parsed: list[tuple[datetime, float]] = []
         for entry in raw_entries:
             try:
@@ -173,7 +221,15 @@ class NordpoolTranslator:
         return NordpoolData(entries=entries, resolution=resolution)
 
     def _parse_legacy(self, state: Any, now: datetime) -> NordpoolData:
-        """Legacy format: flat list of up to 24 hourly prices per day."""
+        """Parse the legacy Nordpool sensor format (flat list of up to 24 hourly prices).
+
+        Args:
+            state: HA state object with today/tomorrow attributes.
+            now: Reference time for deriving base dates and zero-fill.
+
+        Returns:
+            NordpoolData at 1h resolution with 48h zero-fill.
+        """
         resolution = timedelta(hours=1)
         entries: list[PriceEntry] = []
         for offset, attr_key in enumerate(("today", "tomorrow")):
@@ -198,4 +254,15 @@ class NordpoolTranslator:
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
     ) -> NordpoolData:
+        """DAG translator entry-point; delegates to parse().
+
+        Args:
+            hass: Home Assistant instance.
+            config: Structured SunSale config (unused here).
+            raw_config: Raw config-entry dict (unused here).
+            now: Cycle timestamp.
+
+        Returns:
+            NordpoolData for today + tomorrow.
+        """
         return self.parse(hass, now)

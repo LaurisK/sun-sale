@@ -22,15 +22,31 @@ class EventRouter:
     """
 
     def __init__(self, inverter: InverterController) -> None:
+        """Initialise router with the inverter output adapter.
+
+        Args:
+            inverter: Platform-agnostic inverter controller.
+        """
         self._inverter = inverter
         self._last_inverter_key: str | None = None
         self.last_dispatched_action: str | None = None
 
     async def handle(self, event: ControlEvent) -> None:
+        """Dispatch a ControlEvent to the appropriate output adapter.
+
+        Args:
+            event: Event emitted by a DAG node; currently only InverterActionEvent
+                is handled; unknown types are silently ignored.
+        """
         if isinstance(event, InverterActionEvent):
             await self._handle_inverter(event)
 
     async def _handle_inverter(self, event: InverterActionEvent) -> None:
+        """Dispatch an InverterActionEvent, suppressing repeated identical commands.
+
+        Args:
+            event: Inverter action event with action type and power_kw.
+        """
         key = f"{event.action.value}:{event.power_kw:.3f}"
         if key == self._last_inverter_key:
             return

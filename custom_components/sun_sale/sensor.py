@@ -37,6 +37,13 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    """Create and register all sunSale sensor entities for a config entry.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: Config entry providing the coordinator reference.
+        async_add_entities: HA callback to register the entity list.
+    """
     coordinator: SunSaleCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([
         CurrentActionSensor(coordinator, entry),
@@ -61,15 +68,25 @@ async def async_setup_entry(
 
 
 class _BaseSensor(CoordinatorEntity, SensorEntity):
+    """Shared base for all sunSale sensor entities."""
+
     def __init__(
         self, coordinator: SunSaleCoordinator, entry: ConfigEntry, key: str
     ) -> None:
+        """Initialise with coordinator, config entry, and a unique key suffix.
+
+        Args:
+            coordinator: sunSale coordinator providing data updates.
+            entry: Config entry; its entry_id scopes the unique_id.
+            key: Suffix appended to entry_id to form the entity unique_id.
+        """
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._entry = entry
 
     @property
     def device_info(self) -> dict:
+        """Return device info grouping all sunSale entities under one device."""
         return {
             "identifiers": {(DOMAIN, self._entry.entry_id)},
             "name": "sunSale",
@@ -78,11 +95,13 @@ class _BaseSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def _schedule(self) -> Schedule | None:
+        """Return the current Schedule from coordinator data, or None."""
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("schedule")
 
     def _current_slot(self):
+        """Return the schedule slot active at the current time, or slots[0] as fallback."""
         schedule = self._schedule
         if not schedule or not schedule.slots:
             return None
@@ -93,6 +112,7 @@ class _BaseSensor(CoordinatorEntity, SensorEntity):
         )
 
     def _current_price_slot(self) -> PriceSlot | None:
+        """Return the PriceSlot covering the current time, or slots[0] as fallback."""
         if self.coordinator.data is None:
             return None
         pricing: PriceSeries | None = self.coordinator.data.get("pricing")
@@ -103,27 +123,35 @@ class _BaseSensor(CoordinatorEntity, SensorEntity):
 
 
 class CurrentActionSensor(_BaseSensor):
+    """Sensor reporting the battery action scheduled for the current hour."""
+
     _attr_name = "sunSale Current Action"
     _attr_icon = "mdi:lightning-bolt"
 
     def __init__(self, coordinator, entry):
+        """Initialise current-action sensor."""
         super().__init__(coordinator, entry, "current_action")
 
     @property
     def native_value(self) -> str:
+        """Return the current schedule slot's action string."""
         slot = self._current_slot()
         return slot.action.value if slot else Action.IDLE.value
 
 
 class NextActionSensor(_BaseSensor):
+    """Sensor reporting the next scheduled action that differs from the current one."""
+
     _attr_name = "sunSale Next Action"
     _attr_icon = "mdi:lightning-bolt-outline"
 
     def __init__(self, coordinator, entry):
+        """Initialise next-action sensor."""
         super().__init__(coordinator, entry, "next_action")
 
     @property
     def native_value(self) -> str:
+        """Return the next schedule action that differs from the current slot."""
         schedule = self._schedule
         if not schedule or not schedule.slots:
             return Action.IDLE.value
@@ -138,14 +166,18 @@ class NextActionSensor(_BaseSensor):
 
 
 class NextActionTimeSensor(_BaseSensor):
+    """Sensor reporting the start time of the next action change."""
+
     _attr_name = "sunSale Next Action Time"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(self, coordinator, entry):
+        """Initialise next-action-time sensor."""
         super().__init__(coordinator, entry, "next_action_time")
 
     @property
     def native_value(self) -> datetime | None:
+        """Return the start time of the next action that differs from the current slot."""
         schedule = self._schedule
         if not schedule or not schedule.slots:
             return None
@@ -160,16 +192,20 @@ class NextActionTimeSensor(_BaseSensor):
 
 
 class ExpectedProfitSensor(_BaseSensor):
+    """Sensor reporting the total expected profit for today from the schedule."""
+
     _attr_name = "sunSale Expected Profit Today"
     _attr_native_unit_of_measurement = "EUR"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:cash-plus"
 
     def __init__(self, coordinator, entry):
+        """Initialise expected-profit sensor."""
         super().__init__(coordinator, entry, "expected_profit")
 
     @property
     def native_value(self) -> float:
+        """Return the sum of expected_profit_eur across all today's schedule slots."""
         schedule = self._schedule
         if not schedule:
             return 0.0
@@ -181,76 +217,96 @@ class ExpectedProfitSensor(_BaseSensor):
 
 
 class DegradationCostSensor(_BaseSensor):
+    """Sensor reporting the current battery wear cost per kWh cycled."""
+
     _attr_name = "sunSale Degradation Cost"
     _attr_native_unit_of_measurement = "EUR/kWh"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:battery-minus"
 
     def __init__(self, coordinator, entry):
+        """Initialise degradation-cost sensor."""
         super().__init__(coordinator, entry, "degradation_cost")
 
     @property
     def native_value(self) -> float | None:
+        """Return the degradation cost in EUR/kWh."""
         if self.coordinator.data is None:
             return None
         return round(self.coordinator.data.get("degradation_cost", 0.0), 6)
 
 
 class EstimatedCapacitySensor(_BaseSensor):
+    """Sensor reporting the learned usable battery capacity in kWh."""
+
     _attr_name = "sunSale Estimated Battery Capacity"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_device_class = SensorDeviceClass.ENERGY_STORAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(self, coordinator, entry):
+        """Initialise estimated-capacity sensor."""
         super().__init__(coordinator, entry, "estimated_capacity")
 
     @property
     def native_value(self) -> float | None:
+        """Return the CapacityEstimator's current best-estimate in kWh."""
         if self.coordinator.data is None:
             return None
         return round(self.coordinator.data.get("estimated_capacity", 0.0), 2)
 
 
 class CurrentBuyPriceSensor(_BaseSensor):
+    """Sensor reporting the effective buy price for the current pricing slot."""
+
     _attr_name = "sunSale Current Buy Price"
     _attr_native_unit_of_measurement = "EUR/kWh"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:transmission-tower-import"
 
     def __init__(self, coordinator, entry):
+        """Initialise current-buy-price sensor."""
         super().__init__(coordinator, entry, "current_buy_price")
 
     @property
     def native_value(self) -> float | None:
+        """Return the current slot's buy_eur_kwh."""
         slot = self._current_price_slot()
         return round(slot.buy_eur_kwh, 4) if slot else None
 
 
 class CurrentSellPriceSensor(_BaseSensor):
+    """Sensor reporting the effective sell price for the current pricing slot."""
+
     _attr_name = "sunSale Current Sell Price"
     _attr_native_unit_of_measurement = "EUR/kWh"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:transmission-tower-export"
 
     def __init__(self, coordinator, entry):
+        """Initialise current-sell-price sensor."""
         super().__init__(coordinator, entry, "current_sell_price")
 
     @property
     def native_value(self) -> float | None:
+        """Return the current slot's sell_eur_kwh."""
         slot = self._current_price_slot()
         return round(slot.sell_eur_kwh, 4) if slot else None
 
 
 class ScheduleSensor(_BaseSensor):
+    """Sensor exposing the full optimized battery schedule as extra attributes."""
+
     _attr_name = "sunSale Schedule"
     _attr_icon = "mdi:calendar-clock"
 
     def __init__(self, coordinator, entry):
+        """Initialise schedule sensor."""
         super().__init__(coordinator, entry, "schedule")
 
     @property
     def native_value(self) -> str:
+        """Return the current schedule slot's action string."""
         schedule = self._schedule
         if not schedule or not schedule.slots:
             return Action.IDLE.value
@@ -259,6 +315,7 @@ class ScheduleSensor(_BaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the full schedule list and profit summary as attributes."""
         schedule = self._schedule
         if not schedule:
             return {}
@@ -292,10 +349,12 @@ class InverterModeSensor(_BaseSensor):
     _attr_icon = "mdi:solar-power-variant"
 
     def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise inverter-mode sensor."""
         super().__init__(coordinator, entry, "inverter_mode")
 
     @property
     def native_value(self) -> str:
+        """Return the inverter_mode string for the current 15-min dashboard slot."""
         if self.coordinator.data is None:
             return "idle"
         slots: list[dict] = self.coordinator.data.get("dashboard_slots", [])
@@ -316,14 +375,17 @@ class DashboardSensor(_BaseSensor):
     _attr_icon = "mdi:chart-timeline-variant"
 
     def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise dashboard sensor."""
         super().__init__(coordinator, entry, "dashboard")
 
     @property
     def native_value(self) -> str:
+        """Return "ok" when data is available, otherwise "unavailable"."""
         return "ok" if self.coordinator.data else "unavailable"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return pre-built dashboard slots, solar forecast, and battery summary."""
         if self.coordinator.data is None:
             return {}
         now = datetime.now(timezone.utc)
@@ -400,15 +462,26 @@ class PricingPipelineSensor(_BaseSensor):
     _attr_icon = "mdi:currency-eur"
 
     def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise pricing pipeline diagnostic sensor."""
         super().__init__(coordinator, entry, "pricing_pipeline")
 
     @property
     def native_value(self) -> int:
+        """Return the number of pricing slots available.
+
+        Returns:
+            Slot count, or 0 when no pricing data is present.
+        """
         pricing: PriceSeries | None = (self.coordinator.data or {}).get("pricing")
         return len(pricing.slots) if pricing else 0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return full pricing slot data and summary statistics.
+
+        Returns:
+            Dict with resolution, computed_at, buy/sell min/max, and per-slot detail.
+        """
         pricing: PriceSeries | None = (self.coordinator.data or {}).get("pricing")
         if not pricing:
             return {}
@@ -442,10 +515,16 @@ class ForecastPipelineSensor(_BaseSensor):
     _attr_icon = "mdi:solar-panel"
 
     def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise forecast pipeline diagnostic sensor."""
         super().__init__(coordinator, entry, "forecast_pipeline")
 
     @property
     def native_value(self) -> float:
+        """Return total expected solar generation for today in kWh.
+
+        Returns:
+            Sum of expected_kwh across today's forecast slots, or 0.0 when unavailable.
+        """
         gen: GenerationSeries | None = (self.coordinator.data or {}).get("forecast")
         if not gen:
             return 0.0
@@ -457,6 +536,11 @@ class ForecastPipelineSensor(_BaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return full forecast slot data and per-day totals.
+
+        Returns:
+            Dict with source totals, daily kWh totals, and per-slot detail.
+        """
         gen: GenerationSeries | None = (self.coordinator.data or {}).get("forecast")
         if not gen:
             return {}
@@ -495,15 +579,26 @@ class CalculationPipelineSensor(_BaseSensor):
     _attr_icon = "mdi:calculator"
 
     def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise calculation pipeline diagnostic sensor."""
         super().__init__(coordinator, entry, "calculation_pipeline")
 
     @property
     def native_value(self) -> int:
+        """Return the number of active feed-in lockout windows.
+
+        Returns:
+            Count of lockout windows, or 0 when no calculation data is present.
+        """
         calc: CalculationResult | None = (self.coordinator.data or {}).get("calculation")
         return len(calc.feed_in_lockout_windows) if calc else 0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return full calculation result including lockout windows and slot detail.
+
+        Returns:
+            Dict with computed_at, negative sale total, lockout windows, and per-slot data.
+        """
         calc: CalculationResult | None = (self.coordinator.data or {}).get("calculation")
         if not calc:
             return {}
@@ -533,28 +628,38 @@ class _BaseloadSensor(_BaseSensor):
 
     @property
     def _profile(self) -> BaseLoadProfile | None:
+        """Return the current BaseLoadProfile from coordinator data, or None."""
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("base_load_profile")
 
     @property
     def _runtime(self) -> BatteryRuntimeEstimate | None:
+        """Return the current BatteryRuntimeEstimate from coordinator data, or None."""
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("battery_runtime")
 
 
 class CurrentBaseloadSensor(_BaseloadSensor):
+    """Sensor reporting the estimated household base load at the current time slot."""
+
     _attr_name = "sunSale Current Baseload"
     _attr_native_unit_of_measurement = "kW"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:home-lightning-bolt"
 
     def __init__(self, coordinator, entry):
+        """Initialise current baseload sensor."""
         super().__init__(coordinator, entry, "current_baseload")
 
     @property
     def native_value(self) -> float | None:
+        """Return estimated household base load for the current hour in kW.
+
+        Returns:
+            Base load kW rounded to 3 dp, or None when the profile is unavailable.
+        """
         profile = self._profile
         if profile is None:
             return None
@@ -563,6 +668,11 @@ class CurrentBaseloadSensor(_BaseloadSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return full baseload profile statistics and hourly slot data.
+
+        Returns:
+            Dict with fallback_kw, percentiles, confidence, sample counts, and hourly slots.
+        """
         profile = self._profile
         if profile is None:
             return {}
@@ -586,16 +696,24 @@ class CurrentBaseloadSensor(_BaseloadSensor):
 
 
 class BatteryRuntimeMinutesSensor(_BaseloadSensor):
+    """Sensor reporting estimated minutes until the battery is depleted at current load."""
+
     _attr_name = "sunSale Battery Runtime"
     _attr_native_unit_of_measurement = "min"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:timer-sand"
 
     def __init__(self, coordinator, entry):
+        """Initialise battery runtime minutes sensor."""
         super().__init__(coordinator, entry, "battery_runtime_minutes")
 
     @property
     def native_value(self) -> float | None:
+        """Return estimated battery runtime in minutes.
+
+        Returns:
+            Runtime minutes rounded to 1 dp, or None when unavailable.
+        """
         runtime = self._runtime
         if runtime is None or runtime.runtime_minutes is None:
             return None
@@ -603,6 +721,11 @@ class BatteryRuntimeMinutesSensor(_BaseloadSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return battery runtime estimate detail.
+
+        Returns:
+            Dict with usable remaining kWh, average drain rate, horizon, and computed_at.
+        """
         runtime = self._runtime
         if runtime is None:
             return {}
@@ -615,28 +738,45 @@ class BatteryRuntimeMinutesSensor(_BaseloadSensor):
 
 
 class BatteryDrainUntilSensor(_BaseloadSensor):
+    """Sensor reporting the projected timestamp at which the battery will be depleted."""
+
     _attr_name = "sunSale Battery Drain Until"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(self, coordinator, entry):
+        """Initialise battery drain-until timestamp sensor."""
         super().__init__(coordinator, entry, "battery_drain_until")
 
     @property
     def native_value(self) -> datetime | None:
+        """Return the projected battery depletion timestamp.
+
+        Returns:
+            Timezone-aware datetime when the battery is expected to reach min SoC,
+            or None when the estimate is unavailable.
+        """
         runtime = self._runtime
         return runtime.until if runtime else None
 
 
 class BaseloadConfidenceSensor(_BaseloadSensor):
+    """Sensor reporting the confidence score of the current base load profile."""
+
     _attr_name = "sunSale Baseload Confidence"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:gauge"
 
     def __init__(self, coordinator, entry):
+        """Initialise baseload confidence sensor."""
         super().__init__(coordinator, entry, "baseload_confidence")
 
     @property
     def native_value(self) -> float | None:
+        """Return the baseload profile confidence score.
+
+        Returns:
+            Confidence value in [0, 1] rounded to 3 dp, or None when unavailable.
+        """
         profile = self._profile
         if profile is None or profile.confidence is None:
             return None

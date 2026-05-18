@@ -21,7 +21,14 @@ _WEBCOMPONENT = "sun-sale-panel"
 
 
 def _js_hash(filename: str) -> str:
-    """Return first 8 chars of MD5 of the JS file for cache-busting."""
+    """Return the first 8 hex characters of the MD5 hash of a www JS file for cache-busting.
+
+    Args:
+        filename: Filename relative to the integration's www/ directory.
+
+    Returns:
+        8-character hex string, or "0" when the file cannot be read.
+    """
     path = Path(__file__).parent / "www" / filename
     try:
         return hashlib.md5(path.read_bytes()).hexdigest()[:8]  # noqa: S324
@@ -74,6 +81,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[_PANEL_KEY] = True
 
     async def handle_force_recalculate(call: ServiceCall) -> None:
+        """Trigger an immediate refresh on all sunSale coordinator instances."""
         for coord in hass.data[DOMAIN].values():
             await coord.async_request_refresh()
 
@@ -84,7 +92,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
+    """Unload a config entry and remove its coordinator from hass.data.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: Config entry being unloaded.
+
+    Returns:
+        True when all platforms unloaded successfully.
+    """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
@@ -92,5 +108,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload config entry when options change."""
+    """Reload the config entry when its options change.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: Config entry whose options were updated.
+    """
     await hass.config_entries.async_reload(entry.entry_id)

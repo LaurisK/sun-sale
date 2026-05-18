@@ -27,7 +27,16 @@ def build_generation_series(
     price_slots: tuple,
     now: datetime | None = None,
 ) -> GenerationSeries:
-    """Convert SolarData into a GenerationSeries aligned to the price grid."""
+    """Resample SolarData onto the price grid and return a complete GenerationSeries.
+
+    Args:
+        solar: Unified solar forecast from SolarTranslator.
+        price_slots: Price-grid slots defining the target time resolution.
+        now: Cycle timestamp for today_remaining calculation; defaults to UTC now.
+
+    Returns:
+        GenerationSeries with one GenerationSlot per price slot and daily totals.
+    """
     if now is None:
         now = datetime.now(timezone.utc)
 
@@ -67,10 +76,17 @@ def _resample_to_grid(
 ) -> tuple[GenerationSlot, ...]:
     """Redistribute entry kWh onto target slots by overlap-weighted area.
 
-    Works for both downsampling (e.g. 15-min → 1h) and upsampling (1h → 15-min):
-    each entry contributes ``expected_kwh * overlap / entry_duration`` to every
-    target slot it intersects. Every target slot is emitted, even when no solar
-    entries overlap it, so the output covers the full price grid continuously.
+    Works for both downsampling (15-min → 1h) and upsampling (1h → 15-min).
+    Every target slot is emitted with zero kWh when no entries overlap it,
+    ensuring the output covers the full price grid continuously.
+
+    Args:
+        entries: Raw SolarEntry list from the forecast source.
+        target_slots: Price-grid slots defining start/end for each output slot.
+        source: Source label propagated to each output GenerationSlot.
+
+    Returns:
+        Tuple of GenerationSlots aligned to target_slots; empty on empty entries.
     """
     # Pre-extract entry spans once; entries may not be sorted strictly, but
     # we iterate over all of them per target slot anyway.
@@ -105,7 +121,15 @@ def _resample_to_grid(
 
 
 def _compute_extended_day_totals(entries: list[SolarEntry], now: datetime) -> dict[int, float]:
-    """Sum solar entries into daily kWh totals for d2..d6."""
+    """Sum raw solar entries into daily kWh totals for days d2..d6 (outside the price grid).
+
+    Args:
+        entries: All SolarEntry objects (any date).
+        now: Reference time used to determine today's date.
+
+    Returns:
+        Dict {2: kwh, 3: kwh, 4: kwh, 5: kwh, 6: kwh} for days 2–6 ahead of today.
+    """
     today = now.date()
     return {
         n: round(sum(e.expected_kwh for e in entries if e.start.date() == today + timedelta(days=n)), 4)
@@ -114,7 +138,15 @@ def _compute_extended_day_totals(entries: list[SolarEntry], now: datetime) -> di
 
 
 def _compute_totals(slots: tuple[GenerationSlot, ...], now: datetime) -> dict[str, float]:
-    """Bucket resampled slots into yesterday/today/tomorrow by start.date()."""
+    """Bucket resampled generation slots into yesterday/today/tomorrow totals.
+
+    Args:
+        slots: Price-grid-aligned GenerationSlots.
+        now: Reference time used to determine today's date.
+
+    Returns:
+        Dict with keys "yesterday", "today", "tomorrow", "today_remaining" in kWh.
+    """
     today = now.date()
     yesterday = today - timedelta(days=1)
     tomorrow = today + timedelta(days=1)
@@ -147,7 +179,14 @@ def _compute_totals(slots: tuple[GenerationSlot, ...], now: datetime) -> dict[st
 # ---------------------------------------------------------------------------
 
 def _tomorrow_entity(entity_id: str) -> str:
-    """Derive the tomorrow forecast entity from today's entity ID."""
+    """Derive the tomorrow forecast entity ID by substituting 'today' → 'tomorrow'.
+
+    Args:
+        entity_id: Entity ID containing "_today_" or "_today" substring.
+
+    Returns:
+        Modified entity ID, or empty string if no substitution pattern is found.
+    """
     for pattern in ("_today_", "_today"):
         if pattern in entity_id:
             return entity_id.replace(pattern, pattern.replace("today", "tomorrow"), 1)
@@ -155,7 +194,15 @@ def _tomorrow_entity(entity_id: str) -> str:
 
 
 def _day_entity(entity_id: str, n: int) -> str:
-    """Derive the day-n (d2..d6) forecast entity from today's entity ID."""
+    """Derive the day-n (d2..d6) forecast entity ID by substituting 'today' → 'dn'.
+
+    Args:
+        entity_id: Entity ID containing "_today_" or "_today" substring.
+        n: Day offset (2–6).
+
+    Returns:
+        Modified entity ID, or empty string if no substitution pattern is found.
+    """
     for pattern in ("_today_", "_today"):
         if pattern in entity_id:
             return entity_id.replace(pattern, pattern.replace("today", f"d{n}"), 1)
@@ -163,7 +210,14 @@ def _day_entity(entity_id: str, n: int) -> str:
 
 
 def _watts_to_solar_entries(watts: dict[datetime, float]) -> list[SolarEntry]:
-    """Convert {slot_utc: W} dict to SolarEntry list, detecting slot duration."""
+    """Convert a {slot_utc: watts} dict to a SolarEntry list, auto-detecting slot duration.
+
+    Args:
+        watts: Dict mapping UTC slot timestamps to power in watts.
+
+    Returns:
+        Sorted SolarEntry list with expected_kwh = W * slot_hours / 1000.
+    """
     sorted_ts = sorted(watts.keys())
     if len(sorted_ts) >= 2:
         slot_dur = sorted_ts[1] - sorted_ts[0]
@@ -183,6 +237,16 @@ def _watts_to_solar_entries(watts: dict[datetime, float]) -> list[SolarEntry]:
 
 
 def _make_solar_data(entries: list[SolarEntry], source: str, now: datetime) -> SolarData:
+    """Wrap a SolarEntry list in SolarData with today totals computed.
+
+    Args:
+        entries: All solar entries (any date).
+        source: Primary source label (e.g. "open_meteo").
+        now: Reference time for computing today's totals.
+
+    Returns:
+        SolarData with total_today_kwh and today_remaining_kwh populated.
+    """
     today = now.date()
     total_today = sum(e.expected_kwh for e in entries if e.start.date() == today)
     remaining = sum(e.expected_kwh for e in entries if e.start.date() == today and e.start >= now)
@@ -206,11 +270,31 @@ class SolarTranslator:
     output_type = SolarData
 
     def __init__(self, entity_1: str, entity_2: str) -> None:
+        """Initialise with the two (optional) solar forecast entity IDs.
+
+        Args:
+            entity_1: Primary forecast entity (e.g. Open Meteo today sensor).
+            entity_2: Optional secondary panel entity; empty string if unused.
+        """
         self._entity_1 = entity_1
         self._entity_2 = entity_2
 
     def parse(self, hass: Any, now: datetime | None = None) -> SolarData:
-        """Parse solar state into SolarData. Sync; callable from tests."""
+        """Parse all configured solar forecast entities into SolarData.
+
+        Tries Open Meteo watts first; falls back to Forecast.Solar/Solcast forecast.
+        Multiple panels are combined by summing at each timestamp.
+
+        Synchronous; callable directly from tests.
+
+        Args:
+            hass: Home Assistant instance.
+            now: Reference time for today totals; defaults to UTC now.
+
+        Returns:
+            SolarData with entries from yesterday → d6. Returns empty SolarData
+            when no recognised entity or attribute is found.
+        """
         if now is None:
             now = datetime.now(timezone.utc)
 
@@ -273,4 +357,15 @@ class SolarTranslator:
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
     ) -> SolarData:
+        """DAG translator entry-point; delegates to parse().
+
+        Args:
+            hass: Home Assistant instance.
+            config: Structured SunSale config (unused here).
+            raw_config: Raw config-entry dict (unused here).
+            now: Cycle timestamp.
+
+        Returns:
+            SolarData for all configured forecast entities.
+        """
         return self.parse(hass, now)

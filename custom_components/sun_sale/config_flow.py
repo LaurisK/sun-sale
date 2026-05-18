@@ -89,6 +89,14 @@ _ANY_ENTITY = EntitySelector(EntitySelectorConfig())
 
 
 def _platform_selector(options: list[str]) -> SelectSelector:
+    """Build a list-mode SelectSelector from a list of option dicts.
+
+    Args:
+        options: List of ``{"value": ..., "label": ...}`` dicts.
+
+    Returns:
+        Configured SelectSelector widget.
+    """
     return SelectSelector(SelectSelectorConfig(options=options, mode=SelectSelectorMode.LIST))
 
 
@@ -109,6 +117,14 @@ def _opt(key: str, d: dict, fallback: Any = vol.UNDEFINED) -> vol.Optional:
 # ---------------------------------------------------------------------------
 
 def _tariff_schema(d: dict) -> vol.Schema:
+    """Build the voluptuous tariff parameters schema, pre-filled from d.
+
+    Args:
+        d: Existing config/options dict used for default values.
+
+    Returns:
+        Schema covering distribution fee, tax rate, markup, and sell-side equivalents.
+    """
     return vol.Schema({
         _req(CONF_TARIFF_DISTRIBUTION_FEE, d, 0.03): vol.Coerce(float),
         _req(CONF_TARIFF_TAX_RATE, d, 21.0): vol.Coerce(float),
@@ -120,6 +136,15 @@ def _tariff_schema(d: dict) -> vol.Schema:
 
 
 def _battery_schema(d: dict) -> vol.Schema:
+    """Build the voluptuous battery parameters schema, pre-filled from d.
+
+    Args:
+        d: Existing config/options dict used for default values.
+
+    Returns:
+        Schema covering capacity, price, cycle life, charge/discharge power, SoC limits,
+        round-trip efficiency, and nominal voltage.
+    """
     return vol.Schema({
         _req(CONF_BATTERY_NOMINAL_CAPACITY, d): vol.Coerce(float),
         _req(CONF_BATTERY_PURCHASE_PRICE, d): vol.Coerce(float),
@@ -134,12 +159,28 @@ def _battery_schema(d: dict) -> vol.Schema:
 
 
 def _inverter_platform_schema(d: dict) -> vol.Schema:
+    """Build the inverter platform selection schema, pre-filled from d.
+
+    Args:
+        d: Existing config/options dict used for default value.
+
+    Returns:
+        Single-field schema for selecting the inverter integration platform.
+    """
     return vol.Schema({
         _req(CONF_INVERTER_PLATFORM, d, InverterPlatform.SOLIS.value): _platform_selector(INVERTER_PLATFORMS),
     })
 
 
 def _inverter_entities_schema(d: dict) -> vol.Schema:
+    """Build the generic inverter entity mapping schema, pre-filled from d.
+
+    Args:
+        d: Existing config/options dict used for default values.
+
+    Returns:
+        Schema covering SoC, battery power, grid power, and charge control entity selectors.
+    """
     return vol.Schema({
         _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d): _SENSOR_SOC,
         _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d): _SENSOR_POWER,
@@ -149,6 +190,15 @@ def _inverter_entities_schema(d: dict) -> vol.Schema:
 
 
 def _inverter_solis_schema(d: dict) -> vol.Schema:
+    """Build the Solis TOU-model entity mapping schema, pre-filled from d.
+
+    Args:
+        d: Existing config/options dict used for default values.
+
+    Returns:
+        Schema covering Solis-specific SoC, power, charge/discharge current, time-window,
+        and mode-switch entity selectors.
+    """
     return vol.Schema({
         _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d, "sensor.solis_battery_soc"): _SENSOR_SOC,
         _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d, "sensor.solis_battery_power"): _SENSOR_POWER,
@@ -175,6 +225,15 @@ _NORDPOOL_RESOLUTION_SELECTOR = SelectSelector(SelectSelectorConfig(
 
 
 def _sources_schema(d: dict) -> vol.Schema:
+    """Build the data-sources entity selection schema, pre-filled from d.
+
+    Args:
+        d: Existing config/options dict used for default values.
+
+    Returns:
+        Schema covering Nordpool entity, resolution, solar forecast entities, solar energy,
+        household load, and household consumption energy selectors.
+    """
     return vol.Schema({
         _req(CONF_NORDPOOL_ENTITY, d): _SENSOR,
         _req(CONF_NORDPOOL_RESOLUTION, d, DEFAULT_NORDPOOL_RESOLUTION): _NORDPOOL_RESOLUTION_SELECTOR,
@@ -196,6 +255,7 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:
+        """Initialise config flow with empty data accumulator and generic inverter default."""
         self._data: dict[str, Any] = {}
         self._inverter_platform: str = InverterPlatform.GENERIC.value
 
@@ -289,6 +349,14 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> "SunSaleOptionsFlow":
+        """Return the options flow handler for this config entry.
+
+        Args:
+            config_entry: The existing config entry to reconfigure.
+
+        Returns:
+            SunSaleOptionsFlow instance pre-loaded with the current entry.
+        """
         return SunSaleOptionsFlow(config_entry)
 
 
@@ -300,11 +368,21 @@ class SunSaleOptionsFlow(config_entries.OptionsFlow):
     """Allow reconfiguring all settings post-setup."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialise options flow, storing the existing entry for default values.
+
+        Args:
+            config_entry: The config entry being reconfigured.
+        """
         self._entry = config_entry
         self._data: dict[str, Any] = {}
         self._inverter_platform: str = InverterPlatform.GENERIC.value
 
     def _defaults(self) -> dict[str, Any]:
+        """Return merged entry data + options as a single defaults dict.
+
+        Returns:
+            Combined dict of entry.data and entry.options (options take precedence).
+        """
         return {**self._entry.data, **self._entry.options}
 
     async def async_step_init(self, user_input: dict | None = None) -> FlowResult:

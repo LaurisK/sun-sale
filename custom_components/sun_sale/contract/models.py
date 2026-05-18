@@ -170,9 +170,26 @@ class PriceSeries:
     computed_at: datetime
 
     def slot_at(self, t: datetime) -> PriceSlot | None:
+        """Return the slot covering time t, or None if outside the series.
+
+        Args:
+            t: Timezone-aware datetime to look up.
+
+        Returns:
+            Matching PriceSlot, or None.
+        """
         return next((s for s in self.slots if s.start <= t < s.end), None)
 
     def window(self, t1: datetime, t2: datetime) -> tuple[PriceSlot, ...]:
+        """Return all slots that overlap the half-open interval [t1, t2).
+
+        Args:
+            t1: Start of the query window (inclusive).
+            t2: End of the query window (exclusive).
+
+        Returns:
+            Tuple of overlapping PriceSlots, may be empty.
+        """
         return tuple(s for s in self.slots if s.end > t1 and s.start < t2)
 
 
@@ -227,7 +244,15 @@ class GenerationSeries:
     total_d6_kwh: float = 0.0
 
     def energy_between(self, t1: datetime, t2: datetime) -> float:
-        """Return expected kWh between t1 and t2."""
+        """Return expected kWh between t1 and t2 via proportional overlap.
+
+        Args:
+            t1: Start of query window (tz-aware).
+            t2: End of query window (tz-aware).
+
+        Returns:
+            Sum of pro-rated expected_kwh across all overlapping slots.
+        """
         total = 0.0
         for s in self.slots:
             overlap_start = max(s.start, t1)
@@ -508,7 +533,15 @@ class BaseLoadProfile:
     computed_at: datetime
 
     def at(self, t: datetime, local_tz) -> float:
-        """Lookup the baseload floor for time `t` (any tz-aware datetime)."""
+        """Return the baseload floor kW for the local hour containing t.
+
+        Args:
+            t: Any tz-aware datetime.
+            local_tz: Timezone used to map t to a local hour-of-day bucket.
+
+        Returns:
+            Estimated minimum household draw in kW for that hour.
+        """
         return self.slots[t.astimezone(local_tz).hour].baseload_kw
 
 

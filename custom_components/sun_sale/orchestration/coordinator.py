@@ -145,6 +145,12 @@ class SunSaleCoordinator(DataUpdateCoordinator):
     """Thin orchestrator: translators → capacity update → DAG → event routing."""
 
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+        """Initialise coordinator with lazy setup state; call async_setup() before use.
+
+        Args:
+            hass: Home Assistant instance.
+            config_entry: HA config entry containing user configuration.
+        """
         super().__init__(
             hass,
             _LOGGER,
@@ -183,10 +189,12 @@ class SunSaleCoordinator(DataUpdateCoordinator):
 
     @property
     def battery_config(self) -> BatteryConfig | None:
+        """Return the configured BatteryConfig, or None before async_setup completes."""
         return self._sun_sale_config.battery if self._sun_sale_config else None
 
     @property
     def tariff_config(self) -> TariffConfig | None:
+        """Return the configured TariffConfig, or None before async_setup completes."""
         return self._sun_sale_config.tariff if self._sun_sale_config else None
 
     async def async_setup(self) -> None:
@@ -478,7 +486,12 @@ class SunSaleCoordinator(DataUpdateCoordinator):
     async def _append_generation_sample(
         self, reading: GenerationReading, now: datetime
     ) -> None:
-        """Append a new sample, trim history older than retention, persist."""
+        """Append a generation reading, trim to retention window, and persist.
+
+        Args:
+            reading: New today-total snapshot to add.
+            now: Cycle timestamp used to compute the retention cutoff.
+        """
         cutoff = now - timedelta(days=GENERATION_HISTORY_RETENTION_DAYS)
         kept = [s for s in self._generation_samples if s.timestamp >= cutoff]
         kept.append(reading)
@@ -494,7 +507,12 @@ class SunSaleCoordinator(DataUpdateCoordinator):
     async def _append_household_load_sample(
         self, reading: HouseholdLoadReading, now: datetime
     ) -> None:
-        """Append a new sample, trim by retention, persist."""
+        """Append a household load reading, trim to retention window, and persist.
+
+        Args:
+            reading: New load snapshot to add.
+            now: Cycle timestamp used to compute the retention cutoff.
+        """
         cutoff = now - timedelta(days=HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS)
         kept = [s for s in self._household_load_samples if s.timestamp >= cutoff]
         kept.append(HouseholdLoadSample(timestamp=now, load_kw=reading.load_kw))
@@ -508,11 +526,13 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             })
 
     def _resolve_local_tz(self):
-        """Return the local timezone for the integration.
+        """Return the HA-configured local timezone, falling back to UTC.
 
-        Reads `hass.config.time_zone` (e.g. "Europe/Riga"); falls back to UTC
-        when unset, unknown, or unparseable. Baseload bucketing depends on
-        this — see docs/base_load_missing.md §9.
+        Reads hass.config.time_zone (e.g. "Europe/Riga"). Falls back to UTC
+        when unset, unknown, or unparseable; baseload bucketing depends on this.
+
+        Returns:
+            tzinfo for the HA installation's local timezone.
         """
         tz_name = getattr(self.hass.config, "time_zone", None)
         if not tz_name:
@@ -523,7 +543,16 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             return timezone.utc
 
     def _build_sensor_dict(self, primary: dict, secondary: dict) -> dict:
-        """Map typed DAG outputs to the string-keyed dict that sensors read."""
+        """Map typed DAG outputs to the string-keyed dict consumed by sensor entities.
+
+        Args:
+            primary: Translation-layer outputs keyed by type.
+            secondary: DAG node outputs keyed by type.
+
+        Returns:
+            Dict with string keys matching what each sensor entity reads from
+            coordinator.data.
+        """
         reading: BatteryReading | None = primary.get(BatteryReading)
         nordpool: NordpoolData | None = primary.get(NordpoolData)
         dashboard: DashboardData | None = secondary.get(DashboardData)
@@ -561,6 +590,16 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         current: BatteryReading,
         now: datetime,
     ) -> CapacityObservation | None:
+        """Build a CapacityObservation from consecutive battery readings if SoC delta is significant.
+
+        Args:
+            current: Most recent battery reading.
+            now: Cycle timestamp used as the observation timestamp.
+
+        Returns:
+            CapacityObservation when |soc_delta| >= CAPACITY_OBS_MIN_SOC_DELTA,
+            or None on the first cycle or when the delta is too small.
+        """
         if self._last_battery_reading is None:
             return None
         soc_delta = abs(current.soc - self._last_battery_reading.soc)

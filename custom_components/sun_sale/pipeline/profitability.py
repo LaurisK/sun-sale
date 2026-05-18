@@ -40,9 +40,16 @@ def classify_day(
     d: date,
     is_holiday: Callable[[date], bool] | None = None,
 ) -> DayClass:
-    """Return the day's class.
+    """Return WEEKEND, HOLIDAY, or WEEKDAY for the given date.
 
     Holiday-on-weekend collapses to WEEKEND (already the cheaper bucket).
+
+    Args:
+        d: Date to classify.
+        is_holiday: Optional predicate; called only for weekdays.
+
+    Returns:
+        DayClass enum value.
     """
     if d.weekday() >= 5:                       # 5 = Sat, 6 = Sun
         return DayClass.WEEKEND
@@ -54,12 +61,19 @@ def classify_day(
 def compute_class_medians(
     peaks: Iterable[DailyPeak],
 ) -> dict[DayClass, float]:
-    """Median peak per day-class across the full input window.
+    """Compute the median spot peak per day-class across the input window.
 
     Missing classes fall back to the WEEKDAY median (preferred) or, failing
     that, the overall median. A returned class with value `0.0` would break
     division during normalisation; callers should treat the dict as opaque
     and use `_class_divisor` to read it.
+
+    Args:
+        peaks: Historical DailyPeak records (any date range).
+
+    Returns:
+        Dict mapping each DayClass to its median peak_eur_kwh; may be partial
+        when some classes have no data.
     """
     buckets: dict[DayClass, list[float]] = {c: [] for c in DayClass}
     for p in peaks:
@@ -77,10 +91,18 @@ def _class_divisor(
     cls: DayClass,
     fallback_pool: list[float],
 ) -> float:
-    """Pick a non-zero divisor for the given class.
+    """Return a non-zero normalisation divisor for the given day-class.
 
-    Order: class-specific median → WEEKDAY median → overall median of pool.
-    Returns 1.0 if nothing usable (treats the data as already normalised).
+    Priority: class-specific median → WEEKDAY median → overall median of pool.
+    Returns 1.0 when no usable value exists (treats data as already normalised).
+
+    Args:
+        medians: Per-class medians from compute_class_medians.
+        cls: Day-class of the value being normalised.
+        fallback_pool: Raw peak values used for the overall-median fallback.
+
+    Returns:
+        A positive divisor suitable for normalising a spot peak.
     """
     for candidate in (medians.get(cls), medians.get(DayClass.WEEKDAY)):
         if candidate and candidate > 0:
@@ -93,11 +115,18 @@ def _class_divisor(
 
 
 def percentile_rank(value: float, distribution: list[float]) -> float:
-    """Percentile rank of `value` within `distribution`, in [0.0, 1.0].
+    """Compute the percentile rank of value within distribution, in [0.0, 1.0].
 
     Uses the "mean rank" convention: ties contribute 0.5 each, so a value
     equal to every entry returns 0.5 (not 0.0 and not 1.0). Empty input
     returns 0.5 — the neutral midpoint.
+
+    Args:
+        value: The value to score.
+        distribution: Reference sample to rank against.
+
+    Returns:
+        Percentile rank in [0.0, 1.0]; 0.5 for empty distribution.
     """
     if not distribution:
         return 0.5
@@ -110,10 +139,17 @@ def today_peak_from_price_series(
     price_series: PriceSeries,
     today: date,
 ) -> float | None:
-    """Highest spot price among slots whose start falls on `today`.
+    """Extract the highest Nordpool spot price for the given date.
 
-    Uses spot, not buy/sell, because the *market* signal is what we score —
+    Uses spot (not buy/sell) because the market signal is what we score —
     user-specific tariff fees shouldn't influence the relative ranking.
+
+    Args:
+        price_series: PriceSeries containing today's slots.
+        today: Local date to filter by.
+
+    Returns:
+        Maximum spot_eur_kwh for the date, or None if no slots fall on it.
     """
     today_slots = [s for s in price_series.slots if s.start.date() == today]
     if not today_slots:
@@ -128,7 +164,18 @@ def compute_profitability_score(
     is_holiday: Callable[[date], bool] | None = None,
     rank_window_days: int = DEFAULT_RANK_WINDOW_DAYS,
 ) -> ProfitabilityScore:
-    """Score today's peak price against recent history."""
+    """Score today's day-class-normalised peak against the rolling history window.
+
+    Args:
+        price_series: Current PriceSeries; today's peak is extracted from it.
+        history: Rolling history of daily peaks used as the reference distribution.
+        now: Cycle timestamp; defaults to UTC now.
+        is_holiday: Optional predicate for holiday classification.
+        rank_window_days: How many recent history days to rank against.
+
+    Returns:
+        ProfitabilityScore with a 0–1 percentile score (None when history is sparse).
+    """
     if now is None:
         now = datetime.now(timezone.utc)
 
@@ -176,11 +223,18 @@ def daily_peak_from_entries(
     entries: Iterable,
     is_holiday: Callable[[date], bool] | None = None,
 ) -> DailyPeak | None:
-    """Build a `DailyPeak` for `day` from a flat list of `PriceEntry`-likes.
+    """Build a DailyPeak snapshot for a given day from PriceEntry-like objects.
 
-    Convenience for the coordinator when persisting today's history at end of
-    day. Each entry needs `.start` (datetime) and `.price_eur_kwh` attributes.
-    Returns None if no entries fall on `day`.
+    Convenience for the coordinator when persisting today's peak at day rollover.
+    Each entry must expose `.start` (datetime) and `.price_eur_kwh` attributes.
+
+    Args:
+        day: The date to summarise.
+        entries: Iterable of price entries (PriceEntry or compatible).
+        is_holiday: Optional holiday predicate for day classification.
+
+    Returns:
+        DailyPeak with the maximum spot price, or None if no entries fall on day.
     """
     matching = [e.price_eur_kwh for e in entries if e.start.date() == day]
     if not matching:

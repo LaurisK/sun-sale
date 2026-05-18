@@ -66,6 +66,7 @@ class PricingNode(DagNode):
     consumes = [NordpoolData, YesterdayPrices]
 
     async def _compute(self, ctx: NodeContext) -> tuple[PriceSeries, list[ControlEvent]]:
+        """Assemble PriceSeries from NordpoolData + YesterdayPrices with tariff applied."""
         nordpool = ctx.require(NordpoolData)
         yesterday = ctx.require(YesterdayPrices)
         series = pricing_module.build_price_series_72h(
@@ -82,6 +83,7 @@ class BatteryStateNode(DagNode):
     consumes = [BatteryReading, EstimatedCapacity]
 
     async def _compute(self, ctx: NodeContext) -> tuple[BatteryState, list[ControlEvent]]:
+        """Combine live SoC reading with learned capacity into BatteryState."""
         reading = ctx.require(BatteryReading)
         cap = ctx.require(EstimatedCapacity)
         return BatteryState(soc=reading.soc, estimated_capacity_kwh=cap.value_kwh), []
@@ -95,6 +97,7 @@ class BatteryStatusNode(DagNode):
     consumes = [BatteryReading]
 
     async def _compute(self, ctx: NodeContext) -> tuple[BatteryStatus, list[ControlEvent]]:
+        """Combine live inverter telemetry with configured limits into BatteryStatus."""
         reading = ctx.require(BatteryReading)
         status = battery_inbound.build_battery_status(reading, ctx.config.battery)
         return status, []
@@ -110,6 +113,7 @@ class BaseLoadProfileNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[BaseLoadProfile, list[ControlEvent]]:
+        """Build 24-bucket baseload profile from rolling household-load history."""
         history = ctx.require(HouseholdLoadHistory)
         profile = base_load_module.build_base_load_profile(
             history, ctx.config.local_tz, now=ctx.now,
@@ -131,6 +135,7 @@ class GenerationNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[GenerationSeries, list[ControlEvent]]:
+        """Resample SolarData onto the PriceSeries grid to produce GenerationSeries."""
         solar = ctx.require(SolarData)
         price_series = ctx.require(PriceSeries)
         gen = forecast_module.build_generation_series(solar, price_series.slots, now=ctx.now)
@@ -152,6 +157,7 @@ class ObservedGenerationNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[ObservedGenerationSeries, list[ControlEvent]]:
+        """Difference persisted today-total samples into per-slot ObservedGenerationSeries."""
         history = ctx.require(GenerationHistory)
         price_series = ctx.require(PriceSeries)
         series = generation_module.build_observed_generation_series(
@@ -170,6 +176,7 @@ class DegradationNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[DegradationCost, list[ControlEvent]]:
+        """Compute wear cost per kWh from BatteryState + BatteryConfig."""
         state = ctx.require(BatteryState)
         cost = battery_module.degradation_cost_per_kwh(ctx.config.battery, state)
         return DegradationCost(value_kwh=cost), []
@@ -189,6 +196,7 @@ class ChargingProfileNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[ChargingProfile, list[ControlEvent]]:
+        """Decide per-slot solar disposition for today's remaining generation."""
         status = ctx.require(BatteryStatus)
         generation = ctx.require(GenerationSeries)
         prices = ctx.require(PriceSeries)
@@ -217,6 +225,7 @@ class BatteryRuntimeNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[BatteryRuntimeEstimate, list[ControlEvent]]:
+        """Forward-simulate pure baseload drain to estimate battery depletion time."""
         estimate = base_load_module.estimate_battery_runtime(
             battery_status=ctx.require(BatteryStatus),
             battery_config=ctx.config.battery,
@@ -242,6 +251,7 @@ class ForecastAccuracyNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[ForecastErrorSeries, list[ControlEvent]]:
+        """Align forecast vs. observed solar slots and compute MAE/bias/MAPE."""
         forecast = ctx.require(GenerationSeries)
         observed = ctx.require(ObservedGenerationSeries)
         series = forecast_accuracy.build_forecast_error_series(
@@ -260,6 +270,7 @@ class LockoutNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[CalculationResult, list[ControlEvent]]:
+        """Detect feed-in lockout windows and per-slot sell_allowed flags."""
         price_series = ctx.require(PriceSeries)
         generation = ctx.require(GenerationSeries)
         battery_state = ctx.require(BatteryState)
@@ -285,12 +296,19 @@ class OptimizerNode(DagNode):
     consumes = [PriceSeries, CalculationResult, GenerationSeries, BatteryState, DegradationCost]
 
     def __init__(self, last_inverter_action_ref: _LastActionRef) -> None:
+        """Initialise with the cross-cycle deduplication reference cell.
+
+        Args:
+            last_inverter_action_ref: Mutable cell shared with the coordinator
+                for cross-cycle action deduplication.
+        """
         super().__init__()
         self._last = last_inverter_action_ref
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[Schedule, list[ControlEvent]]:
+        """Run greedy optimizer; emit InverterActionEvent when current-slot action changes."""
         price_series = ctx.require(PriceSeries)
         calc = ctx.require(CalculationResult)
         generation = ctx.require(GenerationSeries)
@@ -331,6 +349,7 @@ class DashboardNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[DashboardData, list[ControlEvent]]:
+        """Build 15-min future slots and frozen solar forecast for the web panel."""
         nordpool = ctx.require(NordpoolData)
         solar = ctx.require(SolarData)
         reading = ctx.require(BatteryReading)
@@ -355,11 +374,18 @@ class DashboardNode(DagNode):
 
 class _LastActionRef:
     """Mutable reference cell holding the last dispatched action key string."""
+
     def __init__(self) -> None:
+        """Initialise with no prior action."""
         self.value: str | None = None
 
 
 def make_last_ref() -> _LastActionRef:
+    """Create a fresh cross-cycle deduplication reference cell.
+
+    Returns:
+        New _LastActionRef with value=None.
+    """
     return _LastActionRef()
 
 
@@ -368,6 +394,15 @@ def make_last_ref() -> _LastActionRef:
 # ---------------------------------------------------------------------------
 
 def _current_schedule_slot(schedule: Schedule, now: datetime):
+    """Return the schedule slot active at now, falling back to the first slot.
+
+    Args:
+        schedule: Computed schedule.
+        now: Current time.
+
+    Returns:
+        Matching ScheduleSlot or schedule.slots[0], or None for an empty schedule.
+    """
     if not schedule.slots:
         return None
     return next((s for s in schedule.slots if s.start <= now < s.end), schedule.slots[0])

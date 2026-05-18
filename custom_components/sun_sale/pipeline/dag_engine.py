@@ -55,11 +55,28 @@ class NodeContext:
     now: datetime
 
     def get(self, t: type[T]) -> T | None:
-        """Return the value for type t from primary or secondary, or None."""
+        """Look up type t in primary then secondary context; return None if absent.
+
+        Args:
+            t: The type key to look up.
+
+        Returns:
+            The stored value, or None.
+        """
         return self.primary.get(t) or self.secondary.get(t)
 
     def require(self, t: type[T]) -> T:
-        """Return the value for type t; raise MissingDependencyError if absent."""
+        """Return the value for type t; raise MissingDependencyError if absent.
+
+        Args:
+            t: The type key to look up.
+
+        Returns:
+            The stored value (never None).
+
+        Raises:
+            MissingDependencyError: When t is not found in primary or secondary.
+        """
         v = self.get(t)
         if v is None:
             raise MissingDependencyError(t)
@@ -81,6 +98,7 @@ class DagNode(ABC):
     consumes: list[type]
 
     def __init__(self) -> None:
+        """Initialise empty observer list and satisfied-dependency set."""
         self._observers: list[DagNode] = []
         self._satisfied: set[type] = set()
 
@@ -89,7 +107,11 @@ class DagNode(ABC):
     def add_observer(self, node: DagNode) -> None:
         """Register node as an observer of this node's output.
 
-        Raises TierViolationError if node.tier <= self.tier.
+        Args:
+            node: Downstream node to notify when this node completes.
+
+        Raises:
+            TierViolationError: When node.tier <= self.tier.
         """
         if node.tier <= self.tier:
             raise TierViolationError(
@@ -105,11 +127,22 @@ class DagNode(ABC):
                 obs._on_upstream_ready(self.output_type)
 
     def _on_upstream_ready(self, data_type: type) -> None:
-        """Called by an upstream node after depositing its result."""
+        """Record that an upstream dependency of the given type is now available.
+
+        Args:
+            data_type: The output_type that was just deposited by the upstream node.
+        """
         self._satisfied.add(data_type)
 
     def all_secondary_deps_satisfied(self, ctx: NodeContext) -> bool:
-        """True when every secondary dependency declared in consumes is present."""
+        """Return True when every secondary dependency declared in consumes is available.
+
+        Args:
+            ctx: Current DAG run context.
+
+        Returns:
+            True if every non-primary consumed type is in ctx.secondary or _satisfied.
+        """
         return all(
             t in self._satisfied or t in ctx.secondary
             for t in self.consumes
@@ -119,7 +152,14 @@ class DagNode(ABC):
     # ── Execution ────────────────────────────────────────────────────────────
 
     async def run(self, ctx: NodeContext) -> list[ControlEvent]:
-        """Compute, deposit result into ctx.secondary, notify observers, reset state."""
+        """Execute this node: compute, deposit into ctx.secondary, notify observers.
+
+        Args:
+            ctx: Shared run context; result is deposited into ctx.secondary.
+
+        Returns:
+            List of ControlEvents emitted by this node (may be empty).
+        """
         result, events = await self._compute(ctx)
         if result is not None and self.output_type is not None:
             ctx.secondary[self.output_type] = result
@@ -131,7 +171,15 @@ class DagNode(ABC):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[Any | None, list[ControlEvent]]:
-        """Implement node logic. Return (result, events)."""
+        """Implement node-specific computation logic.
+
+        Args:
+            ctx: Shared run context with all upstream outputs available.
+
+        Returns:
+            Tuple of (result, events); result is deposited as output_type in
+            ctx.secondary (ignored when output_type is None).
+        """
 
 
 class DagEngine:
@@ -147,14 +195,28 @@ class DagEngine:
     """
 
     def __init__(self, nodes: list[DagNode]) -> None:
+        """Initialise engine, group nodes by tier, and auto-wire dependencies.
+
+        Args:
+            nodes: All DAG nodes; tiers and output_types must be set correctly.
+        """
         self._nodes_by_tier: dict[int, list[DagNode]] = {}
         for node in nodes:
             self._nodes_by_tier.setdefault(node.tier, []).append(node)
         self._wire(nodes)
 
     def _wire(self, nodes: list[DagNode]) -> None:
-        """Auto-wire: for each consumed secondary type, register the consuming node
-        as an observer of the producing node. Raises TierViolationError on bad tiers."""
+        """Auto-wire observer relationships by matching output_type to consumed types.
+
+        For each consumed secondary type, registers the consuming node as an
+        observer of the node that produces it.
+
+        Args:
+            nodes: All nodes to wire; each node's consumes list is inspected.
+
+        Raises:
+            TierViolationError: When a consumer has a tier <= its producer's tier.
+        """
         producer: dict[type, DagNode] = {
             n.output_type: n for n in nodes if n.output_type is not None
         }
@@ -170,7 +232,16 @@ class DagEngine:
         config: SunSaleConfig,
         now: datetime,
     ) -> tuple[dict[type, Any], list[ControlEvent]]:
-        """Execute all tiers in order; return (secondary outputs, control events)."""
+        """Execute all tiers in ascending order; within each tier run ready nodes in parallel.
+
+        Args:
+            primary: Translation-layer outputs (HA state → domain types).
+            config: Structured user configuration, passed through to all nodes.
+            now: Cycle timestamp.
+
+        Returns:
+            Tuple of (secondary_outputs_dict, all_control_events).
+        """
         ctx = NodeContext(primary=primary, secondary={}, config=config, now=now)
         all_events: list[ControlEvent] = []
 
@@ -195,7 +266,20 @@ async def run_translators(
     raw_config: dict,
     now: datetime,
 ) -> dict[type, Any]:
-    """Run all translators in parallel; skip None results (optional translators)."""
+    """Run all translators concurrently and collect their outputs into a primary dict.
+
+    Translators that return None (optional / unavailable sources) are silently skipped.
+
+    Args:
+        translators: List of translator objects exposing output_type and translate().
+        hass: Home Assistant instance passed through to each translator.
+        config: Structured SunSale configuration.
+        raw_config: Raw config-entry dict forwarded to translators that need it.
+        now: Cycle timestamp.
+
+    Returns:
+        Dict mapping each translator's output_type to its result.
+    """
     results = await asyncio.gather(*[
         t.translate(hass, config, raw_config, now) for t in translators
     ])

@@ -30,7 +30,20 @@ def build_forecast_error_series(
     observed: ObservedGenerationSeries,
     now: datetime | None = None,
 ) -> ForecastErrorSeries:
-    """Pair forecast and observed slots by `(start, end)` and emit error stats."""
+    """Align forecast and observed slots by (start, end) and compute error statistics.
+
+    Unmatched forecast slots (no corresponding observation) receive sentinel
+    values of -1.0 so the chart can render "no data yet" for future slots.
+
+    Args:
+        forecast: GenerationSeries from the forecast pipeline stage.
+        observed: ObservedGenerationSeries built from inverter today-total samples.
+        now: Cycle timestamp; defaults to UTC now.
+
+    Returns:
+        ForecastErrorSeries with per-slot deltas and aggregate MAE/bias/MAPE.
+        Returns an all-zero series when forecast is empty.
+    """
     if now is None:
         now = datetime.now(timezone.utc)
 
@@ -105,6 +118,14 @@ def build_forecast_error_series(
 
 
 def _empty(now: datetime) -> ForecastErrorSeries:
+    """Return an all-zero ForecastErrorSeries sentinel for when no forecast exists.
+
+    Args:
+        now: Cycle timestamp stamped into computed_at.
+
+    Returns:
+        ForecastErrorSeries with empty slot tuple and all numeric fields zero.
+    """
     return ForecastErrorSeries(
         slots=(),
         total_forecast_kwh=0.0,

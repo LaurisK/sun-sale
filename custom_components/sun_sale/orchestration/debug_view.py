@@ -17,6 +17,14 @@ class SunSaleDebugView(HomeAssistantView):
     requires_auth = True
 
     async def get(self, request: web.Request) -> web.Response:
+        """Handle GET /api/sun_sale/debug; return JSON snapshot of all coordinators.
+
+        Args:
+            request: Incoming aiohttp request.
+
+        Returns:
+            JSON response containing a list of coordinator state dicts.
+        """
         hass = request.app["hass"]
         entries = [
             _coordinator_to_dict(entry_id, coordinator)

@@ -74,7 +74,19 @@ def build_base_load_profile(
     window_days: int = DEFAULT_WINDOW_DAYS,
     percentile: float = DEFAULT_PERCENTILE,
 ) -> BaseLoadProfile:
-    """Build a 24-hour low-percentile profile from rolling samples."""
+    """Build a 24-bucket (local hour) low-percentile baseload profile from rolling samples.
+
+    Args:
+        history: Rolling household-load sample history.
+        local_tz: Timezone used to convert sample timestamps to local hours.
+        now: Reference time for the rolling window; defaults to UTC now.
+        window_days: How many past days of samples to include.
+        percentile: Percentile used per bucket (default P10 rejects transient dips).
+
+    Returns:
+        BaseLoadProfile with 24 slots (one per local hour) and summary diagnostics.
+        Uses fallback_kw for sparse buckets or when history is insufficient.
+    """
     if now is None:
         now = datetime.now(timezone.utc)
 
@@ -147,7 +159,24 @@ def estimate_battery_runtime(
     now: datetime,
     horizon_hours: int = DEFAULT_HORIZON_HOURS,
 ) -> BatteryRuntimeEstimate:
-    """Forward-simulate pure baseload drain in SIMULATION_STEP_MINUTES steps."""
+    """Forward-simulate pure baseload drain to estimate how long the battery lasts.
+
+    Steps through SIMULATION_STEP_MINUTES intervals, subtracting the per-hour
+    baseload at each step. Solar and scheduled charge/discharge are intentionally
+    ignored — this is a worst-case "household-only" reserve estimate.
+
+    Args:
+        battery_status: Live SoC and configured total capacity.
+        battery_config: Battery limits (min_soc used as the depletion threshold).
+        profile: 24-bucket baseload profile supplying per-hour drain rates.
+        local_tz: Timezone for mapping simulation steps to local hours.
+        now: Start of the simulation.
+        horizon_hours: How far ahead to simulate before giving up.
+
+    Returns:
+        BatteryRuntimeEstimate with runtime_minutes/until set to None when the
+        battery does not deplete within the horizon.
+    """
     usable_kwh = max(
         0.0,
         (battery_status.soc - battery_config.min_soc) * battery_status.total_capacity_kwh,
@@ -212,7 +241,15 @@ def estimate_battery_runtime(
 # ---------------------------------------------------------------------------
 
 def _percentile(values: list[float], p: float) -> float:
-    """Linear-interpolation percentile, p in [0, 1]. Empty input → 0.0."""
+    """Compute a linear-interpolation percentile.
+
+    Args:
+        values: Non-empty list of floats (unsorted is fine).
+        p: Percentile in [0, 1].
+
+    Returns:
+        Interpolated percentile value, or 0.0 for empty input.
+    """
     if not values:
         return 0.0
     if len(values) == 1:
@@ -227,5 +264,13 @@ def _percentile(values: list[float], p: float) -> float:
 
 
 def _mean(values: Iterable[float]) -> float:
+    """Return the arithmetic mean of values, or 0.0 for empty input.
+
+    Args:
+        values: Iterable of floats.
+
+    Returns:
+        Mean value, or 0.0 when values is empty.
+    """
     seq = list(values)
     return sum(seq) / len(seq) if seq else 0.0
