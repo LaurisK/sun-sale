@@ -93,7 +93,6 @@ from ..contract.models import (
     CalculationResult,
     ChargingProfile,
     CapacityObservation,
-    DashboardData,
     DegradationCost,
     EstimatedCapacity,
     ForecastErrorSeries,
@@ -121,7 +120,6 @@ from ..pipeline.nodes import (
     BatteryStateNode,
     BatteryStatusNode,
     ChargingProfileNode,
-    DashboardNode,
     DegradationNode,
     ForecastAccuracyNode,
     GenerationNode,
@@ -291,7 +289,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ForecastAccuracyNode(),
             LockoutNode(),
             OptimizerNode(last_inverter_action_ref=inverter_last_ref),
-            DashboardNode(),
         ]
 
         self._engine = DagEngine(nodes)
@@ -555,7 +552,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         """
         reading: BatteryReading | None = primary.get(BatteryReading)
         nordpool: NordpoolData | None = primary.get(NordpoolData)
-        dashboard: DashboardData | None = secondary.get(DashboardData)
         deg: DegradationCost | None = secondary.get(DegradationCost)
         consumption: HouseholdConsumptionReading | None = primary.get(
             HouseholdConsumptionReading,
@@ -576,8 +572,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "prices": nordpool.entries if nordpool else [],
             "grid_power_kw": reading.grid_power_kw if reading else 0.0,
             "battery_power_kw": reading.power_kw if reading else 0.0,
-            "dashboard_slots": dashboard.future_slots if dashboard else [],
-            "solar_frozen_forecast": dashboard.solar_frozen_forecast if dashboard else [],
+            "household_load_kw": reading.household_load_kw if reading else 0.0,
             "base_load_profile": secondary.get(BaseLoadProfile),
             "battery_runtime": secondary.get(BatteryRuntimeEstimate),
             "consumption_today_kwh": (

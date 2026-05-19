@@ -67,6 +67,29 @@ async def async_setup_entry(
     ])
 
 
+def _serialize_forecast_slots(series: GenerationSeries | None) -> list[dict]:
+    """Convert GenerationSeries.slots to [{t, forecast_kwh, forecast_w}] for the frontend.
+
+    Args:
+        series: GenerationSeries produced by the forecast pipeline stage, or None.
+
+    Returns:
+        List of dicts with epoch-ms timestamp, kWh, and watts per slot.
+    """
+    if series is None:
+        return []
+    result = []
+    for slot in series.slots:
+        slot_h = (slot.end - slot.start).total_seconds() / 3600.0
+        w = slot.expected_kwh / slot_h * 1000.0 if slot_h > 0 else 0.0
+        result.append({
+            "t": int(slot.start.timestamp() * 1000),
+            "forecast_kwh": round(slot.expected_kwh, 4),
+            "forecast_w": round(w),
+        })
+    return result
+
+
 class _BaseSensor(CoordinatorEntity, SensorEntity):
     """Shared base for all sunSale sensor entities."""
 
@@ -339,10 +362,9 @@ class ScheduleSensor(_BaseSensor):
 
 
 class InverterModeSensor(_BaseSensor):
-    """Current inverter operating mode as a string — recorded by HA for history.
+    """Current inverter operating mode derived from Schedule and solar forecast.
 
-    State mirrors the inverter_mode field that build_future_slots computes for
-    the current 15-min slot, so the dashboard's past mode band uses real data.
+    Recorded by HA for history so the dashboard's past mode band uses real data.
     """
 
     _attr_name = "sunSale Inverter Mode"
@@ -354,22 +376,44 @@ class InverterModeSensor(_BaseSensor):
 
     @property
     def native_value(self) -> str:
-        """Return the inverter_mode string for the current 15-min dashboard slot."""
-        if self.coordinator.data is None:
+        """Derive inverter mode for the current 15-min slot from Schedule and forecast.
+
+        Returns:
+            Mode string: charge_from_grid, sell_discharge, charge_solar,
+            self_use_sell, or self_use.
+        """
+        data = self.coordinator.data
+        if not data:
             return "idle"
-        slots: list[dict] = self.coordinator.data.get("dashboard_slots", [])
-        if not slots:
-            return "idle"
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        slot_ms = 15 * 60 * 1000
-        cur = next((s for s in slots if s["t"] <= now_ms < s["t"] + slot_ms), None)
-        if cur is None:
-            cur = slots[0]
-        return cur.get("inverter_mode", "idle")
+        schedule: Schedule | None = data.get("schedule")
+        forecast: GenerationSeries | None = data.get("forecast")
+        load_kw: float = data.get("household_load_kw") or 0.0
+
+        now = datetime.now(timezone.utc)
+        slot_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+        slot_end = slot_start + timedelta(minutes=15)
+
+        cur_slot = None
+        if schedule:
+            cur_slot = next((s for s in schedule.slots if s.start <= now < s.end), None)
+
+        solar_kwh = forecast.energy_between(slot_start, slot_end) if forecast else 0.0
+        solar_w = solar_kwh / 0.25 * 1000.0
+        load_w = load_kw * 1000.0
+
+        if cur_slot is None:
+            return "self_use_sell" if solar_w > load_w else "self_use"
+        if cur_slot.action == Action.CHARGE_FROM_GRID:
+            return "charge_from_grid"
+        if cur_slot.action == Action.DISCHARGE_TO_GRID:
+            return "sell_discharge"
+        if cur_slot.action == Action.CHARGE_FROM_SOLAR:
+            return "charge_solar"
+        return "self_use_sell" if solar_w > load_w else "self_use"
 
 
 class DashboardSensor(_BaseSensor):
-    """Exposes pre-built future slots and frozen solar forecast for the panel."""
+    """Aggregates pipeline outputs into a single sensor attribute bundle for the panel."""
 
     _attr_name = "sunSale Dashboard"
     _attr_icon = "mdi:chart-timeline-variant"
@@ -385,7 +429,7 @@ class DashboardSensor(_BaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return pre-built dashboard slots, solar forecast, and battery summary."""
+        """Return serialized pipeline outputs and battery summary for the panel."""
         if self.coordinator.data is None:
             return {}
         now = datetime.now(timezone.utc)
@@ -441,8 +485,7 @@ class DashboardSensor(_BaseSensor):
         return {
             "generated_at": now.isoformat(),
             "now_ts": int(now.timestamp() * 1000),
-            "slots": self.coordinator.data.get("dashboard_slots", []),
-            "solar_frozen_forecast": self.coordinator.data.get("solar_frozen_forecast", []),
+            "forecast_slots": _serialize_forecast_slots(self.coordinator.data.get("forecast")),
             "forecast_error_slots": forecast_error_slots,
             "battery_capacity_kwh": capacity_kwh,
             "battery_soc_pct": soc_pct,

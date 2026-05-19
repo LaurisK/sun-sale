@@ -563,13 +563,6 @@ class BatteryRuntimeEstimate:
     computed_at: datetime
 
 
-@dataclass
-class DashboardData:
-    """Presentation data produced by DashboardNode (sink output)."""
-    future_slots: list[dict]
-    solar_frozen_forecast: list[dict]
-
-
 # ---------------------------------------------------------------------------
 # Structured integration config (used by DAG engine and nodes)
 # ---------------------------------------------------------------------------

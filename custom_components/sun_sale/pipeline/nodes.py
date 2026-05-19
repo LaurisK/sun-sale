@@ -9,7 +9,6 @@ Tier map:
   T2: GenerationNode, DegradationNode
   T3: LockoutNode
   T4: OptimizerNode
-  T5: DashboardNode (sink)
 """
 from __future__ import annotations
 
@@ -23,7 +22,6 @@ from ..inbound import battery as battery_inbound
 from ..inbound import forecast as forecast_module
 from ..inbound import generation as generation_module
 from ..inbound import pricing as pricing_module
-from ..outbound import dashboard as dashboard_module
 from .dag_engine import DagNode, NodeContext
 from ..contract.events import ControlEvent, InverterActionEvent
 from ..contract.models import (
@@ -36,7 +34,6 @@ from ..contract.models import (
     BatteryStatus,
     CalculationResult,
     ChargingProfile,
-    DashboardData,
     DegradationCost,
     EstimatedCapacity,
     ForecastErrorSeries,
@@ -333,39 +330,6 @@ class OptimizerNode(DagNode):
                 events.append(InverterActionEvent(action=current.action, power_kw=current.power_kw))
 
         return schedule, events
-
-
-# ---------------------------------------------------------------------------
-# Tier 5 nodes — sink; consume Tier 1–4 secondary
-# ---------------------------------------------------------------------------
-
-class DashboardNode(DagNode):
-    """Build presentation data for the web panel → DashboardData."""
-
-    tier = 5
-    output_type = DashboardData
-    consumes = [NordpoolData, SolarData, BatteryReading, PriceSeries, GenerationSeries, Schedule]
-
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[DashboardData, list[ControlEvent]]:
-        """Build 15-min future slots and frozen solar forecast for the web panel."""
-        nordpool = ctx.require(NordpoolData)
-        solar = ctx.require(SolarData)
-        reading = ctx.require(BatteryReading)
-        schedule: Schedule | None = ctx.get(Schedule)
-
-        future_slots = dashboard_module.build_future_slots(
-            nordpool=nordpool,
-            solar=solar,
-            reading=reading,
-            schedule=schedule,
-            battery_config=ctx.config.battery,
-            tariff_config=ctx.config.tariff,
-            now=ctx.now,
-        )
-        frozen = dashboard_module.build_solar_frozen_forecast(solar=solar, now=ctx.now)
-        return DashboardData(future_slots=future_slots, solar_frozen_forecast=frozen), []
 
 
 # ---------------------------------------------------------------------------

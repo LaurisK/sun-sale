@@ -76,10 +76,9 @@ flowchart TB
         P_prof["profitability.py<br/>⚠ not wired"]:::missing
     end
 
-    subgraph OUTBOUND["outbound/ — HA-write + presentation"]
+    subgraph OUTBOUND["outbound/ — HA-write + event routing"]
         O_router["event_router.py"]:::old
         O_inv["inverter.py"]:::old
-        O_dash["dashboard.py"]:::old
     end
 
     subgraph ORCH["orchestration/ — glue"]
@@ -109,7 +108,6 @@ flowchart TB
 
     P_nodes -- "ControlEvent list" --> O_router
     O_router --> O_inv
-    P_nodes -- "DashboardData" --> O_dash
 
     ORCH_coord --> I_price & I_fc & I_gen & I_bat & I_hh
     ORCH_coord --> P_engine
@@ -142,7 +140,7 @@ Configuration key names, storage keys, defaults, retention windows. Pure constan
 
 ### `contract/models.py`
 Flat catalogue of every immutable dataclass: configs, primary types, secondary types. New node-level types are added here rather than per-feature submodules.
-- **Exposes:** `Action`, `PriceEntry`, `PriceSlot`, `PriceSeries`, `NordpoolData`, `YesterdayPrices`, `SolarData`, `GenerationSlot`, `GenerationSeries`, `BatteryReading`, `BatteryConfig`, `BatteryState`, `BatteryStatus`, `EstimatedCapacity`, `CapacityObservation`, `DegradationCost`, `CalculationResult`, `ChargingProfile`, `Schedule`, `ScheduleSlot`, `DashboardData`, `TariffConfig`, `SunSaleConfig`, `DayClass`, `DailyPeak`, `PriceHistory`, `ProfitabilityScore`, `BaseLoadProfile`, `BatteryRuntimeEstimate`, `ForecastErrorSeries`, …
+- **Exposes:** `Action`, `PriceEntry`, `PriceSlot`, `PriceSeries`, `NordpoolData`, `YesterdayPrices`, `SolarData`, `GenerationSlot`, `GenerationSeries`, `BatteryReading`, `BatteryConfig`, `BatteryState`, `BatteryStatus`, `EstimatedCapacity`, `CapacityObservation`, `DegradationCost`, `CalculationResult`, `ChargingProfile`, `Schedule`, `ScheduleSlot`, `TariffConfig`, `SunSaleConfig`, `DayClass`, `DailyPeak`, `PriceHistory`, `ProfitabilityScore`, `BaseLoadProfile`, `BatteryRuntimeEstimate`, `ForecastErrorSeries`, …
 - **Depends on:** none.
 - **Tests:** `tests/test_models.py`
   - `test_action_enum_values` — Action enum string values are correct.
@@ -197,9 +195,9 @@ Pure-Python DAG engine + node logic + helpers. All testable without an HA harnes
 - **Tests:** covered indirectly via `tests/test_coordinator.py` (full DAG run).
 
 ### `pipeline/nodes.py`
-13 registered `DagNode` subclasses across 5 tiers; each declares `tier`, `output_type`, `consumes`.
-- **Exposes:** `PricingNode` (T1), `BatteryStateNode` (T1), `BatteryStatusNode` (T1), `GenerationNode` (T2), `ObservedGenerationNode` (T2), `DegradationNode` (T2), `ChargingProfileNode` (T3), `LockoutNode` (T3), `BaseLoadProfileNode` (T3), `BatteryRuntimeNode` (T4), `ForecastAccuracyNode` (T4), `OptimizerNode` (T4), `DashboardNode` (T5).
-- **Depends on:** `pipeline.{battery,calculator,charging_profile,optimizer,base_load,forecast_accuracy}`, `inbound.{pricing,forecast,generation,battery}`, `outbound.dashboard`, `contract.{models,events}`.
+12 registered `DagNode` subclasses across 4 tiers; each declares `tier`, `output_type`, `consumes`.
+- **Exposes:** `PricingNode` (T1), `BatteryStateNode` (T1), `BatteryStatusNode` (T1), `GenerationNode` (T2), `ObservedGenerationNode` (T2), `DegradationNode` (T2), `ChargingProfileNode` (T3), `LockoutNode` (T3), `BaseLoadProfileNode` (T3), `BatteryRuntimeNode` (T4), `ForecastAccuracyNode` (T4), `OptimizerNode` (T4).
+- **Depends on:** `pipeline.{battery,calculator,charging_profile,optimizer,base_load,forecast_accuracy}`, `inbound.{pricing,forecast,generation,battery}`, `contract.{models,events}`.
 - **Tests:** each node's logic is tested in its helper module's test file (e.g. `ChargingProfileNode` in `test_charging_profile.py`).
 
 ### `pipeline/tariff.py`
@@ -360,12 +358,6 @@ Receives the `ControlEvent` list from the DAG, dedupes inverter command keys (`f
 - **Exposes:** `EventRouter`.
 - **Depends on:** `contract.events`, `contract.models`, `outbound.inverter`.
 - **Tests:** none direct (exercised through `test_optimizer.py` event emission and end-to-end `test_coordinator.py`).
-
-### `outbound/dashboard.py`
-Pure presentation builder: `build_future_slots`, `build_solar_frozen_forecast`. Writes nothing — turns typed pipeline data into the dict shape the web panel consumes.
-- **Exposes:** dict payloads (`future_slots`, `solar_frozen_forecast`).
-- **Depends on:** `contract.models`, `pipeline.tariff`.
-- **Tests:** none direct (exposed via `test_debug_view.py` and `test_sensor.py`).
 
 ---
 

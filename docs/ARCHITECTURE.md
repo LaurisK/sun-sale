@@ -45,7 +45,6 @@ HA state machine
 │  T2  GenerationNode   DegradationNode                   │
 │  T3  LockoutNode      ChargingProfileNode               │
 │  T4  OptimizerNode                                      │
-│  T5  DashboardNode                                      │
 │                                                         │
 │  Pure-Python helpers used by nodes:                     │
 │    inbound/pricing.py     (PriceSeries assembly)        │
@@ -99,8 +98,7 @@ custom_components/sun_sale/
 │
 ├── outbound/                    HA-write adapters + event routing
 │   ├── event_router.py          Deduplicates and routes ControlEvents
-│   ├── inverter.py              InverterController (Solis + abstract)
-│   └── dashboard.py             Build future_slots / frozen forecast (pure)
+│   └── inverter.py              InverterController (Solis + abstract)
 │
 └── orchestration/               Glue: schedule, persistence, sensor dict mapping
     ├── coordinator.py           SunSaleCoordinator (DataUpdateCoordinator subclass)
@@ -210,8 +208,6 @@ Dedup happens at two layers:
 
 The `InverterController` contains all platform-specific HA service-call logic and is the only outbound writer to HA.
 
-`outbound/dashboard.py` is also in this layer but is **pure Python** — it builds presentation dicts for `DashboardNode` from already-typed data and writes nothing.
-
 ---
 
 ## 6. Orchestration and update cycle
@@ -235,9 +231,9 @@ The `InverterController` contains all platform-specific HA service-call logic an
 3. **Stitch yesterday solar** — currently still done by mutating `SolarData.entries` in place (legacy path; counterpart for solar of what pricing now owns explicitly).
 4. **Persist today** — extract today's slots from `NordpoolData.entries` and `SolarData.entries` and write them to `STORAGE_KEY_YESTERDAY` so the next cycle can read them as yesterday.
 5. **Capacity estimation** — derive a `CapacityObservation` from the SoC delta vs. `_last_battery_reading`; add it to the `CapacityEstimator` and persist. Inject `EstimatedCapacity` into `primary`.
-6. **DAG run** — `DagEngine.run(primary, config, now)` executes tiers T1→T5; returns `secondary` dict + all emitted events.
+6. **DAG run** — `DagEngine.run(primary, config, now)` executes tiers T1→T4; returns `secondary` dict + all emitted events.
 7. **Route events** — pass each event to `EventRouter.handle()` (only when `automation_enabled`); update `last_dispatched_action` / `last_dispatched_at` for the UI.
-8. **Build sensor dict** — map type-keyed `secondary` entries to the string-keyed dict sensors read (`"pricing"`, `"forecast"`, `"calculation"`, `"schedule"`, `"battery_state"`, `"degradation_cost"`, `"estimated_capacity"`, `"prices"`, `"grid_power_kw"`, `"battery_power_kw"`, `"dashboard_slots"`, `"solar_frozen_forecast"`).
+8. **Build sensor dict** — map type-keyed `secondary` entries to the string-keyed dict sensors read (`"pricing"`, `"forecast"`, `"calculation"`, `"schedule"`, `"battery_state"`, `"degradation_cost"`, `"estimated_capacity"`, `"prices"`, `"grid_power_kw"`, `"battery_power_kw"`, `"household_load_kw"`).
 
 The coordinator contains no domain computation — it owns the schedule, the persistent stores, and the string↔type bridge to sensors.
 
@@ -257,7 +253,6 @@ The coordinator contains no domain computation — it owns the schedule, the per
 | `ChargingProfileNode` | 3 | `BatteryStatus`, `GenerationSeries`, `PriceSeries` | `ChargingProfile` | — |
 | `LockoutNode` | 3 | `PriceSeries`, `GenerationSeries`, `BatteryState` | `CalculationResult` | — |
 | `OptimizerNode` | 4 | `PriceSeries`, `CalculationResult`, `GenerationSeries`, `BatteryState`, `DegradationCost` | `Schedule` | `InverterActionEvent` (on change) |
-| `DashboardNode` | 5 | `NordpoolData`, `SolarData`, `BatteryReading`, `PriceSeries`, `GenerationSeries`, `Schedule` | `DashboardData` | — |
 
 ---
 
@@ -287,7 +282,6 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 | `CalculationResult` | `LockoutNode` | `slots: tuple[SlotDecision, ...]`, `feed_in_lockout_windows`, `total_negative_sale_kwh`, `computed_at` |
 | `ChargingProfile` | `ChargingProfileNode` | `slots: tuple[ChargingProfileSlot, ...]` (today's remaining; `mode ∈ {solar_charge, sell, no_export, idle}`), `free_capacity_kwh`, `today_remaining_generation_kwh`, `solar_exceeds_capacity`, `allocated_solar_kwh`, `total_no_export_kwh`, `computed_at` |
 | `Schedule` | `OptimizerNode` | `slots: list[ScheduleSlot]`, `total_expected_profit_eur`, `degradation_cost_per_kwh`, `computed_at` |
-| `DashboardData` | `DashboardNode` | `future_slots: list[dict]`, `solar_frozen_forecast: list[dict]` |
 
 `PriceSlot` carries `buy_eur_kwh`, `sell_eur_kwh` (can be negative or zero), `spot_eur_kwh`, and `sources: tuple[str, ...]` for diagnostics. Sellability (the strict `> 0` check) lives downstream in the charging-profile stage.
 

@@ -308,13 +308,9 @@
     _buildForecastSlots(dashAttrs, windowStart, windowEnd) {
       const slots = new Map();
       if (!dashAttrs) return slots;
-      for (const f of (dashAttrs.solar_frozen_forecast || [])) {
+      for (const f of (dashAttrs.forecast_slots || [])) {
         if (f.t >= windowStart && f.t <= windowEnd)
           slots.set(f.t, f.forecast_kwh ?? f.forecast_w / 1000 * 0.25);
-      }
-      for (const s of (dashAttrs.slots || [])) {
-        if (s.t >= windowStart && s.t <= windowEnd)
-          slots.set(s.t, s.solar_forecast_kwh ?? s.solar_forecast_w / 1000 * 0.25);
       }
       return slots;
     }
