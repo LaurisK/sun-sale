@@ -48,6 +48,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     base_load_prof = data.get("base_load_profile")
     batt_status = data.get("battery_status")
     batt_runtime = data.get("battery_runtime")
+    profitability = data.get("profitability_score")
 
     cfg = coordinator._config  # noqa: SLF001
     return {
@@ -234,6 +235,20 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "horizon_hours": batt_runtime.horizon_hours,
                 "computed_at": batt_runtime.computed_at.isoformat(),
             } if batt_runtime is not None else None,
+            "profitability_score": {
+                "score": (
+                    round(profitability.score, 4)
+                    if profitability.score is not None else None
+                ),
+                "today_peak_eur_kwh": round(profitability.today_peak_eur_kwh, 4),
+                "today_class": profitability.today_class.value,
+                "class_medians": {
+                    k.value: round(v, 4)
+                    for k, v in profitability.class_medians.items()
+                },
+                "window_days": profitability.window_days,
+                "computed_at": profitability.computed_at.isoformat(),
+            } if profitability is not None else None,
         },
         "outputs": {
             "schedule": {

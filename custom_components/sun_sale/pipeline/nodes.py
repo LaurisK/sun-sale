@@ -18,6 +18,7 @@ from datetime import datetime
 from . import base_load as base_load_module
 from . import battery as battery_module
 from . import calculator, charging_profile as charging_profile_module, forecast_accuracy, optimizer
+from . import profitability as profitability_module
 from ..inbound import battery as battery_inbound
 from ..inbound import forecast as forecast_module
 from ..inbound import generation as generation_module
@@ -42,7 +43,9 @@ from ..contract.models import (
     HouseholdLoadHistory,
     NordpoolData,
     ObservedGenerationSeries,
+    PriceHistory,
     PriceSeries,
+    ProfitabilityScore,
     SolarData,
     Schedule,
     YesterdayPrices,
@@ -255,6 +258,27 @@ class ForecastAccuracyNode(DagNode):
             forecast, observed, now=ctx.now,
         )
         return series, []
+
+
+class ProfitabilityNode(DagNode):
+    """Score today's peak against rolling daily-peak history → ProfitabilityScore."""
+
+    tier = 2
+    output_type = ProfitabilityScore
+    consumes = [PriceSeries, PriceHistory]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[ProfitabilityScore, list[ControlEvent]]:
+        """Compute profitability score using today's peak from PriceSeries and rolling history."""
+        price_series = ctx.require(PriceSeries)
+        history = ctx.require(PriceHistory)
+        score = profitability_module.compute_profitability_score(
+            price_series=price_series,
+            history=history,
+            now=ctx.now,
+        )
+        return score, []
 
 
 class LockoutNode(DagNode):

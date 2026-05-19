@@ -55,6 +55,7 @@ STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"
 STORAGE_KEY_YESTERDAY = f"{DOMAIN}_yesterday"
 STORAGE_KEY_GENERATION = f"{DOMAIN}_generation"
 STORAGE_KEY_HOUSEHOLD_LOAD = f"{DOMAIN}_household_load"
+STORAGE_KEY_PRICE_HISTORY = f"{DOMAIN}_price_history"
 STORAGE_VERSION = 1
 
 # Rolling generation-sample retention (days). Anything older than this is
@@ -65,6 +66,9 @@ GENERATION_HISTORY_RETENTION_DAYS = 2
 # profile window (30d) so a few stale samples at the tail don't strand
 # entries that just left the window.
 HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS = 45
+
+# Rolling price-history retention (days) for profitability scoring.
+PRICE_HISTORY_RETENTION_DAYS = 90
 
 # Update interval (minutes)
 UPDATE_INTERVAL_MINUTES = 5

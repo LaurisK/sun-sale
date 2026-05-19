@@ -30,3 +30,17 @@ Rules:
 - **Section comments** (e.g. `# --- Section name ---`) are acceptable to mark significant logical groups within a module. Keep them sparse.
 - **Inline comments** should explain *why*, never *what*. Add one only when the logic is non-obvious, counter-intuitive, or works around a specific constraint.
 - Do not write comments that merely restate what the code already says.
+
+## Integration check coverage
+
+Every pipeline module that consumes or produces data must have a corresponding deep-check in `tools/integration_check.py`. The check must validate:
+
+- All data the module **consumes** — cross-checked against its upstream source (raw HA entity state, `snap.inputs`, or an upstream `snap.pipeline` key).
+- All data the module **exposes** — every declared field in the debug API serialization, including aggregate totals (sums, counts) verified against per-slot values.
+
+**Servicing modules** — those that only route or actuate without producing pipeline data (e.g. `event_router`, `InverterController`) — are exempt.
+
+When adding a new pipeline module:
+1. Expose its output in `debug_view.py` under `pipeline` (or `outputs` for final deliverables).
+2. Add a `check_<module>()` function and result dataclass.
+3. Add a `<Module>CheckWidget` and wire it into `_DEEP_CATS`, `IntegrationCheckApp`, and `compose()`.

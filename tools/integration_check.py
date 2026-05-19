@@ -398,9 +398,9 @@ def _battery_soc(snap: Snapshot) -> tuple[bool, str]:
     soc = battery.get("soc")
     if soc is None:
         return False, "battery.soc is null"
-    if not (0 <= soc <= 100):
-        return False, f"soc={soc} outside [0, 100]"
-    return True, f"soc={soc}"
+    if not (0.0 <= soc <= 1.0):
+        return False, f"soc={soc:.4f} outside [0.0, 1.0]"
+    return True, f"soc={soc:.1%}"
 
 
 @validator("degradation_cost_present", "battery")
@@ -694,6 +694,7 @@ class CalculationCheckResult:
     skip_reason: str = ""
     module_slot_count: int = 0
     total_negative_sale_kwh: float = 0.0
+    computed_neg_sale_kwh: float = 0.0
     computed_at: str = ""
     lockout_windows: list[dict] = field(default_factory=list)
     slot_rows: list[dict] = field(default_factory=list)
@@ -734,12 +735,15 @@ def check_calculation(snap: Snapshot) -> CalculationCheckResult:
         for s in (pricing.get("slots") or [])
     }
 
+    comp_neg_sale = 0.0
     for s in calc.get("slots") or []:
         start = s.get("start", "")
         sell_act = s.get("sell_allowed", False)
         sell_price = price_by_start.get(start)
         sell_exp = sell_price is not None and sell_price > 0.0
         solar_kwh = s.get("expected_solar_kwh", 0.0)
+        neg_sale_kwh = s.get("expected_solar_negative_sale_kwh", 0.0)
+        comp_neg_sale += neg_sale_kwh
         notes = list(s.get("notes") or [])
         ok = sell_price is None or sell_act == sell_exp
         if not ok:
@@ -751,9 +755,15 @@ def check_calculation(snap: Snapshot) -> CalculationCheckResult:
             "sell_exp": sell_exp,
             "sell_act": sell_act,
             "solar_kwh": solar_kwh,
+            "neg_sale_kwh": neg_sale_kwh,
             "notes": notes,
             "ok": ok,
         })
+
+    result.computed_neg_sale_kwh = round(comp_neg_sale, 4)
+    if result.total_negative_sale_kwh > 0 and abs(comp_neg_sale - result.total_negative_sale_kwh) > 0.01:
+        result.mismatches.append("neg_sale_sum_mismatch")
+        result.overall_ok = False
 
     return result
 
@@ -2157,11 +2167,131 @@ class HouseholdConsumptionCheckWidget(Static):
             yield Static(f"  Consumption today: {kwh_str}")
 
 
+# ---------------------------------------------------------------------------
+# Profitability deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProfitabilityCheckResult:
+    """Result of the profitability deep-check: score range and peak cross-check."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    score: float | None = None
+    today_peak_eur_kwh: float = 0.0
+    today_class: str = ""
+    window_days: int = 0
+    class_medians: dict = field(default_factory=dict)
+    computed_at: str = ""
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_profitability(snap: Snapshot) -> ProfitabilityCheckResult:
+    """Validate profitability score range and cross-check today's peak against pipeline.pricing.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.profitability_score and pipeline.pricing.
+
+    Returns:
+        ProfitabilityCheckResult with score data and overall pass/fail.
+    """
+    result = ProfitabilityCheckResult()
+
+    ps = snap.pipeline.get("profitability_score")
+    if not ps:
+        result.skipped = True
+        result.skip_reason = "pipeline.profitability_score is null (insufficient price history)"
+        return result
+
+    result.score = ps.get("score")
+    result.today_peak_eur_kwh = ps.get("today_peak_eur_kwh", 0.0)
+    result.today_class = ps.get("today_class", "")
+    result.window_days = ps.get("window_days", 0)
+    result.class_medians = dict(ps.get("class_medians") or {})
+    result.computed_at = ps.get("computed_at", "")
+
+    if result.score is not None and not (0.0 <= result.score <= 1.0):
+        result.mismatches.append("score_out_of_range")
+        result.overall_ok = False
+
+    # Cross-check: today's peak should equal max spot across today's pricing slots.
+    pricing = snap.pipeline.get("pricing")
+    if pricing and result.today_peak_eur_kwh > 0:
+        now_utc = datetime.now(timezone.utc)
+        today_utc = now_utc.date()
+        today_spots = []
+        for s in pricing.get("slots") or []:
+            try:
+                slot_date = datetime.fromisoformat(s["start"]).astimezone(timezone.utc).date()
+            except (KeyError, ValueError):
+                continue
+            if slot_date == today_utc:
+                today_spots.append(s.get("spot", 0.0))
+        if today_spots:
+            expected_peak = max(today_spots)
+            if abs(expected_peak - result.today_peak_eur_kwh) > 1e-3:
+                result.mismatches.append("peak_mismatch")
+                result.overall_ok = False
+
+    return result
+
+
+class ProfitabilityCheckWidget(Static):
+    """Collapsible profitability deep-check: score, peak, and window stats."""
+
+    DEFAULT_CSS = "ProfitabilityCheckWidget { height: auto; }"
+
+    def __init__(self, pr: ProfitabilityCheckResult) -> None:
+        """Initialise with the pre-computed profitability check result.
+
+        Args:
+            pr: Result of check_profitability() for one coordinator.
+        """
+        super().__init__()
+        self._pr = pr
+
+    def compose(self) -> ComposeResult:
+        """Render score and window stats as a collapsible static block."""
+        pr = self._pr
+
+        if pr.skipped:
+            yield Static(f"  ⚠  profitability_check   SKIP   {pr.skip_reason}")
+            return
+
+        color = "green" if pr.overall_ok else "red"
+        mark = "✓" if pr.overall_ok else "✗"
+        status = "PASS" if pr.overall_ok else "FAIL"
+        score_str = f"{pr.score:.0%}" if pr.score is not None else "sparse"
+        title = (
+            f"[{color}]{mark}[/{color}]  profitability_check   [{color}]{status}[/{color}]"
+            f"   score={score_str}  peak={pr.today_peak_eur_kwh:.4f}€/kWh"
+            f"  class={pr.today_class}  window={pr.window_days}d"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            medians_str = ", ".join(
+                f"{k}={v:.4f}" for k, v in sorted(pr.class_medians.items())
+            )
+            peak_ok = "peak_mismatch" not in pr.mismatches
+            peak_style = "green" if peak_ok else "red"
+            yield Static(
+                f"  Today class: {pr.today_class}\n"
+                f"  Today peak: [{peak_style}]{pr.today_peak_eur_kwh:.4f}[/{peak_style}] €/kWh\n"
+                f"  Score: {score_str}\n"
+                f"  Window: {pr.window_days} days\n"
+                f"  Class medians: {medians_str or '—'}\n"
+                f"  Computed at: {pr.computed_at}",
+                markup=True,
+            )
+
+
 # Categories handled by deep-check widgets; excluded from the plain validator display.
 _DEEP_CATS: frozenset[str] = frozenset({
     "forecast", "pricing", "calculation", "schedule", "battery",
     "observed_generation", "forecast_accuracy", "charging_profile", "base_load",
-    "battery_runtime", "household_consumption",
+    "battery_runtime", "household_consumption", "profitability",
 })
 
 
@@ -2348,6 +2478,14 @@ class CalculationCheckWidget(Static):
         )
 
         with Collapsible(title=title, collapsed=True):
+            if cc.total_negative_sale_kwh > 0:
+                neg_ok = "neg_sale_sum_mismatch" not in cc.mismatches
+                neg_style = "green" if neg_ok else "red"
+                yield Static(
+                    f"  neg_sale: computed [{neg_style}]{cc.computed_neg_sale_kwh:.4f}[/{neg_style}]kWh"
+                    f"  declared {cc.total_negative_sale_kwh:.4f}kWh",
+                    markup=True,
+                )
             with Collapsible(title="Slots", collapsed=False):
                 yield CalculationSlotsTable(cc)
             if cc.lockout_windows:
@@ -2595,6 +2733,7 @@ class IntegrationCheckApp(App):
     BaseLoadSlotsTable DataTable { height: 15; }
     BatteryRuntimeCheckWidget { height: auto; }
     HouseholdConsumptionCheckWidget { height: auto; }
+    ProfitabilityCheckWidget { height: auto; }
     """
 
     def __init__(
@@ -2611,6 +2750,7 @@ class IntegrationCheckApp(App):
         base_load_results: dict[str, BaseLoadCheckResult],
         battery_runtime_results: dict[str, BatteryRuntimeCheckResult],
         household_consumption_results: dict[str, HouseholdConsumptionCheckResult],
+        profitability_results: dict[str, ProfitabilityCheckResult],
     ) -> None:
         """Initialise with validator report and all deep-check results.
 
@@ -2627,6 +2767,7 @@ class IntegrationCheckApp(App):
             base_load_results: Per-entry base load profile deep-check results.
             battery_runtime_results: Per-entry battery runtime deep-check results.
             household_consumption_results: Per-entry household consumption deep-check results.
+            profitability_results: Per-entry profitability score deep-check results.
         """
         super().__init__()
         self._report = report
@@ -2641,6 +2782,7 @@ class IntegrationCheckApp(App):
         self._base_load_results = base_load_results
         self._battery_runtime_results = battery_runtime_results
         self._household_consumption_results = household_consumption_results
+        self._profitability_results = profitability_results
         self.exit_code = 0
 
     def _all_deep(self) -> list:
@@ -2661,6 +2803,7 @@ class IntegrationCheckApp(App):
             + list(self._base_load_results.values())
             + list(self._battery_runtime_results.values())
             + list(self._household_consumption_results.values())
+            + list(self._profitability_results.values())
         )
 
     def compose(self) -> ComposeResult:
@@ -2693,6 +2836,7 @@ class IntegrationCheckApp(App):
                 ("base_load",               BaseLoadCheckWidget,                self._base_load_results),
                 ("battery_runtime",         BatteryRuntimeCheckWidget,          self._battery_runtime_results),
                 ("household_consumption",   HouseholdConsumptionCheckWidget,    self._household_consumption_results),
+                ("profitability",           ProfitabilityCheckWidget,           self._profitability_results),
             ):
                 r = results_map.get(eid)
                 if r is not None:
@@ -2886,13 +3030,14 @@ def main(argv: list[str] | None = None) -> int:
     base_load_results              = {s.entry_id: check_base_load(s)                 for s in snapshots}
     battery_runtime_results        = {s.entry_id: check_battery_runtime(s)           for s in snapshots}
     household_consumption_results  = {s.entry_id: check_household_consumption(s)     for s in snapshots}
+    profitability_results          = {s.entry_id: check_profitability(s)             for s in snapshots}
     app = IntegrationCheckApp(
         report,
         forecast_results, pricing_results, calculation_results,
         schedule_results, battery_results,
         observed_gen_results, forecast_acc_results, charging_profile_results,
         base_load_results, battery_runtime_results,
-        household_consumption_results,
+        household_consumption_results, profitability_results,
     )
     app.run(inline=True)
     return app.exit_code

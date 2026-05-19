@@ -10,7 +10,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 try:
     from zoneinfo import ZoneInfo
@@ -73,9 +73,11 @@ from ..contract.const import (
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
     DOMAIN,
     GENERATION_HISTORY_RETENTION_DAYS,
+    PRICE_HISTORY_RETENTION_DAYS,
     STORAGE_KEY_CAPACITY,
     STORAGE_KEY_GENERATION,
     STORAGE_KEY_HOUSEHOLD_LOAD,
+    STORAGE_KEY_PRICE_HISTORY,
     STORAGE_KEY_YESTERDAY,
     STORAGE_VERSION,
     UPDATE_INTERVAL_MINUTES,
@@ -93,6 +95,8 @@ from ..contract.models import (
     CalculationResult,
     ChargingProfile,
     CapacityObservation,
+    DailyPeak,
+    DayClass,
     DegradationCost,
     EstimatedCapacity,
     ForecastErrorSeries,
@@ -106,7 +110,9 @@ from ..contract.models import (
     NordpoolData,
     ObservedGenerationSeries,
     PriceEntry,
+    PriceHistory,
     PriceSeries,
+    ProfitabilityScore,
     SolarData,
     SolarEntry,
     Schedule,
@@ -127,8 +133,10 @@ from ..pipeline.nodes import (
     ObservedGenerationNode,
     OptimizerNode,
     PricingNode,
+    ProfitabilityNode,
     make_last_ref,
 )
+from ..pipeline import profitability as profitability_module
 from ..inbound.battery import BatteryTranslator
 from ..inbound.forecast import SolarTranslator
 from ..inbound.generation import GenerationTranslator
@@ -181,6 +189,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._generation_samples: list[GenerationReading] = []
         self._household_load_store: Store | None = None
         self._household_load_samples: list[HouseholdLoadSample] = []
+        self._price_history_store: Store | None = None
+        self._daily_peak_history: list[DailyPeak] = []
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
@@ -287,6 +297,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ChargingProfileNode(),
             BatteryRuntimeNode(),
             ForecastAccuracyNode(),
+            ProfitabilityNode(),
             LockoutNode(),
             OptimizerNode(last_inverter_action_ref=inverter_last_ref),
         ]
@@ -325,6 +336,19 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 )
                 for s in household_stored.get("samples", [])
             ]
+
+        self._price_history_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_PRICE_HISTORY)
+        price_history_stored = await self._price_history_store.async_load()
+        if price_history_stored:
+            for p in price_history_stored.get("peaks", []):
+                try:
+                    self._daily_peak_history.append(DailyPeak(
+                        day=date.fromisoformat(p["day"]),
+                        peak_eur_kwh=p["peak"],
+                        day_class=DayClass(p["class"]),
+                    ))
+                except (KeyError, ValueError):
+                    continue
 
         self._yesterday_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_YESTERDAY)
         yesterday_stored = await self._yesterday_store.async_load()
@@ -453,6 +477,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 samples=tuple(self._household_load_samples),
             )
 
+            primary[PriceHistory] = PriceHistory(peaks=tuple(self._daily_peak_history))
+
             current_reading: BatteryReading | None = primary.get(BatteryReading)
             if current_reading is not None:
                 obs = self._build_capacity_observation(current_reading, now)
@@ -467,6 +493,39 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             )
 
             secondary, events = await self._engine.run(primary, self._sun_sale_config, now)
+
+            pricing_result: PriceSeries | None = secondary.get(PriceSeries)
+            if pricing_result is not None:
+                today_utc = now.date()
+                today_peak_val = profitability_module.today_peak_from_price_series(
+                    pricing_result, today_utc
+                )
+                if today_peak_val is not None:
+                    new_peak = DailyPeak(
+                        day=today_utc,
+                        peak_eur_kwh=today_peak_val,
+                        day_class=profitability_module.classify_day(today_utc),
+                    )
+                    self._daily_peak_history = [
+                        p for p in self._daily_peak_history if p.day != today_utc
+                    ]
+                    self._daily_peak_history.append(new_peak)
+                    self._daily_peak_history.sort(key=lambda p: p.day)
+                    cutoff = today_utc - timedelta(days=PRICE_HISTORY_RETENTION_DAYS)
+                    self._daily_peak_history = [
+                        p for p in self._daily_peak_history if p.day >= cutoff
+                    ]
+                    if self._price_history_store is not None:
+                        await self._price_history_store.async_save({
+                            "peaks": [
+                                {
+                                    "day": p.day.isoformat(),
+                                    "peak": p.peak_eur_kwh,
+                                    "class": p.day_class.value,
+                                }
+                                for p in self._daily_peak_history
+                            ]
+                        })
 
             if self.automation_enabled and self._event_router is not None:
                 for event in events:
@@ -575,6 +634,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "household_load_kw": reading.household_load_kw if reading else 0.0,
             "base_load_profile": secondary.get(BaseLoadProfile),
             "battery_runtime": secondary.get(BatteryRuntimeEstimate),
+            "profitability_score": secondary.get(ProfitabilityScore),
             "consumption_today_kwh": (
                 consumption.today_total_kwh if consumption else None
             ),
