@@ -581,6 +581,728 @@ def check_forecast(snap: Snapshot) -> ForecastCheckResult:
 
 
 # ---------------------------------------------------------------------------
+# Pricing deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PricingCheckResult:
+    """Result of the pricing deep-check: tariff formula vs module output."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    module_slot_count: int = 0
+    resolution_s: int = 0
+    computed_at: str = ""
+    negative_sell_count: int = 0
+    tariff_config: dict = field(default_factory=dict)
+    slot_rows: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_pricing(snap: Snapshot) -> PricingCheckResult:
+    """Verify every pricing slot against the tariff formula.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.pricing and inputs.tariff_config.
+
+    Returns:
+        PricingCheckResult with per-slot formula comparisons and overall pass/fail.
+    """
+    result = PricingCheckResult()
+
+    pricing = snap.pipeline.get("pricing")
+    if not pricing:
+        result.skipped = True
+        result.skip_reason = "pipeline.pricing is null"
+        return result
+
+    tariff = snap.inputs.get("tariff_config")
+    if not tariff:
+        result.skipped = True
+        result.skip_reason = "inputs.tariff_config is null"
+        return result
+
+    result.module_slot_count = pricing.get("slot_count", 0)
+    result.resolution_s = pricing.get("resolution_s", 0)
+    result.computed_at = pricing.get("computed_at", "")
+    result.negative_sell_count = pricing.get("negative_sell_count", 0)
+    result.tariff_config = dict(tariff)
+
+    dist = tariff.get("distribution_fee", 0.0)
+    markup = tariff.get("markup", 0.0)
+    tax = tariff.get("tax_rate", 0.0)
+    s_dist = tariff.get("sell_distribution_fee", 0.0)
+    s_markup = tariff.get("sell_markup", 0.0)
+    s_tax = tariff.get("sell_tax_rate", 0.0)
+    TOL = 1e-3
+
+    for s in pricing.get("slots") or []:
+        spot = s.get("spot", 0.0)
+        act_buy = s.get("buy", 0.0)
+        act_sell = s.get("sell", 0.0)
+        exp_buy = (spot + dist + markup) * (1 + tax)
+        exp_sell = (spot - s_dist - s_markup) * (1 - s_tax)
+        ok = abs(act_buy - exp_buy) <= TOL and abs(act_sell - exp_sell) <= TOL
+        if not ok:
+            result.mismatches.append(s.get("start", ""))
+            result.overall_ok = False
+        result.slot_rows.append({
+            "start": s.get("start", ""),
+            "spot": spot,
+            "exp_buy": exp_buy,
+            "act_buy": act_buy,
+            "exp_sell": exp_sell,
+            "act_sell": act_sell,
+            "ok": ok,
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Calculation deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CalculationCheckResult:
+    """Result of the calculation deep-check: sell_allowed logic vs pricing sell prices."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    module_slot_count: int = 0
+    total_negative_sale_kwh: float = 0.0
+    computed_at: str = ""
+    lockout_windows: list[dict] = field(default_factory=list)
+    slot_rows: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_calculation(snap: Snapshot) -> CalculationCheckResult:
+    """Verify calculation sell_allowed flags match the pricing sell-price sign.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.calculation and pipeline.pricing.
+
+    Returns:
+        CalculationCheckResult with per-slot sell_allowed comparisons and overall pass/fail.
+    """
+    result = CalculationCheckResult()
+
+    calc = snap.pipeline.get("calculation")
+    if not calc:
+        result.skipped = True
+        result.skip_reason = "pipeline.calculation is null"
+        return result
+
+    pricing = snap.pipeline.get("pricing")
+    if not pricing:
+        result.skipped = True
+        result.skip_reason = "pipeline.pricing is null (needed for expected sell_allowed)"
+        return result
+
+    result.module_slot_count = calc.get("slot_count", 0)
+    result.total_negative_sale_kwh = calc.get("total_negative_sale_kwh", 0.0)
+    result.computed_at = calc.get("computed_at", "")
+    result.lockout_windows = list(calc.get("feed_in_lockout_windows") or [])
+
+    price_by_start: dict[str, float] = {
+        s["start"]: s.get("sell", 0.0)
+        for s in (pricing.get("slots") or [])
+    }
+
+    for s in calc.get("slots") or []:
+        start = s.get("start", "")
+        sell_act = s.get("sell_allowed", False)
+        sell_price = price_by_start.get(start)
+        sell_exp = sell_price is not None and sell_price > 0.0
+        solar_kwh = s.get("expected_solar_kwh", 0.0)
+        notes = list(s.get("notes") or [])
+        ok = sell_price is None or sell_act == sell_exp
+        if not ok:
+            result.mismatches.append(start)
+            result.overall_ok = False
+        result.slot_rows.append({
+            "start": start,
+            "sell_price": sell_price,
+            "sell_exp": sell_exp,
+            "sell_act": sell_act,
+            "solar_kwh": solar_kwh,
+            "notes": notes,
+            "ok": ok,
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Schedule deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScheduleCheckResult:
+    """Result of the schedule deep-check: slot ordering and profit consistency."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    slot_count: int = 0
+    total_expected_profit_eur: float = 0.0
+    computed_profit_sum: float = 0.0
+    slot_rows: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_schedule(snap: Snapshot) -> ScheduleCheckResult:
+    """Validate schedule slot ordering and summed profit matches the declared total.
+
+    Args:
+        snap: Coordinator snapshot containing outputs.schedule.
+
+    Returns:
+        ScheduleCheckResult with per-slot data and overall pass/fail.
+    """
+    result = ScheduleCheckResult()
+
+    schedule = snap.outputs.get("schedule")
+    if not schedule:
+        result.skipped = True
+        result.skip_reason = "outputs.schedule is null"
+        return result
+
+    slots = schedule.get("slots") or []
+    result.slot_count = len(slots)
+    result.total_expected_profit_eur = schedule.get("total_expected_profit_eur") or 0.0
+
+    now = datetime.now(timezone.utc)
+    last_dt: datetime | None = None
+    computed_profit = 0.0
+
+    for s in slots:
+        start_str = s.get("start", "")
+        end_str = s.get("end", start_str)
+
+        try:
+            start_dt: datetime | None = datetime.fromisoformat(start_str).astimezone(timezone.utc)
+        except (ValueError, AttributeError):
+            start_dt = None
+
+        try:
+            end_dt: datetime | None = datetime.fromisoformat(end_str).astimezone(timezone.utc)
+        except (ValueError, AttributeError):
+            end_dt = None
+
+        is_current = (
+            start_dt is not None and end_dt is not None and start_dt <= now < end_dt
+        )
+        ok = last_dt is None or start_dt is None or start_dt >= last_dt
+        if not ok:
+            result.mismatches.append(start_str)
+            result.overall_ok = False
+
+        profit = s.get("expected_profit_eur") or 0.0
+        computed_profit += profit
+
+        result.slot_rows.append({
+            "start": start_str,
+            "end": end_str,
+            "action": s.get("action", ""),
+            "power_kw": s.get("power_kw") or 0.0,
+            "profit_eur": profit,
+            "reason": s.get("reason", "") or "",
+            "is_current": is_current,
+            "ok": ok,
+        })
+
+        if start_dt is not None:
+            last_dt = start_dt
+
+    result.computed_profit_sum = computed_profit
+    if result.slot_count > 0 and abs(computed_profit - result.total_expected_profit_eur) > 1e-3:
+        result.mismatches.append("profit_sum")
+        result.overall_ok = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Battery deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BatteryCheckResult:
+    """Result of the battery deep-check: SOC range, capacity, power limits, and degradation cost."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    # BatteryState (inputs.battery)
+    soc: float | None = None
+    power_kw: float | None = None
+    estimated_capacity_kwh: float | None = None
+    grid_power_kw: float | None = None
+    # BatteryStatus (pipeline.battery_status)
+    total_capacity_kwh: float | None = None
+    max_charge_power_kw: float | None = None
+    max_discharge_power_kw: float | None = None
+    remaining_capacity_kwh: float | None = None
+    # DegradationCost (pipeline.degradation_cost_per_kwh)
+    degradation_cost_per_kwh: float | None = None
+    expected_remaining_capacity_kwh: float | None = None
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_battery(snap: Snapshot) -> BatteryCheckResult:
+    """Validate battery SOC, capacity consistency, and degradation cost presence.
+
+    Args:
+        snap: Coordinator snapshot containing inputs.battery, pipeline.battery_status,
+              and pipeline.degradation_cost_per_kwh.
+
+    Returns:
+        BatteryCheckResult with observed values and overall pass/fail.
+    """
+    result = BatteryCheckResult()
+
+    battery = snap.inputs.get("battery")
+    if battery is None:
+        result.skipped = True
+        result.skip_reason = "inputs.battery is null (no battery configured)"
+        return result
+
+    result.soc = battery.get("soc")
+    result.power_kw = battery.get("power_kw")
+    result.estimated_capacity_kwh = battery.get("estimated_capacity_kwh")
+    result.grid_power_kw = snap.inputs.get("grid_power_kw")
+    result.degradation_cost_per_kwh = snap.pipeline.get("degradation_cost_per_kwh")
+
+    bs = snap.pipeline.get("battery_status")
+    if bs:
+        result.total_capacity_kwh = bs.get("total_capacity_kwh")
+        result.max_charge_power_kw = bs.get("max_charge_power_kw")
+        result.max_discharge_power_kw = bs.get("max_discharge_power_kw")
+        result.remaining_capacity_kwh = bs.get("remaining_capacity_kwh")
+
+    # soc is stored as 0.0–1.0 fraction
+    if result.soc is not None and not (0.0 <= result.soc <= 1.0):
+        result.mismatches.append("soc_out_of_range")
+        result.overall_ok = False
+
+    if result.total_capacity_kwh and result.soc is not None and result.remaining_capacity_kwh is not None:
+        expected_rem = result.soc * result.total_capacity_kwh
+        result.expected_remaining_capacity_kwh = expected_rem
+        if abs(expected_rem - result.remaining_capacity_kwh) > 0.1:
+            result.mismatches.append("remaining_capacity_inconsistent")
+            result.overall_ok = False
+
+    if result.estimated_capacity_kwh:
+        if result.degradation_cost_per_kwh is None or result.degradation_cost_per_kwh <= 0:
+            result.mismatches.append("degradation_cost_missing")
+            result.overall_ok = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Observed generation deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ObservedGenerationCheckResult:
+    """Result of the observed-generation deep-check: inverter counter vs declared totals."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    slot_count: int = 0
+    total_yesterday_kwh: float = 0.0
+    total_today_so_far_kwh: float = 0.0
+    computed_yesterday_kwh: float = 0.0
+    computed_today_kwh: float = 0.0
+    computed_at: str = ""
+    slot_rows: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_observed_generation(snap: Snapshot) -> ObservedGenerationCheckResult:
+    """Verify observed generation slot values are non-negative and daily totals match slot sums.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.observed_generation.
+
+    Returns:
+        ObservedGenerationCheckResult with per-slot data and overall pass/fail.
+    """
+    result = ObservedGenerationCheckResult()
+
+    og = snap.pipeline.get("observed_generation")
+    if not og:
+        result.skipped = True
+        result.skip_reason = "pipeline.observed_generation is null (no inverter history yet)"
+        return result
+
+    result.slot_count = og.get("slot_count", 0)
+    result.total_yesterday_kwh = og.get("total_yesterday_kwh", 0.0)
+    result.total_today_so_far_kwh = og.get("total_today_so_far_kwh", 0.0)
+    result.computed_at = og.get("computed_at", "")
+
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    comp_yesterday = 0.0
+    comp_today = 0.0
+
+    for s in og.get("slots") or []:
+        start_str = s.get("start", "")
+        kwh = s.get("generated_kwh", 0.0)
+        ok = kwh >= -1e-6
+        if not ok:
+            result.mismatches.append(start_str)
+            result.overall_ok = False
+        try:
+            d = datetime.fromisoformat(start_str).astimezone(timezone.utc).date()
+        except (ValueError, AttributeError):
+            d = None
+        if d == yesterday:
+            comp_yesterday += kwh
+        elif d == today:
+            comp_today += kwh
+        result.slot_rows.append({"start": start_str, "generated_kwh": kwh, "ok": ok})
+
+    result.computed_yesterday_kwh = round(comp_yesterday, 4)
+    result.computed_today_kwh = round(comp_today, 4)
+    TOL = 0.01
+    if abs(comp_yesterday - result.total_yesterday_kwh) > TOL:
+        result.mismatches.append("yesterday_total_mismatch")
+        result.overall_ok = False
+    if abs(comp_today - result.total_today_so_far_kwh) > TOL:
+        result.mismatches.append("today_total_mismatch")
+        result.overall_ok = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Forecast accuracy deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ForecastAccuracyCheckResult:
+    """Result of the forecast-accuracy deep-check: error arithmetic and aggregate metrics."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    slot_count: int = 0
+    total_forecast_kwh: float = 0.0
+    total_observed_kwh: float = 0.0
+    total_error_kwh: float = 0.0
+    mean_absolute_error_kwh: float = 0.0
+    bias_kwh: float = 0.0
+    mape: float | None = None
+    computed_at: str = ""
+    slot_rows: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_forecast_accuracy(snap: Snapshot) -> ForecastAccuracyCheckResult:
+    """Verify per-slot error arithmetic and total_error_kwh sum match slot data.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.forecast_error.
+
+    Returns:
+        ForecastAccuracyCheckResult with per-slot errors and overall pass/fail.
+    """
+    result = ForecastAccuracyCheckResult()
+
+    fe = snap.pipeline.get("forecast_error")
+    if not fe:
+        result.skipped = True
+        result.skip_reason = "pipeline.forecast_error is null (no inverter history for comparison)"
+        return result
+
+    result.slot_count = fe.get("slot_count", 0)
+    result.total_forecast_kwh = fe.get("total_forecast_kwh", 0.0)
+    result.total_observed_kwh = fe.get("total_observed_kwh", 0.0)
+    result.total_error_kwh = fe.get("total_error_kwh", 0.0)
+    result.mean_absolute_error_kwh = fe.get("mean_absolute_error_kwh", 0.0)
+    result.bias_kwh = fe.get("bias_kwh", 0.0)
+    result.mape = fe.get("mean_absolute_percentage_error")
+    result.computed_at = fe.get("computed_at", "")
+
+    comp_error = 0.0
+    for s in fe.get("slots") or []:
+        start_str = s.get("start", "")
+        f_kwh = s.get("forecast_kwh", 0.0)
+        o_kwh = s.get("observed_kwh", 0.0)
+        e_kwh = s.get("error_kwh", 0.0)
+        ok = abs(e_kwh - (o_kwh - f_kwh)) < 1e-4
+        if not ok:
+            result.mismatches.append(start_str)
+            result.overall_ok = False
+        comp_error += e_kwh
+        result.slot_rows.append({
+            "start": start_str,
+            "forecast_kwh": f_kwh,
+            "observed_kwh": o_kwh,
+            "error_kwh": e_kwh,
+            "relative_error": s.get("relative_error"),
+            "ok": ok,
+        })
+
+    if result.slot_count > 0 and abs(comp_error - result.total_error_kwh) > 0.01:
+        result.mismatches.append("total_error_sum_mismatch")
+        result.overall_ok = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Charging profile deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ChargingProfileCheckResult:
+    """Result of the charging-profile deep-check: mode logic and aggregate kWh sums."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    slot_count: int = 0
+    free_capacity_kwh: float = 0.0
+    today_remaining_generation_kwh: float = 0.0
+    solar_exceeds_capacity: bool = False
+    allocated_solar_kwh: float = 0.0
+    total_no_export_kwh: float = 0.0
+    computed_allocated_kwh: float = 0.0
+    computed_no_export_kwh: float = 0.0
+    computed_at: str = ""
+    slot_rows: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_charging_profile(snap: Snapshot) -> ChargingProfileCheckResult:
+    """Verify charging profile sell/no-export mode logic and allocated kWh sums.
+
+    SELL slots must have positive sell price; NO_EXPORT slots must have non-positive sell price.
+    Slot-level sums of each mode must match the declared allocated_solar_kwh and total_no_export_kwh.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.charging_profile.
+
+    Returns:
+        ChargingProfileCheckResult with per-slot mode data and overall pass/fail.
+    """
+    result = ChargingProfileCheckResult()
+
+    cp = snap.pipeline.get("charging_profile")
+    if not cp:
+        result.skipped = True
+        result.skip_reason = "pipeline.charging_profile is null"
+        return result
+
+    result.slot_count = cp.get("slot_count", 0)
+    result.free_capacity_kwh = cp.get("free_capacity_kwh", 0.0)
+    result.today_remaining_generation_kwh = cp.get("today_remaining_generation_kwh", 0.0)
+    result.solar_exceeds_capacity = cp.get("solar_exceeds_capacity", False)
+    result.allocated_solar_kwh = cp.get("allocated_solar_kwh", 0.0)
+    result.total_no_export_kwh = cp.get("total_no_export_kwh", 0.0)
+    result.computed_at = cp.get("computed_at", "")
+
+    comp_allocated = 0.0
+    comp_no_export = 0.0
+
+    for s in cp.get("slots") or []:
+        start_str = s.get("start", "")
+        mode = (s.get("mode") or "").lower()
+        expected_kwh = s.get("expected_kwh", 0.0)
+        sell_eur = s.get("sell_eur_kwh", 0.0)
+
+        ok = True
+        if mode == "sell" and sell_eur <= 0:
+            result.mismatches.append(f"sell_no_price:{start_str[:16]}")
+            result.overall_ok = False
+            ok = False
+        elif mode == "no_export" and sell_eur > 0:
+            result.mismatches.append(f"no_export_positive_price:{start_str[:16]}")
+            result.overall_ok = False
+            ok = False
+
+        if mode == "solar_charge":
+            comp_allocated += expected_kwh
+        elif mode == "no_export":
+            comp_no_export += expected_kwh
+
+        result.slot_rows.append({
+            "start": start_str,
+            "mode": mode,
+            "expected_kwh": expected_kwh,
+            "sell_eur_kwh": sell_eur,
+            "ok": ok,
+        })
+
+    result.computed_allocated_kwh = round(comp_allocated, 4)
+    result.computed_no_export_kwh = round(comp_no_export, 4)
+    TOL = 0.01
+    if abs(comp_allocated - result.allocated_solar_kwh) > TOL:
+        result.mismatches.append("allocated_solar_sum_mismatch")
+        result.overall_ok = False
+    if abs(comp_no_export - result.total_no_export_kwh) > TOL:
+        result.mismatches.append("no_export_sum_mismatch")
+        result.overall_ok = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Base load deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BaseLoadCheckResult:
+    """Result of the base-load deep-check: 24 hourly slots, non-negative values, confidence."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    fallback_kw: float = 0.0
+    overall_p10_kw: float = 0.0
+    overall_median_kw: float = 0.0
+    confidence: float | None = None
+    sample_count: int = 0
+    distinct_days: int = 0
+    computed_at: str = ""
+    slot_rows: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_base_load(snap: Snapshot) -> BaseLoadCheckResult:
+    """Verify base-load profile has 24 slots with non-negative kW values.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.base_load_profile.
+
+    Returns:
+        BaseLoadCheckResult with per-hour data and overall pass/fail.
+    """
+    result = BaseLoadCheckResult()
+
+    blp = snap.pipeline.get("base_load_profile")
+    if not blp:
+        result.skipped = True
+        result.skip_reason = "pipeline.base_load_profile is null"
+        return result
+
+    result.fallback_kw = blp.get("fallback_kw", 0.0)
+    result.overall_p10_kw = blp.get("overall_p10_kw", 0.0)
+    result.overall_median_kw = blp.get("overall_median_kw", 0.0)
+    result.confidence = blp.get("confidence")
+    result.sample_count = blp.get("sample_count", 0)
+    result.distinct_days = blp.get("distinct_days", 0)
+    result.computed_at = blp.get("computed_at", "")
+
+    slots = blp.get("slots") or []
+    if len(slots) != 24:
+        result.mismatches.append(f"slot_count={len(slots)} (expected 24)")
+        result.overall_ok = False
+
+    if result.confidence is not None and not (0.0 <= result.confidence <= 1.0):
+        result.mismatches.append("confidence_out_of_range")
+        result.overall_ok = False
+
+    for s in slots:
+        hour = s.get("hour", 0)
+        kw = s.get("baseload_kw", 0.0)
+        ok = kw >= 0.0
+        if not ok:
+            result.mismatches.append(f"negative_kw_h{hour}")
+            result.overall_ok = False
+        result.slot_rows.append({
+            "hour": hour,
+            "baseload_kw": kw,
+            "sample_count": s.get("sample_count", 0),
+            "is_fallback": s.get("is_fallback", False),
+            "ok": ok,
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Battery runtime deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BatteryRuntimeCheckResult:
+    """Result of the battery-runtime deep-check: usable kWh, drain rate, and runtime estimate."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    remaining_kwh_usable: float = 0.0
+    avg_drain_kw_next_hour: float = 0.0
+    runtime_minutes: float | None = None
+    expected_runtime_minutes: float | None = None
+    until: str | None = None
+    horizon_hours: int = 0
+    computed_at: str = ""
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_battery_runtime(snap: Snapshot) -> BatteryRuntimeCheckResult:
+    """Validate battery runtime estimate: non-negative remaining kWh and drain rate.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.battery_runtime.
+
+    Returns:
+        BatteryRuntimeCheckResult with runtime data and overall pass/fail.
+    """
+    result = BatteryRuntimeCheckResult()
+
+    brt = snap.pipeline.get("battery_runtime")
+    if not brt:
+        result.skipped = True
+        result.skip_reason = "pipeline.battery_runtime is null"
+        return result
+
+    result.remaining_kwh_usable = brt.get("remaining_kwh_usable", 0.0)
+    result.avg_drain_kw_next_hour = brt.get("avg_drain_kw_next_hour", 0.0)
+    result.runtime_minutes = brt.get("runtime_minutes")
+    result.until = brt.get("until")
+    result.horizon_hours = brt.get("horizon_hours", 0)
+    result.computed_at = brt.get("computed_at", "")
+
+    if result.remaining_kwh_usable < -1e-6:
+        result.mismatches.append("negative_remaining_kwh")
+        result.overall_ok = False
+
+    if result.avg_drain_kw_next_hour < 0:
+        result.mismatches.append("negative_drain_rate")
+        result.overall_ok = False
+
+    if result.avg_drain_kw_next_hour > 0:
+        expected_rt = (result.remaining_kwh_usable / result.avg_drain_kw_next_hour) * 60.0
+        result.expected_runtime_minutes = round(expected_rt, 1)
+        if result.runtime_minutes is not None and abs(result.runtime_minutes - expected_rt) > 1.0:
+            result.mismatches.append("runtime_formula_mismatch")
+            result.overall_ok = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Textual TUI — inline mode
 # ---------------------------------------------------------------------------
 
@@ -859,6 +1581,933 @@ class ForecastCheckWidget(Static):
                 yield ForecastSummaryTable(fc)
 
 
+class ObservedGenerationSlotsTable(Static):
+    """DataTable: Time | Generated (kWh) | ✓/✗, grouped by date."""
+
+    DEFAULT_CSS = """
+    ObservedGenerationSlotsTable { height: auto; }
+    ObservedGenerationSlotsTable DataTable { height: 18; }
+    """
+
+    def __init__(self, og: ObservedGenerationCheckResult) -> None:
+        """Initialise with the observed generation check result.
+
+        Args:
+            og: Result of check_observed_generation() containing per-slot generated kWh.
+        """
+        super().__init__()
+        self._og = og
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per slot, date-separated."""
+        table = self.query_one(DataTable)
+        table.add_columns("Time", "Generated (kWh)", "")
+        dim = "dim"
+        prev_date = None
+
+        for row in self._og.slot_rows:
+            try:
+                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
+                time_str = dt.strftime("%H:%M")
+                cur_date = dt.date()
+            except (ValueError, AttributeError):
+                time_str = row["start"]
+                cur_date = None
+
+            if cur_date is not None and cur_date != prev_date:
+                if prev_date is not None:
+                    table.add_row(*[Text("─", style=dim)] * 3)
+                table.add_row(Text(str(cur_date), style="bold"), "", "")
+                prev_date = cur_date
+
+            kwh = row["generated_kwh"]
+            ok = row["ok"]
+            table.add_row(
+                Text(time_str, style="cyan"),
+                Text(f"{kwh:.4f}", style=dim if kwh == 0 else ""),
+                Text("✗" if not ok else "", style="red"),
+            )
+
+
+class ObservedGenerationCheckWidget(Static):
+    """Collapsible observed-generation deep-check: inverter slots and daily totals."""
+
+    DEFAULT_CSS = "ObservedGenerationCheckWidget { height: auto; }"
+
+    def __init__(self, og: ObservedGenerationCheckResult) -> None:
+        """Initialise with the pre-computed observed generation check result.
+
+        Args:
+            og: Result of check_observed_generation() for one coordinator.
+        """
+        super().__init__()
+        self._og = og
+
+    def compose(self) -> ComposeResult:
+        """Render Slots sub-Collapsible and yesterday/today totals."""
+        og = self._og
+
+        if og.skipped:
+            yield Static(f"  ⚠  observed_generation_check   SKIP   {og.skip_reason}")
+            return
+
+        color = "green" if og.overall_ok else "red"
+        mark = "✓" if og.overall_ok else "✗"
+        status = "PASS" if og.overall_ok else "FAIL"
+        title = (
+            f"[{color}]{mark}[/{color}]  observed_generation_check   [{color}]{status}[/{color}]"
+            f"   {og.slot_count} slots"
+            f"   yest={og.total_yesterday_kwh:.3f}kWh  today={og.total_today_so_far_kwh:.3f}kWh"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            yest_ok = "yesterday_total_mismatch" not in og.mismatches
+            today_ok = "today_total_mismatch" not in og.mismatches
+            yest_style = "green" if yest_ok else "red"
+            today_style = "green" if today_ok else "red"
+            yield Static(
+                f"  yesterday: computed [{yest_style}]{og.computed_yesterday_kwh:.4f}[/{yest_style}]kWh"
+                f"  declared {og.total_yesterday_kwh:.4f}kWh\n"
+                f"  today:     computed [{today_style}]{og.computed_today_kwh:.4f}[/{today_style}]kWh"
+                f"  declared {og.total_today_so_far_kwh:.4f}kWh",
+                markup=True,
+            )
+            with Collapsible(title="Slots", collapsed=False):
+                yield ObservedGenerationSlotsTable(og)
+
+
+class ForecastAccuracySlotsTable(Static):
+    """DataTable: Time | Forecast (kWh) | Observed (kWh) | Error (kWh) | Rel Error | ✓/✗."""
+
+    DEFAULT_CSS = """
+    ForecastAccuracySlotsTable { height: auto; }
+    ForecastAccuracySlotsTable DataTable { height: 18; }
+    """
+
+    def __init__(self, fa: ForecastAccuracyCheckResult) -> None:
+        """Initialise with the forecast accuracy check result.
+
+        Args:
+            fa: Result of check_forecast_accuracy() containing per-slot error data.
+        """
+        super().__init__()
+        self._fa = fa
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per error slot."""
+        table = self.query_one(DataTable)
+        table.add_columns("Time", "Forecast (kWh)", "Observed (kWh)", "Error (kWh)", "Rel Err", "")
+        dim = "dim"
+        prev_date = None
+
+        for row in self._fa.slot_rows:
+            try:
+                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
+                time_str = dt.strftime("%H:%M")
+                cur_date = dt.date()
+            except (ValueError, AttributeError):
+                time_str = row["start"]
+                cur_date = None
+
+            if cur_date is not None and cur_date != prev_date:
+                if prev_date is not None:
+                    table.add_row(*[Text("─", style=dim)] * 6)
+                table.add_row(Text(str(cur_date), style="bold"), *[""] * 5)
+                prev_date = cur_date
+
+            err = row["error_kwh"]
+            ok = row["ok"]
+            err_style = "green" if err > 0.01 else ("red" if err < -0.01 else dim)
+            rel = row["relative_error"]
+            rel_str = f"{rel:.1%}" if rel is not None else "—"
+
+            table.add_row(
+                Text(time_str, style="cyan"),
+                Text(f"{row['forecast_kwh']:.4f}", style=dim),
+                Text(f"{row['observed_kwh']:.4f}"),
+                Text(f"{err:+.4f}", style=err_style),
+                Text(rel_str, style=dim),
+                Text("✗" if not ok else "", style="red"),
+            )
+
+
+class ForecastAccuracyCheckWidget(Static):
+    """Collapsible forecast-accuracy deep-check: per-slot errors and aggregate metrics."""
+
+    DEFAULT_CSS = "ForecastAccuracyCheckWidget { height: auto; }"
+
+    def __init__(self, fa: ForecastAccuracyCheckResult) -> None:
+        """Initialise with the pre-computed forecast accuracy check result.
+
+        Args:
+            fa: Result of check_forecast_accuracy() for one coordinator.
+        """
+        super().__init__()
+        self._fa = fa
+
+    def compose(self) -> ComposeResult:
+        """Render Slots sub-Collapsible and metric summary."""
+        fa = self._fa
+
+        if fa.skipped:
+            yield Static(f"  ⚠  forecast_accuracy_check   SKIP   {fa.skip_reason}")
+            return
+
+        color = "green" if fa.overall_ok else "red"
+        mark = "✓" if fa.overall_ok else "✗"
+        status = "PASS" if fa.overall_ok else "FAIL"
+        mape_str = f"  MAPE={fa.mape:.1%}" if fa.mape is not None else ""
+        title = (
+            f"[{color}]{mark}[/{color}]  forecast_accuracy_check   [{color}]{status}[/{color}]"
+            f"   {fa.slot_count} slots"
+            f"   MAE={fa.mean_absolute_error_kwh:.4f}kWh  bias={fa.bias_kwh:+.4f}kWh{mape_str}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            lines = (
+                f"  forecast={fa.total_forecast_kwh:.3f}kWh  "
+                f"observed={fa.total_observed_kwh:.3f}kWh  "
+                f"error={fa.total_error_kwh:+.3f}kWh"
+            )
+            yield Static(lines)
+            with Collapsible(title="Slots", collapsed=False):
+                yield ForecastAccuracySlotsTable(fa)
+
+
+class ChargingProfileSlotsTable(Static):
+    """DataTable: Time | Mode | Expected (kWh) | Sell (€/kWh) | ✓/✗."""
+
+    DEFAULT_CSS = """
+    ChargingProfileSlotsTable { height: auto; }
+    ChargingProfileSlotsTable DataTable { height: 15; }
+    """
+
+    def __init__(self, cp: ChargingProfileCheckResult) -> None:
+        """Initialise with the charging profile check result.
+
+        Args:
+            cp: Result of check_charging_profile() containing per-slot mode assignments.
+        """
+        super().__init__()
+        self._cp = cp
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per charging profile slot."""
+        table = self.query_one(DataTable)
+        table.add_columns("Time", "Mode", "Expected (kWh)", "Sell (€/kWh)", "")
+        dim = "dim"
+
+        mode_styles = {
+            "solar_charge": "green",
+            "sell": "cyan",
+            "no_export": "yellow",
+            "idle": "dim",
+        }
+
+        for row in self._cp.slot_rows:
+            try:
+                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
+                time_str = dt.strftime("%H:%M")
+            except (ValueError, AttributeError):
+                time_str = row["start"]
+
+            mode = row["mode"]
+            ok = row["ok"]
+            kwh = row["expected_kwh"]
+            sell = row["sell_eur_kwh"]
+            m_style = mode_styles.get(mode, "")
+
+            table.add_row(
+                Text(time_str, style="cyan"),
+                Text(mode, style=m_style),
+                Text(f"{kwh:.4f}", style=dim if kwh == 0 else ""),
+                Text(f"{sell:.4f}", style=dim if sell == 0 else ""),
+                Text("✗" if not ok else "", style="red"),
+            )
+
+
+class ChargingProfileCheckWidget(Static):
+    """Collapsible charging-profile deep-check: mode logic and kWh allocation sums."""
+
+    DEFAULT_CSS = "ChargingProfileCheckWidget { height: auto; }"
+
+    def __init__(self, cp: ChargingProfileCheckResult) -> None:
+        """Initialise with the pre-computed charging profile check result.
+
+        Args:
+            cp: Result of check_charging_profile() for one coordinator.
+        """
+        super().__init__()
+        self._cp = cp
+
+    def compose(self) -> ComposeResult:
+        """Render profile summary line and Slots sub-Collapsible."""
+        cp = self._cp
+
+        if cp.skipped:
+            yield Static(f"  ⚠  charging_profile_check   SKIP   {cp.skip_reason}")
+            return
+
+        color = "green" if cp.overall_ok else "red"
+        mark = "✓" if cp.overall_ok else "✗"
+        status = "PASS" if cp.overall_ok else "FAIL"
+        exceed = "  ⚠ solar>capacity" if cp.solar_exceeds_capacity else ""
+        title = (
+            f"[{color}]{mark}[/{color}]  charging_profile_check   [{color}]{status}[/{color}]"
+            f"   {cp.slot_count} slots"
+            f"   free={cp.free_capacity_kwh:.3f}kWh"
+            f"   allocated={cp.allocated_solar_kwh:.3f}kWh"
+            f"   no_export={cp.total_no_export_kwh:.3f}kWh{exceed}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            alloc_ok = "allocated_solar_sum_mismatch" not in cp.mismatches
+            noexp_ok = "no_export_sum_mismatch" not in cp.mismatches
+            alloc_style = "green" if alloc_ok else "red"
+            noexp_style = "green" if noexp_ok else "red"
+            yield Static(
+                f"  allocated:  computed [{alloc_style}]{cp.computed_allocated_kwh:.4f}[/{alloc_style}]kWh"
+                f"  declared {cp.allocated_solar_kwh:.4f}kWh\n"
+                f"  no_export:  computed [{noexp_style}]{cp.computed_no_export_kwh:.4f}[/{noexp_style}]kWh"
+                f"  declared {cp.total_no_export_kwh:.4f}kWh",
+                markup=True,
+            )
+            with Collapsible(title="Slots", collapsed=False):
+                yield ChargingProfileSlotsTable(cp)
+
+
+class BaseLoadSlotsTable(Static):
+    """DataTable: Hour | Baseload (kW) | Samples | Fallback? | ✓/✗."""
+
+    DEFAULT_CSS = """
+    BaseLoadSlotsTable { height: auto; }
+    BaseLoadSlotsTable DataTable { height: 15; }
+    """
+
+    def __init__(self, bl: BaseLoadCheckResult) -> None:
+        """Initialise with the base load check result.
+
+        Args:
+            bl: Result of check_base_load() containing per-hour baseload data.
+        """
+        super().__init__()
+        self._bl = bl
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per hour (0–23)."""
+        table = self.query_one(DataTable)
+        table.add_columns("Hour", "Baseload (kW)", "Samples", "Fallback", "")
+        dim = "dim"
+
+        for row in self._bl.slot_rows:
+            ok = row["ok"]
+            fallback = row["is_fallback"]
+            table.add_row(
+                Text(f"{row['hour']:02d}:00"),
+                Text(f"{row['baseload_kw']:.4f}", style="red" if not ok else ""),
+                Text(str(row["sample_count"]), style=dim if row["sample_count"] == 0 else ""),
+                Text("fallback" if fallback else "", style=dim),
+                Text("✗" if not ok else "", style="red"),
+            )
+
+
+class BaseLoadCheckWidget(Static):
+    """Collapsible base-load deep-check: 24-hour profile with confidence and metrics."""
+
+    DEFAULT_CSS = "BaseLoadCheckWidget { height: auto; }"
+
+    def __init__(self, bl: BaseLoadCheckResult) -> None:
+        """Initialise with the pre-computed base load check result.
+
+        Args:
+            bl: Result of check_base_load() for one coordinator.
+        """
+        super().__init__()
+        self._bl = bl
+
+    def compose(self) -> ComposeResult:
+        """Render metric summary and Slots sub-Collapsible."""
+        bl = self._bl
+
+        if bl.skipped:
+            yield Static(f"  ⚠  base_load_check   SKIP   {bl.skip_reason}")
+            return
+
+        color = "green" if bl.overall_ok else "red"
+        mark = "✓" if bl.overall_ok else "✗"
+        status = "PASS" if bl.overall_ok else "FAIL"
+        conf_str = f"{bl.confidence:.0%}" if bl.confidence is not None else "low"
+        title = (
+            f"[{color}]{mark}[/{color}]  base_load_check   [{color}]{status}[/{color}]"
+            f"   median={bl.overall_median_kw:.3f}kW  P10={bl.overall_p10_kw:.3f}kW"
+            f"   confidence={conf_str}  days={bl.distinct_days}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            with Collapsible(title="Slots (24h profile)", collapsed=False):
+                yield BaseLoadSlotsTable(bl)
+
+
+class BatteryRuntimeCheckWidget(Static):
+    """Collapsible battery-runtime deep-check: usable kWh, drain rate, and until estimate."""
+
+    DEFAULT_CSS = "BatteryRuntimeCheckWidget { height: auto; }"
+
+    def __init__(self, brt: BatteryRuntimeCheckResult) -> None:
+        """Initialise with the pre-computed battery runtime check result.
+
+        Args:
+            brt: Result of check_battery_runtime() for one coordinator.
+        """
+        super().__init__()
+        self._brt = brt
+
+    def compose(self) -> ComposeResult:
+        """Render runtime fields as a simple Static block."""
+        brt = self._brt
+
+        if brt.skipped:
+            yield Static(f"  ⚠  battery_runtime_check   SKIP   {brt.skip_reason}")
+            return
+
+        color = "green" if brt.overall_ok else "red"
+        mark = "✓" if brt.overall_ok else "✗"
+        status = "PASS" if brt.overall_ok else "FAIL"
+        rt_str = f"{brt.runtime_minutes:.0f}min" if brt.runtime_minutes is not None else "∞"
+        title = (
+            f"[{color}]{mark}[/{color}]  battery_runtime_check   [{color}]{status}[/{color}]"
+            f"   {brt.remaining_kwh_usable:.3f}kWh usable"
+            f"   drain={brt.avg_drain_kw_next_hour:.3f}kW"
+            f"   runtime={rt_str}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            rt_ok = "runtime_formula_mismatch" not in brt.mismatches
+            rt_style = "green" if rt_ok else "red"
+            exp_rt_str = (
+                f"  Expected runtime: [{rt_style}]{brt.expected_runtime_minutes:.0f}[/{rt_style}]min"
+                f"  (usable/drain×60)  actual: {rt_str}\n"
+                if brt.expected_runtime_minutes is not None else ""
+            )
+            lines = [
+                f"  Remaining usable: {brt.remaining_kwh_usable:.4f} kWh",
+                f"  Avg drain next hour: {brt.avg_drain_kw_next_hour:.4f} kW",
+                f"  Runtime: {rt_str}",
+                f"  Until: {brt.until or '—'}",
+                f"  Horizon: {brt.horizon_hours}h",
+                f"  Computed at: {brt.computed_at}",
+            ]
+            yield Static(exp_rt_str + "\n".join(lines), markup=True)
+
+
+# ---------------------------------------------------------------------------
+# Household consumption deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HouseholdConsumptionCheckResult:
+    """Result of the household-consumption deep-check: today-total kWh sanity."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    consumption_today_kwh: float | None = None
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_household_consumption(snap: Snapshot) -> HouseholdConsumptionCheckResult:
+    """Validate household consumption today-total is non-negative when present.
+
+    Args:
+        snap: Coordinator snapshot containing inputs.consumption_today_kwh.
+
+    Returns:
+        HouseholdConsumptionCheckResult with observed value and overall pass/fail.
+    """
+    result = HouseholdConsumptionCheckResult()
+
+    raw = snap.inputs.get("consumption_today_kwh")
+    if raw is None:
+        result.skipped = True
+        result.skip_reason = "inputs.consumption_today_kwh is null (sensor not configured)"
+        return result
+
+    try:
+        result.consumption_today_kwh = float(raw)
+    except (TypeError, ValueError):
+        result.mismatches.append("non_numeric_value")
+        result.overall_ok = False
+        return result
+
+    if result.consumption_today_kwh < 0.0:
+        result.mismatches.append("negative_consumption")
+        result.overall_ok = False
+
+    return result
+
+
+class HouseholdConsumptionCheckWidget(Static):
+    """Collapsible household-consumption deep-check: today-total kWh sanity."""
+
+    DEFAULT_CSS = "HouseholdConsumptionCheckWidget { height: auto; }"
+
+    def __init__(self, hc: HouseholdConsumptionCheckResult) -> None:
+        """Initialise with the pre-computed household consumption check result.
+
+        Args:
+            hc: Result of check_household_consumption() for one coordinator.
+        """
+        super().__init__()
+        self._hc = hc
+
+    def compose(self) -> ComposeResult:
+        """Render consumption value and sanity status."""
+        hc = self._hc
+
+        if hc.skipped:
+            yield Static(f"  ⚠  household_consumption_check   SKIP   {hc.skip_reason}")
+            return
+
+        color = "green" if hc.overall_ok else "red"
+        mark = "✓" if hc.overall_ok else "✗"
+        status = "PASS" if hc.overall_ok else "FAIL"
+        kwh_str = f"{hc.consumption_today_kwh:.3f}kWh" if hc.consumption_today_kwh is not None else "—"
+        title = (
+            f"[{color}]{mark}[/{color}]  household_consumption_check   [{color}]{status}[/{color}]"
+            f"   today={kwh_str}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            yield Static(f"  Consumption today: {kwh_str}")
+
+
+# Categories handled by deep-check widgets; excluded from the plain validator display.
+_DEEP_CATS: frozenset[str] = frozenset({
+    "forecast", "pricing", "calculation", "schedule", "battery",
+    "observed_generation", "forecast_accuracy", "charging_profile", "base_load",
+    "battery_runtime", "household_consumption",
+})
+
+
+class PricingSlotsTable(Static):
+    """DataTable: Time | Spot | Exp Buy | Act Buy | Exp Sell | Act Sell | ✓/✗."""
+
+    DEFAULT_CSS = """
+    PricingSlotsTable { height: auto; }
+    PricingSlotsTable DataTable { height: 22; }
+    """
+
+    def __init__(self, pc: PricingCheckResult) -> None:
+        """Initialise with the pricing check result.
+
+        Args:
+            pc: Result of check_pricing() containing per-slot formula comparisons.
+        """
+        super().__init__()
+        self._pc = pc
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per pricing slot."""
+        table = self.query_one(DataTable)
+        table.add_columns("Time", "Spot", "Exp Buy", "Act Buy", "Exp Sell", "Act Sell", "")
+        dim = "dim"
+
+        for row in self._pc.slot_rows:
+            try:
+                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
+                time_str = dt.strftime("%m-%d %H:%M")
+            except (ValueError, AttributeError):
+                time_str = row["start"]
+
+            ok = row["ok"]
+            bad_style = "red" if not ok else ""
+            table.add_row(
+                Text(time_str, style="cyan"),
+                Text(f"{row['spot']:.4f}"),
+                Text(f"{row['exp_buy']:.4f}", style=dim),
+                Text(f"{row['act_buy']:.4f}", style=bad_style),
+                Text(f"{row['exp_sell']:.4f}", style=dim),
+                Text(f"{row['act_sell']:.4f}", style=bad_style),
+                Text("✓" if ok else "✗", style="green" if ok else "red"),
+            )
+
+
+class PricingCheckWidget(Static):
+    """Collapsible pricing deep-check: formula verification per slot + tariff config."""
+
+    DEFAULT_CSS = "PricingCheckWidget { height: auto; }"
+
+    def __init__(self, pc: PricingCheckResult) -> None:
+        """Initialise with the pre-computed pricing check result.
+
+        Args:
+            pc: Result of check_pricing() for one coordinator.
+        """
+        super().__init__()
+        self._pc = pc
+
+    def compose(self) -> ComposeResult:
+        """Render Slots sub-Collapsible and optional Tariff Config sub-Collapsible."""
+        pc = self._pc
+
+        if pc.skipped:
+            yield Static(f"  ⚠  pricing_check   SKIP   {pc.skip_reason}")
+            return
+
+        color = "green" if pc.overall_ok else "red"
+        mark = "✓" if pc.overall_ok else "✗"
+        status = "PASS" if pc.overall_ok else "FAIL"
+        neg = f"  {pc.negative_sell_count} negative-sell" if pc.negative_sell_count else ""
+        res_min = pc.resolution_s // 60
+        title = (
+            f"[{color}]{mark}[/{color}]  pricing_check   [{color}]{status}[/{color}]"
+            f"   {pc.module_slot_count} slots  res={res_min}min{neg}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            with Collapsible(title="Slots", collapsed=False):
+                yield PricingSlotsTable(pc)
+            with Collapsible(title="Tariff Config", collapsed=True):
+                lines = "\n".join(f"  {k}: {v}" for k, v in pc.tariff_config.items())
+                yield Static(lines)
+
+
+class CalculationSlotsTable(Static):
+    """DataTable: Time | Sell (€) | Exp Sell? | Act Sell? | Solar (kWh) | Notes | ✓/✗."""
+
+    DEFAULT_CSS = """
+    CalculationSlotsTable { height: auto; }
+    CalculationSlotsTable DataTable { height: 22; }
+    """
+
+    def __init__(self, cc: CalculationCheckResult) -> None:
+        """Initialise with the calculation check result.
+
+        Args:
+            cc: Result of check_calculation() containing per-slot sell_allowed comparisons.
+        """
+        super().__init__()
+        self._cc = cc
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per calculation slot, date-separated."""
+        table = self.query_one(DataTable)
+        table.add_columns("Time", "Sell (€)", "Exp Sell?", "Act Sell?", "Solar (kWh)", "Notes", "")
+        dim = "dim"
+        prev_date = None
+
+        for row in self._cc.slot_rows:
+            try:
+                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
+                time_str = dt.strftime("%H:%M")
+                cur_date = dt.date()
+            except (ValueError, AttributeError):
+                time_str = row["start"]
+                cur_date = None
+
+            if cur_date is not None and cur_date != prev_date:
+                if prev_date is not None:
+                    table.add_row(*[Text("─", style=dim)] * 7)
+                table.add_row(Text(str(cur_date), style="bold"), *[""] * 6)
+                prev_date = cur_date
+
+            ok = row["ok"]
+            sp = row["sell_price"]
+            sp_str = f"{sp:.4f}" if sp is not None else "—"
+            exp_str = "✓" if row["sell_exp"] else "✗"
+            act_str = "✓" if row["sell_act"] else "✗"
+            act_style = "" if ok else "red"
+            solar = row["solar_kwh"]
+            notes_str = ", ".join(row["notes"])[:30] if row["notes"] else ""
+
+            table.add_row(
+                Text(time_str, style="cyan"),
+                Text(sp_str, style=dim if sp is None or sp == 0.0 else ""),
+                Text(exp_str, style=dim if not row["sell_exp"] else ""),
+                Text(act_str, style=act_style),
+                Text(f"{solar:.4f}", style=dim if solar == 0 else ""),
+                Text(notes_str, style=dim),
+                Text("✓" if ok else "✗", style="green" if ok else "red"),
+            )
+
+
+class CalculationCheckWidget(Static):
+    """Collapsible calculation deep-check: sell_allowed logic + lockout windows."""
+
+    DEFAULT_CSS = "CalculationCheckWidget { height: auto; }"
+
+    def __init__(self, cc: CalculationCheckResult) -> None:
+        """Initialise with the pre-computed calculation check result.
+
+        Args:
+            cc: Result of check_calculation() for one coordinator.
+        """
+        super().__init__()
+        self._cc = cc
+
+    def compose(self) -> ComposeResult:
+        """Render Slots sub-Collapsible; list lockout windows when present."""
+        cc = self._cc
+
+        if cc.skipped:
+            yield Static(f"  ⚠  calculation_check   SKIP   {cc.skip_reason}")
+            return
+
+        color = "green" if cc.overall_ok else "red"
+        mark = "✓" if cc.overall_ok else "✗"
+        status = "PASS" if cc.overall_ok else "FAIL"
+        n_lock = len(cc.lockout_windows)
+        neg = f"  neg_sale={cc.total_negative_sale_kwh:.3f}kWh" if cc.total_negative_sale_kwh else ""
+        title = (
+            f"[{color}]{mark}[/{color}]  calculation_check   [{color}]{status}[/{color}]"
+            f"   {cc.module_slot_count} slots  {n_lock} lockout window(s){neg}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            with Collapsible(title="Slots", collapsed=False):
+                yield CalculationSlotsTable(cc)
+            if cc.lockout_windows:
+                lines = "  Lockout windows:\n" + "\n".join(
+                    f"    {w['start']}  →  {w['end']}" for w in cc.lockout_windows
+                )
+                yield Static(lines)
+
+
+class ScheduleSlotsTable(Static):
+    """DataTable: Time | Action | Power (kW) | Profit (€) | Reason."""
+
+    DEFAULT_CSS = """
+    ScheduleSlotsTable { height: auto; }
+    ScheduleSlotsTable DataTable { height: 18; }
+    """
+
+    def __init__(self, sc: ScheduleCheckResult) -> None:
+        """Initialise with the schedule check result.
+
+        Args:
+            sc: Result of check_schedule() containing per-slot action and profit data.
+        """
+        super().__init__()
+        self._sc = sc
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per schedule slot, date-separated."""
+        table = self.query_one(DataTable)
+        table.add_columns("Time", "Action", "Power (kW)", "Profit (€)", "Reason", "")
+        dim = "dim"
+        prev_date = None
+
+        for row in self._sc.slot_rows:
+            try:
+                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
+                time_str = dt.strftime("%H:%M")
+                cur_date = dt.date()
+            except (ValueError, AttributeError):
+                time_str = row["start"]
+                cur_date = None
+
+            if cur_date is not None and cur_date != prev_date:
+                if prev_date is not None:
+                    table.add_row(*[Text("─", style=dim)] * 6)
+                table.add_row(Text(str(cur_date), style="bold"), *[""] * 5)
+                prev_date = cur_date
+
+            is_current = row["is_current"]
+            ok = row["ok"]
+            profit = row["profit_eur"]
+            profit_style = "green" if profit > 0 else ("red" if profit < 0 else dim)
+            time_style = "bold cyan" if is_current else "cyan"
+            prefix = "▶ " if is_current else "  "
+
+            table.add_row(
+                Text(prefix + time_str, style=time_style),
+                Text(row["action"], style="bold" if is_current else ""),
+                Text(f"{row['power_kw']:.2f}", style=dim if row["power_kw"] == 0 else ""),
+                Text(f"{profit:+.4f}", style=profit_style),
+                Text(row["reason"][:40] if row["reason"] else "—", style=dim),
+                Text("✗" if not ok else "", style="red"),
+            )
+
+
+class ScheduleCheckWidget(Static):
+    """Collapsible schedule deep-check: per-slot actions, power, and profit."""
+
+    DEFAULT_CSS = "ScheduleCheckWidget { height: auto; }"
+
+    def __init__(self, sc: ScheduleCheckResult) -> None:
+        """Initialise with the pre-computed schedule check result.
+
+        Args:
+            sc: Result of check_schedule() for one coordinator.
+        """
+        super().__init__()
+        self._sc = sc
+
+    def compose(self) -> ComposeResult:
+        """Render Slots sub-Collapsible with schedule data."""
+        sc = self._sc
+
+        if sc.skipped:
+            yield Static(f"  ⚠  schedule_check   SKIP   {sc.skip_reason}")
+            return
+
+        color = "green" if sc.overall_ok else "red"
+        mark = "✓" if sc.overall_ok else "✗"
+        status = "PASS" if sc.overall_ok else "FAIL"
+        profit_str = f"{sc.total_expected_profit_eur:+.4f}"
+        title = (
+            f"[{color}]{mark}[/{color}]  schedule_check   [{color}]{status}[/{color}]"
+            f"   {sc.slot_count} slots  profit={profit_str}€"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            profit_match = "profit_sum" not in sc.mismatches
+            profit_style = "green" if profit_match else "red"
+            yield Static(
+                f"  profit: computed [{profit_style}]{sc.computed_profit_sum:+.4f}[/{profit_style}]€"
+                f"  declared {sc.total_expected_profit_eur:+.4f}€",
+                markup=True,
+            )
+            with Collapsible(title="Slots", collapsed=False):
+                yield ScheduleSlotsTable(sc)
+
+
+class _BatteryDataTable(Static):
+    """DataTable of battery field/value/status rows."""
+
+    DEFAULT_CSS = """
+    _BatteryDataTable { height: auto; }
+    _BatteryDataTable DataTable { height: 12; }
+    """
+
+    def __init__(self, bc: BatteryCheckResult) -> None:
+        """Initialise with the battery check result.
+
+        Args:
+            bc: Result of check_battery() containing observed battery values.
+        """
+        super().__init__()
+        self._bc = bc
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with battery state, status, and degradation rows."""
+        bc = self._bc
+        table = self.query_one(DataTable)
+        table.add_columns("Field", "Value", "")
+        dim = "dim"
+
+        def _fv(v: float | None, fmt: str = ".3f") -> Text:
+            return Text(f"{v:{fmt}}") if v is not None else Text("—", style=dim)
+
+        # soc is 0.0–1.0 fraction; display as percentage
+        soc_ok = bc.soc is None or 0.0 <= bc.soc <= 1.0
+        table.add_row(
+            Text("SOC"),
+            Text(f"{bc.soc:.1%}") if bc.soc is not None else Text("—", style=dim),
+            Text("✓" if soc_ok else "✗", style="green" if soc_ok else "red"),
+        )
+        table.add_row(Text("Battery power (kW)"), _fv(bc.power_kw), Text(""))
+        table.add_row(Text("Grid power (kW)"), _fv(bc.grid_power_kw), Text(""))
+        table.add_row(Text("Est. capacity (kWh)"), _fv(bc.estimated_capacity_kwh), Text(""))
+
+        if bc.total_capacity_kwh is not None:
+            table.add_row(Text("Total capacity (kWh)"), _fv(bc.total_capacity_kwh), Text(""))
+        if bc.max_charge_power_kw is not None:
+            table.add_row(Text("Max charge (kW)"), _fv(bc.max_charge_power_kw), Text(""))
+        if bc.max_discharge_power_kw is not None:
+            table.add_row(Text("Max discharge (kW)"), _fv(bc.max_discharge_power_kw), Text(""))
+
+        if bc.remaining_capacity_kwh is not None:
+            rem_ok = "remaining_capacity_inconsistent" not in bc.mismatches
+            exp_str = (
+                f"exp {bc.expected_remaining_capacity_kwh:.3f} → "
+                if bc.expected_remaining_capacity_kwh is not None else ""
+            )
+            table.add_row(
+                Text("Remaining capacity (kWh)"),
+                Text(f"{exp_str}{bc.remaining_capacity_kwh:.3f}", style="" if rem_ok else "red"),
+                Text("✓" if rem_ok else "✗", style="green" if rem_ok else "red"),
+            )
+
+        deg_ok = not (
+            bc.estimated_capacity_kwh
+            and (bc.degradation_cost_per_kwh is None or bc.degradation_cost_per_kwh <= 0)
+        )
+        table.add_row(
+            Text("Degradation cost (€/kWh)"),
+            _fv(bc.degradation_cost_per_kwh, ".5f"),
+            Text("✓" if deg_ok else "✗", style="green" if deg_ok else "red"),
+        )
+
+
+class BatteryCheckWidget(Static):
+    """Collapsible battery deep-check: SOC, power, capacity, and degradation cost."""
+
+    DEFAULT_CSS = "BatteryCheckWidget { height: auto; }"
+
+    def __init__(self, bc: BatteryCheckResult) -> None:
+        """Initialise with the pre-computed battery check result.
+
+        Args:
+            bc: Result of check_battery() for one coordinator.
+        """
+        super().__init__()
+        self._bc = bc
+
+    def compose(self) -> ComposeResult:
+        """Render a simple data table with battery state and sanity checks."""
+        bc = self._bc
+
+        if bc.skipped:
+            yield Static(f"  ⚠  battery_check   SKIP   {bc.skip_reason}")
+            return
+
+        color = "green" if bc.overall_ok else "red"
+        mark = "✓" if bc.overall_ok else "✗"
+        status = "PASS" if bc.overall_ok else "FAIL"
+        soc_str = f"{bc.soc:.1%}" if bc.soc is not None else "—"
+        title = (
+            f"[{color}]{mark}[/{color}]  battery_check   [{color}]{status}[/{color}]"
+            f"   SOC={soc_str}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            yield _BatteryDataTable(bc)
+
+
 class IntegrationCheckApp(App):
     """Textual TUI running in inline mode for the sunSale integration check."""
 
@@ -869,30 +2518,98 @@ class IntegrationCheckApp(App):
     ForecastCheckWidget { height: auto; }
     ForecastSlotsTable DataTable { height: 25; }
     ForecastSummaryTable DataTable { height: 12; }
+    PricingCheckWidget { height: auto; }
+    PricingSlotsTable DataTable { height: 22; }
+    CalculationCheckWidget { height: auto; }
+    CalculationSlotsTable DataTable { height: 22; }
+    ScheduleCheckWidget { height: auto; }
+    ScheduleSlotsTable DataTable { height: 18; }
+    BatteryCheckWidget { height: auto; }
+    _BatteryDataTable DataTable { height: 12; }
+    ObservedGenerationCheckWidget { height: auto; }
+    ObservedGenerationSlotsTable DataTable { height: 18; }
+    ForecastAccuracyCheckWidget { height: auto; }
+    ForecastAccuracySlotsTable DataTable { height: 18; }
+    ChargingProfileCheckWidget { height: auto; }
+    ChargingProfileSlotsTable DataTable { height: 15; }
+    BaseLoadCheckWidget { height: auto; }
+    BaseLoadSlotsTable DataTable { height: 15; }
+    BatteryRuntimeCheckWidget { height: auto; }
+    HouseholdConsumptionCheckWidget { height: auto; }
     """
 
     def __init__(
         self,
         report: list[tuple[Snapshot, list[CheckResult]]],
         forecast_results: dict[str, ForecastCheckResult],
+        pricing_results: dict[str, PricingCheckResult],
+        calculation_results: dict[str, CalculationCheckResult],
+        schedule_results: dict[str, ScheduleCheckResult],
+        battery_results: dict[str, BatteryCheckResult],
+        observed_gen_results: dict[str, ObservedGenerationCheckResult],
+        forecast_acc_results: dict[str, ForecastAccuracyCheckResult],
+        charging_profile_results: dict[str, ChargingProfileCheckResult],
+        base_load_results: dict[str, BaseLoadCheckResult],
+        battery_runtime_results: dict[str, BatteryRuntimeCheckResult],
+        household_consumption_results: dict[str, HouseholdConsumptionCheckResult],
     ) -> None:
-        """Initialise with validator report and forecast check results.
+        """Initialise with validator report and all deep-check results.
 
         Args:
             report: Per-snapshot check results from run_checks().
-            forecast_results: Per-entry forecast deep-check results.
+            forecast_results: Per-entry solar forecast deep-check results.
+            pricing_results: Per-entry pricing deep-check results.
+            calculation_results: Per-entry calculation deep-check results.
+            schedule_results: Per-entry schedule deep-check results.
+            battery_results: Per-entry battery state/status deep-check results.
+            observed_gen_results: Per-entry observed generation deep-check results.
+            forecast_acc_results: Per-entry forecast accuracy deep-check results.
+            charging_profile_results: Per-entry charging profile deep-check results.
+            base_load_results: Per-entry base load profile deep-check results.
+            battery_runtime_results: Per-entry battery runtime deep-check results.
+            household_consumption_results: Per-entry household consumption deep-check results.
         """
         super().__init__()
         self._report = report
         self._forecast_results = forecast_results
+        self._pricing_results = pricing_results
+        self._calculation_results = calculation_results
+        self._schedule_results = schedule_results
+        self._battery_results = battery_results
+        self._observed_gen_results = observed_gen_results
+        self._forecast_acc_results = forecast_acc_results
+        self._charging_profile_results = charging_profile_results
+        self._base_load_results = base_load_results
+        self._battery_runtime_results = battery_runtime_results
+        self._household_consumption_results = household_consumption_results
         self.exit_code = 0
 
+    def _all_deep(self) -> list:
+        """Return every deep-check result across all modules and entries.
+
+        Returns:
+            Flat list of result objects each having skipped and overall_ok attributes.
+        """
+        return (
+            list(self._forecast_results.values())
+            + list(self._pricing_results.values())
+            + list(self._calculation_results.values())
+            + list(self._schedule_results.values())
+            + list(self._battery_results.values())
+            + list(self._observed_gen_results.values())
+            + list(self._forecast_acc_results.values())
+            + list(self._charging_profile_results.values())
+            + list(self._base_load_results.values())
+            + list(self._battery_runtime_results.values())
+            + list(self._household_consumption_results.values())
+        )
+
     def compose(self) -> ComposeResult:
-        """Yield check result lines, forecast Collapsible, separator, and summary."""
+        """Yield validator lines for non-deep categories, then one deep widget per module."""
         for snap, results in self._report:
             cur_cat: str | None = None
             for res in results:
-                if res.category == "forecast":
+                if res.category in _DEEP_CATS:
                     continue
                 if res.category != cur_cat:
                     yield Static(f"  [dim][{res.category}][/dim]", markup=True)
@@ -904,23 +2621,37 @@ class IntegrationCheckApp(App):
                     markup=True,
                 )
 
-            fc = self._forecast_results.get(snap.entry_id)
-            if fc is not None:
-                yield Static("  [dim][forecast][/dim]", markup=True)
-                yield ForecastCheckWidget(fc)
+            eid = snap.entry_id
+            for label, widget_cls, results_map in (
+                ("forecast",                ForecastCheckWidget,                self._forecast_results),
+                ("pricing",                 PricingCheckWidget,                 self._pricing_results),
+                ("calculation",             CalculationCheckWidget,             self._calculation_results),
+                ("schedule",                ScheduleCheckWidget,                self._schedule_results),
+                ("battery",                 BatteryCheckWidget,                 self._battery_results),
+                ("observed_generation",     ObservedGenerationCheckWidget,      self._observed_gen_results),
+                ("forecast_accuracy",       ForecastAccuracyCheckWidget,        self._forecast_acc_results),
+                ("charging_profile",        ChargingProfileCheckWidget,         self._charging_profile_results),
+                ("base_load",               BaseLoadCheckWidget,                self._base_load_results),
+                ("battery_runtime",         BatteryRuntimeCheckWidget,          self._battery_runtime_results),
+                ("household_consumption",   HouseholdConsumptionCheckWidget,    self._household_consumption_results),
+            ):
+                r = results_map.get(eid)
+                if r is not None:
+                    yield Static(f"  [dim][{label}][/dim]", markup=True)
+                    yield widget_cls(r)
 
             yield Static("─" * 60)
 
-        non_fc_total = sum(1 for _, rs in self._report for r in rs if r.category != "forecast")
-        non_fc_passed = sum(
-            1 for _, rs in self._report for r in rs if r.category != "forecast" and r.ok
+        non_deep_total = sum(1 for _, rs in self._report for r in rs if r.category not in _DEEP_CATS)
+        non_deep_passed = sum(
+            1 for _, rs in self._report for r in rs
+            if r.category not in _DEEP_CATS and r.ok
         )
-        fc_total = sum(1 for fc in self._forecast_results.values() if not fc.skipped)
-        fc_passed = sum(
-            1 for fc in self._forecast_results.values() if not fc.skipped and fc.overall_ok
-        )
-        all_total = non_fc_total + fc_total
-        all_passed = non_fc_passed + fc_passed
+        deep = self._all_deep()
+        deep_total = sum(1 for r in deep if not r.skipped)
+        deep_passed = sum(1 for r in deep if not r.skipped and r.overall_ok)
+        all_total = non_deep_total + deep_total
+        all_passed = non_deep_passed + deep_passed
         color = "green" if all_passed == all_total else "red"
         yield Static(
             f"[{color}]{all_passed}/{all_total} checks passed[/{color}]  [dim](q to quit)[/dim]",
@@ -930,13 +2661,13 @@ class IntegrationCheckApp(App):
 
     def on_mount(self) -> None:
         """Set exit code based on check results."""
-        any_failed = any(
-            not r.ok for _, rs in self._report for r in rs if r.category != "forecast"
+        any_non_deep_failed = any(
+            not r.ok for _, rs in self._report for r in rs if r.category not in _DEEP_CATS
         )
-        any_fc_failed = any(
-            not fc.overall_ok and not fc.skipped for fc in self._forecast_results.values()
+        any_deep_failed = any(
+            not r.overall_ok and not r.skipped for r in self._all_deep()
         )
-        self.exit_code = 1 if (any_failed or any_fc_failed) else 0
+        self.exit_code = 1 if (any_non_deep_failed or any_deep_failed) else 0
 
 
 # ---------------------------------------------------------------------------
@@ -1085,8 +2816,25 @@ def main(argv: list[str] | None = None) -> int:
         any_failed = any(not r.ok for _, results in report for r in results)
         return 1 if any_failed else 0
 
-    forecast_results = {snap.entry_id: check_forecast(snap) for snap in snapshots}
-    app = IntegrationCheckApp(report, forecast_results)
+    forecast_results               = {s.entry_id: check_forecast(s)                  for s in snapshots}
+    pricing_results                = {s.entry_id: check_pricing(s)                   for s in snapshots}
+    calculation_results            = {s.entry_id: check_calculation(s)               for s in snapshots}
+    schedule_results               = {s.entry_id: check_schedule(s)                  for s in snapshots}
+    battery_results                = {s.entry_id: check_battery(s)                   for s in snapshots}
+    observed_gen_results           = {s.entry_id: check_observed_generation(s)       for s in snapshots}
+    forecast_acc_results           = {s.entry_id: check_forecast_accuracy(s)         for s in snapshots}
+    charging_profile_results       = {s.entry_id: check_charging_profile(s)          for s in snapshots}
+    base_load_results              = {s.entry_id: check_base_load(s)                 for s in snapshots}
+    battery_runtime_results        = {s.entry_id: check_battery_runtime(s)           for s in snapshots}
+    household_consumption_results  = {s.entry_id: check_household_consumption(s)     for s in snapshots}
+    app = IntegrationCheckApp(
+        report,
+        forecast_results, pricing_results, calculation_results,
+        schedule_results, battery_results,
+        observed_gen_results, forecast_acc_results, charging_profile_results,
+        base_load_results, battery_runtime_results,
+        household_consumption_results,
+    )
     app.run(inline=True)
     return app.exit_code
 

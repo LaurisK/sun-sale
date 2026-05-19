@@ -42,6 +42,12 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     pricing = data.get("pricing")
     forecast = data.get("forecast")
     calculation = data.get("calculation")
+    observed_gen = data.get("observed_generation")
+    forecast_err = data.get("forecast_error")
+    charging_prof = data.get("charging_profile")
+    base_load_prof = data.get("base_load_profile")
+    batt_status = data.get("battery_status")
+    batt_runtime = data.get("battery_runtime")
 
     cfg = coordinator._config  # noqa: SLF001
     return {
@@ -68,6 +74,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 dataclasses.asdict(coordinator.tariff_config)
                 if coordinator.tariff_config is not None else None
             ),
+            "consumption_today_kwh": data.get("consumption_today_kwh"),
         },
         "pipeline": {
             "pricing": {
@@ -126,6 +133,98 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 ],
             } if calculation is not None else None,
             "degradation_cost_per_kwh": data.get("degradation_cost"),
+            "observed_generation": {
+                "slot_count": len(observed_gen.slots),
+                "total_yesterday_kwh": round(observed_gen.total_yesterday_kwh, 4),
+                "total_today_so_far_kwh": round(observed_gen.total_today_so_far_kwh, 4),
+                "computed_at": observed_gen.computed_at.isoformat(),
+                "slots": [
+                    {"start": s.start.isoformat(), "generated_kwh": round(s.generated_kwh, 4)}
+                    for s in observed_gen.slots
+                ],
+            } if observed_gen is not None else None,
+            "forecast_error": {
+                "slot_count": len(forecast_err.slots),
+                "total_forecast_kwh": round(forecast_err.total_forecast_kwh, 4),
+                "total_observed_kwh": round(forecast_err.total_observed_kwh, 4),
+                "total_error_kwh": round(forecast_err.total_error_kwh, 4),
+                "mean_absolute_error_kwh": round(forecast_err.mean_absolute_error_kwh, 4),
+                "bias_kwh": round(forecast_err.bias_kwh, 4),
+                "mean_absolute_percentage_error": (
+                    round(forecast_err.mean_absolute_percentage_error, 4)
+                    if forecast_err.mean_absolute_percentage_error is not None else None
+                ),
+                "computed_at": forecast_err.computed_at.isoformat(),
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "forecast_kwh": round(s.forecast_kwh, 4),
+                        "observed_kwh": round(s.observed_kwh, 4),
+                        "error_kwh": round(s.error_kwh, 4),
+                        "relative_error": (
+                            round(s.relative_error, 4) if s.relative_error is not None else None
+                        ),
+                    }
+                    for s in forecast_err.slots
+                ],
+            } if forecast_err is not None else None,
+            "charging_profile": {
+                "slot_count": len(charging_prof.slots),
+                "free_capacity_kwh": round(charging_prof.free_capacity_kwh, 4),
+                "today_remaining_generation_kwh": round(charging_prof.today_remaining_generation_kwh, 4),
+                "solar_exceeds_capacity": charging_prof.solar_exceeds_capacity,
+                "allocated_solar_kwh": round(charging_prof.allocated_solar_kwh, 4),
+                "total_no_export_kwh": round(charging_prof.total_no_export_kwh, 4),
+                "computed_at": charging_prof.computed_at.isoformat(),
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "mode": s.mode.value,
+                        "expected_kwh": round(s.expected_kwh, 4),
+                        "sell_eur_kwh": round(s.sell_eur_kwh, 4),
+                    }
+                    for s in charging_prof.slots
+                ],
+            } if charging_prof is not None else None,
+            "base_load_profile": {
+                "fallback_kw": round(base_load_prof.fallback_kw, 4),
+                "overall_p10_kw": round(base_load_prof.overall_p10_kw, 4),
+                "overall_median_kw": round(base_load_prof.overall_median_kw, 4),
+                "confidence": (
+                    round(base_load_prof.confidence, 4)
+                    if base_load_prof.confidence is not None else None
+                ),
+                "sample_count": base_load_prof.sample_count,
+                "distinct_days": base_load_prof.distinct_days,
+                "computed_at": base_load_prof.computed_at.isoformat(),
+                "slots": [
+                    {
+                        "hour": s.hour,
+                        "baseload_kw": round(s.baseload_kw, 4),
+                        "sample_count": s.sample_count,
+                        "is_fallback": s.is_fallback,
+                    }
+                    for s in base_load_prof.slots
+                ],
+            } if base_load_prof is not None else None,
+            "battery_status": {
+                "total_capacity_kwh": round(batt_status.total_capacity_kwh, 4),
+                "max_charge_power_kw": round(batt_status.max_charge_power_kw, 4),
+                "max_discharge_power_kw": round(batt_status.max_discharge_power_kw, 4),
+                "soc": round(batt_status.soc, 4),
+                "remaining_capacity_kwh": round(batt_status.remaining_capacity_kwh, 4),
+            } if batt_status is not None else None,
+            "battery_runtime": {
+                "remaining_kwh_usable": round(batt_runtime.remaining_kwh_usable, 4),
+                "avg_drain_kw_next_hour": round(batt_runtime.avg_drain_kw_next_hour, 4),
+                "runtime_minutes": (
+                    round(batt_runtime.runtime_minutes, 1)
+                    if batt_runtime.runtime_minutes is not None else None
+                ),
+                "until": batt_runtime.until.isoformat() if batt_runtime.until is not None else None,
+                "horizon_hours": batt_runtime.horizon_hours,
+                "computed_at": batt_runtime.computed_at.isoformat(),
+            } if batt_runtime is not None else None,
         },
         "outputs": {
             "schedule": {
