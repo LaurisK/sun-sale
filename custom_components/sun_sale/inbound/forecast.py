@@ -52,7 +52,7 @@ def build_generation_series(
             total_d6_kwh=ext[6],
         )
 
-    resampled = _resample_to_grid(solar.entries, price_slots, solar.primary_source)
+    resampled = _resample_to_grid(solar.entries, price_slots)
     totals = _compute_totals(resampled, now)
 
     return GenerationSeries(
@@ -72,7 +72,6 @@ def build_generation_series(
 def _resample_to_grid(
     entries: list[SolarEntry],
     target_slots: tuple,
-    source: str,
 ) -> tuple[GenerationSlot, ...]:
     """Redistribute entry kWh onto target slots by overlap-weighted area.
 
@@ -83,7 +82,6 @@ def _resample_to_grid(
     Args:
         entries: Raw SolarEntry list from the forecast source.
         target_slots: Price-grid slots defining start/end for each output slot.
-        source: Source label propagated to each output GenerationSlot.
 
     Returns:
         Tuple of GenerationSlots aligned to target_slots; empty on empty entries.
@@ -114,8 +112,6 @@ def _resample_to_grid(
             start=t.start,
             end=t.end,
             expected_kwh=round(total, 6),
-            source=source,
-            confidence=None,
         ))
     return tuple(out)
 

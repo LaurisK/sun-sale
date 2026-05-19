@@ -20,8 +20,7 @@ NOW = BASE_DT  # 2024-01-15 00:00 UTC
 
 def _make_gen_series(solar: list[SolarForecast]) -> GenerationSeries:
     slots = tuple(
-        GenerationSlot(start=sf.start, end=sf.end, expected_kwh=sf.generation_kwh,
-                       source="forecast_solar", confidence=None)
+        GenerationSlot(start=sf.start, end=sf.end, expected_kwh=sf.generation_kwh)
         for sf in solar
     )
     return GenerationSeries(slots=slots)

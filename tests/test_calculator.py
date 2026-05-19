@@ -17,8 +17,6 @@ def _gen_series(hour_kwh: dict[int, float]) -> GenerationSeries:
             start=NOW.replace(hour=h),
             end=NOW.replace(hour=h) + timedelta(hours=1),
             expected_kwh=kwh,
-            source="forecast_solar",
-            confidence=None,
         )
         for h, kwh in sorted(hour_kwh.items())
     )

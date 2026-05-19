@@ -582,18 +582,12 @@ class ForecastPipelineSensor(_BaseSensor):
         """Return full forecast slot data and per-day totals.
 
         Returns:
-            Dict with source totals, daily kWh totals, and per-slot detail.
+            Dict with daily kWh totals and per-slot detail.
         """
         gen: GenerationSeries | None = (self.coordinator.data or {}).get("forecast")
         if not gen:
             return {}
-        sources = list({s.source for s in gen.slots})
-        source_totals = {
-            src: round(sum(s.expected_kwh for s in gen.slots if s.source == src), 2)
-            for src in sources
-        }
         return {
-            "source_totals": source_totals,
             "total_yesterday_kwh": round(gen.total_yesterday_kwh, 4),
             "total_today_kwh": round(gen.total_today_kwh, 4),
             "total_tomorrow_kwh": round(gen.total_tomorrow_kwh, 4),
@@ -607,8 +601,6 @@ class ForecastPipelineSensor(_BaseSensor):
                     "start": s.start.isoformat(),
                     "end": s.end.isoformat(),
                     "expected_kwh": round(s.expected_kwh, 4),
-                    "source": s.source,
-                    "confidence": s.confidence,
                 }
                 for s in gen.slots
             ],

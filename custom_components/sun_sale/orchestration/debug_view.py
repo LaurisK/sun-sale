@@ -75,6 +75,17 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 if coordinator.tariff_config is not None else None
             ),
             "consumption_today_kwh": data.get("consumption_today_kwh"),
+            "yesterday_solar": {
+                "date": getattr(coordinator, "_yesterday_stored_date", None),
+                "entries": [
+                    {
+                        "start": e.start.isoformat(),
+                        "end": e.end.isoformat(),
+                        "kwh": e.expected_kwh,
+                    }
+                    for e in getattr(coordinator, "_yesterday_solar", [])
+                ],
+            },
         },
         "pipeline": {
             "pricing": {
@@ -107,8 +118,6 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     {
                         "start": s.start.isoformat(),
                         "expected_kwh": round(s.expected_kwh, 4),
-                        "source": s.source,
-                        "confidence": s.confidence,
                     }
                     for s in forecast.slots
                 ],

@@ -21,8 +21,6 @@ def _fc_slot(hour: int, kwh: float) -> GenerationSlot:
         start=start,
         end=start + timedelta(hours=1),
         expected_kwh=kwh,
-        source="open_meteo",
-        confidence=None,
     )
 
 

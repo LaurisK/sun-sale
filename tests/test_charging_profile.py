@@ -28,8 +28,6 @@ def _gen_slot(hour: int, kwh: float) -> GenerationSlot:
         start=start,
         end=start + timedelta(hours=1),
         expected_kwh=kwh,
-        source="open_meteo",
-        confidence=None,
     )
 
 
@@ -237,8 +235,6 @@ def test_tomorrow_slots_excluded():
         start=tomorrow_start,
         end=tomorrow_start + timedelta(hours=1),
         expected_kwh=5.0,
-        source="open_meteo",
-        confidence=None,
     )
     today_slot = _gen_slot(12, 1.0)
     tomorrow_price = PriceSlot(

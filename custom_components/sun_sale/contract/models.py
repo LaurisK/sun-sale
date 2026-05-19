@@ -195,18 +195,14 @@ class PriceSeries:
 
 @dataclass(frozen=True)
 class GenerationSlot:
-    """One price-grid-aligned forecast slot (start, end, expected_kwh, source, confidence).
+    """One price-grid-aligned forecast slot.
 
     start/end mirror the pricing grid (1h or 15-min). expected_kwh is overlap-weighted
-    when the raw forecast resolution differs from the grid. source is "open_meteo",
-    "forecast_solar", or "frozen_morning". confidence is 0–1 when the source provides
-    it, None otherwise.
+    when the raw forecast resolution differs from the grid.
     """
     start: datetime
     end: datetime
     expected_kwh: float
-    source: str
-    confidence: float | None
 
 
 @dataclass(frozen=True)

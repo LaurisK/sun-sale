@@ -438,6 +438,10 @@ class ForecastCheckResult:
     expected_totals: dict[str, float] = field(default_factory=dict)
     module_totals: dict[str, float] = field(default_factory=dict)
     module_slot_count: int = 0
+    module_yesterday_kwh: float = 0.0
+    yesterday_store_date: str = ""
+    yesterday_store_slots: list[tuple[datetime, float]] = field(default_factory=list)  # (utc_dt, kwh)
+    yesterday_store_total_kwh: float = 0.0
     module_today_remaining_kwh: float | None = None
     entity_remaining: dict[str, float] = field(default_factory=dict)
     module_slots: list[dict] = field(default_factory=list)
@@ -534,7 +538,23 @@ def check_forecast(snap: Snapshot) -> ForecastCheckResult:
 
     forecast = snap.pipeline.get("forecast") or {}
     result.module_slot_count = forecast.get("slot_count", 0)
+    result.module_yesterday_kwh = forecast.get("total_yesterday_kwh", 0.0)
     result.module_today_remaining_kwh = forecast.get("today_remaining_kwh")
+
+    yday_store = snap.inputs.get("yesterday_solar") or {}
+    result.yesterday_store_date = yday_store.get("date") or ""
+    yday_total = 0.0
+    for entry in yday_store.get("entries") or []:
+        try:
+            dt = datetime.fromisoformat(entry["start"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            kwh = float(entry["kwh"])
+            result.yesterday_store_slots.append((dt.astimezone(timezone.utc), kwh))
+            yday_total += kwh
+        except (KeyError, ValueError, TypeError):
+            continue
+    result.yesterday_store_total_kwh = round(yday_total, 4)
     result.module_slots = forecast.get("slots") or []
     result.module_totals = {
         "today":    forecast.get("total_today_kwh", 0.0),
@@ -1320,6 +1340,7 @@ class ForecastSlotsTable(Static):
         entity_slots: list[EntitySlots],
         array_eids: list[str],
         module_slots: list[dict],
+        yesterday_store_slots: list[tuple[datetime, float]] | None = None,
     ) -> None:
         """Initialise with forecast check data.
 
@@ -1327,28 +1348,34 @@ class ForecastSlotsTable(Static):
             entity_slots: All parsed raw entity slots from check_forecast.
             array_eids: Base (today) entity IDs for up to two solar arrays.
             module_slots: Module GenerationSlot dicts from the pipeline debug endpoint.
+            yesterday_store_slots: Parsed coordinator-store entries for yesterday (utc_dt, kwh).
         """
         super().__init__()
         self._entity_slots = entity_slots
         self._array_eids = array_eids
         self._module_slots = module_slots
+        self._yesterday_store: dict[datetime, float] = {
+            dt: kwh for dt, kwh in (yesterday_store_slots or [])
+        }
 
     def compose(self) -> ComposeResult:
         """Yield the DataTable placeholder; rows are added in on_mount."""
         yield DataTable(show_cursor=False, zebra_stripes=True)
 
     def on_mount(self) -> None:
-        """Populate the DataTable with slot rows for today and tomorrow."""
+        """Populate the DataTable with slot rows for yesterday, today, and tomorrow."""
         now_utc = datetime.now(timezone.utc)
         today_d = now_utc.date()
+        yesterday_d = today_d - timedelta(days=1)
         tomorrow_d = today_d + timedelta(days=1)
-        in_range = frozenset((today_d, tomorrow_d))
+        in_range = frozenset((yesterday_d, today_d, tomorrow_d))
 
         array_data: list[dict[datetime, float]] = []
         for base_eid in (list(self._array_eids) + ["", ""])[:2]:
             tomorrow_eid = _tomorrow_eid(base_eid) if base_eid else ""
             dmap: dict[datetime, float] = {}
             for es in self._entity_slots:
+                # Yesterday has no entity source; only today + tomorrow come from raw entities.
                 if es.entity_id in (base_eid, tomorrow_eid) and es.day_label in ("today", "tomorrow"):
                     for dt, w in es.slots:
                         if dt.date() in in_range:
@@ -1409,19 +1436,38 @@ class ForecastSlotsTable(Static):
             if dt.date() != prev_date:
                 if prev_date is not None:
                     table.add_row(*[Text("─", style=dim)] * 6)
-                label = "today" if dt.date() == today_d else "tomorrow"
+                if dt.date() == yesterday_d:
+                    label = "yesterday (module only — no entity source)"
+                elif dt.date() == today_d:
+                    label = "today"
+                else:
+                    label = "tomorrow"
                 table.add_row(Text(label, style="bold"), *[""] * 5)
                 prev_date = dt.date()
 
-            table.add_row(
-                Text(dt.strftime("%H:%M"), style="cyan"),
-                Text(f"{v1:.0f}", style=dim if v1 == 0 else ""),
-                Text(f"{v2:.0f}", style=dim if v2 == 0 else ""),
-                Text(f"{total:.0f}", style=dim if total == 0 else ""),
-                Text(f"{target:.2f}", style=dim if target == 0 else ""),
-                Text(f"{v_mod:.3f}", style=dim if v_mod == 0 else "") if v_mod is not None
-                else Text("—", style=dim),
-            )
+            is_yday = dt.date() == yesterday_d
+            if is_yday:
+                store_kwh = self._yesterday_store.get(dt)
+                table.add_row(
+                    Text(dt.strftime("%H:%M"), style="cyan"),
+                    Text("—", style=dim),
+                    Text("—", style=dim),
+                    Text(f"{store_kwh:.4f}kWh", style=dim if store_kwh == 0 else "")
+                    if store_kwh is not None else Text("—", style=dim),
+                    Text("—", style=dim),
+                    Text(f"{v_mod:.4f}", style=dim if v_mod == 0 else "") if v_mod is not None
+                    else Text("—", style=dim),
+                )
+            else:
+                table.add_row(
+                    Text(dt.strftime("%H:%M"), style="cyan"),
+                    Text(f"{v1:.0f}", style=dim if v1 == 0 else ""),
+                    Text(f"{v2:.0f}", style=dim if v2 == 0 else ""),
+                    Text(f"{total:.0f}", style=dim if total == 0 else ""),
+                    Text(f"{target:.2f}", style=dim if target == 0 else ""),
+                    Text(f"{v_mod:.3f}", style=dim if v_mod == 0 else "") if v_mod is not None
+                    else Text("—", style=dim),
+                )
 
 
 class ForecastSummaryTable(Static):
@@ -1470,11 +1516,24 @@ class ForecastSummaryTable(Static):
             "",
         )
 
+        # Yesterday row first — store total vs module total; no per-array breakdown available.
+        dim = "dim"
+        store_known = bool(fc.yesterday_store_slots)
+        yday_label = f"yesterday ({fc.yesterday_store_date})" if fc.yesterday_store_date else "yesterday"
+        table.add_row(
+            Text(yday_label, style="bold dim"),
+            Text("—", style=dim),
+            Text("—", style=dim),
+            Text(f"{fc.yesterday_store_total_kwh:.4f}", style=dim if fc.yesterday_store_total_kwh == 0 else "")
+            if store_known else Text("—", style=dim),
+            Text(f"{fc.module_yesterday_kwh:.4f}", style=dim if fc.module_yesterday_kwh == 0 else ""),
+            Text(""),   # display only — no pass/fail check for yesterday
+        )
+
         day_plan: list[tuple[str, int | None]] = (
             [("today", None), ("tomorrow", None)]
             + [(f"d{n}", n) for n in range(2, 7)]
         )
-        dim = "dim"
 
         for day_label, n in day_plan:
             a_kwh: list[float] = []
@@ -1572,7 +1631,7 @@ class ForecastCheckWidget(Static):
             yield Static(f"  Arrays: {', '.join(fc.array_eids)}")
 
             with Collapsible(title="Slots", collapsed=False):
-                yield ForecastSlotsTable(fc.entity_slots, fc.array_eids, fc.module_slots)
+                yield ForecastSlotsTable(fc.entity_slots, fc.array_eids, fc.module_slots, fc.yesterday_store_slots)
                 if fc.negative_slots:
                     yield Static(f"  ⚠ {len(fc.negative_slots)} negative slot(s): {fc.negative_slots[:3]}")
 
