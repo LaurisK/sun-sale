@@ -8,12 +8,14 @@ the price grid (Nordpool resolution).
 
 Per slot: `generated_kwh = today_total(slot.end) - today_total(slot.start)`,
 where `today_total(t)` is estimated by linear interpolation across the
-samples of t's UTC day (with the implicit anchor: today_total = 0 at UTC
-midnight). Slots whose end falls past `now` are clamped to `now`.
+samples of t's LOCAL day (with the implicit anchor: today_total = 0 at LOCAL
+midnight, matching the inverter counter reset). Slots whose end falls past
+`now` are clamped to `now`.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from datetime import tzinfo as TzInfo
 from typing import Any
 
 from ..contract.models import (
@@ -29,20 +31,23 @@ def build_observed_generation_series(
     history: GenerationHistory,
     price_slots: tuple,
     now: datetime | None = None,
+    local_tz: TzInfo = timezone.utc,
 ) -> ObservedGenerationSeries:
     """Derive per-slot observed generation from persisted today-total counter samples.
 
     Emits one ObservedGenerationSlot per price-grid slot in [yesterday 00:00, now).
     Energy per slot is the difference of linearly-interpolated counter values at
-    slot boundaries.
+    slot boundaries. Day boundaries are computed in local time so they align with
+    the inverter counter reset (which happens at local midnight).
 
     Args:
         history: Persisted rolling sample history of the today-total counter.
         price_slots: Price-grid slots defining the output resolution.
         now: Cycle timestamp; defaults to UTC now.
+        local_tz: Local timezone for day-boundary calculations; defaults to UTC.
 
     Returns:
-        ObservedGenerationSeries covering yesterday 00:00 → now, grid-aligned.
+        ObservedGenerationSeries covering yesterday 00:00 local → now, grid-aligned.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -50,8 +55,8 @@ def build_observed_generation_series(
     if not price_slots or not history.samples:
         return ObservedGenerationSeries(slots=(), computed_at=now)
 
-    yesterday_start = _utc_midnight(now) - timedelta(days=1)
-    samples_by_day = _group_samples_by_day(history.samples)
+    yesterday_start = _day_start(now, local_tz) - timedelta(days=1)
+    samples_by_day = _group_samples_by_day(history.samples, local_tz)
 
     slots: list[ObservedGenerationSlot] = []
     for ps in price_slots:
@@ -60,8 +65,8 @@ def build_observed_generation_series(
         end_t = ps.end if ps.end < now else now
         if end_t <= ps.start:
             continue
-        start_val = _total_at(ps.start, samples_by_day)
-        end_val = _total_at(end_t, samples_by_day)
+        start_val = _total_at(ps.start, samples_by_day, local_tz)
+        end_val = _total_at(end_t, samples_by_day, local_tz)
         kwh = end_val - start_val
         if kwh < 0:
             kwh = 0.0
@@ -72,7 +77,7 @@ def build_observed_generation_series(
             source="inverter",
         ))
 
-    totals = _compute_totals(slots, now)
+    totals = _compute_totals(slots, now, local_tz)
     return ObservedGenerationSeries(
         slots=tuple(slots),
         computed_at=now,
@@ -83,22 +88,26 @@ def build_observed_generation_series(
 
 def _group_samples_by_day(
     samples: tuple[GenerationReading, ...],
+    local_tz: TzInfo,
 ) -> dict[datetime, list[GenerationReading]]:
-    """Group samples by UTC-midnight day, retaining only the post-last-reset segment.
+    """Group samples by local-midnight day, retaining only the post-last-reset segment.
 
-    Within a day, a reset (curr.today_total_kwh < prev.today_total_kwh) starts
-    a new segment. We keep the segment that ends the day so interpolation uses
-    the live counter rather than a stale pre-reset value.
+    The inverter counter resets at local midnight, so grouping by local day matches
+    the counter's natural reset boundary. Within a day, a reset
+    (curr.today_total_kwh < prev.today_total_kwh) starts a new segment. We keep
+    the segment that ends the day so interpolation uses the live counter rather
+    than a stale pre-reset value.
 
     Args:
         samples: Tuple of GenerationReadings in any order.
+        local_tz: Timezone used to determine local-day boundaries.
 
     Returns:
-        Dict mapping each UTC-midnight datetime to its cleaned sample list.
+        Dict mapping each local-midnight (as UTC datetime) to its cleaned sample list.
     """
     by_day: dict[datetime, list[GenerationReading]] = {}
     for s in sorted(samples, key=lambda x: x.timestamp):
-        day = _utc_midnight(s.timestamp)
+        day = _day_start(s.timestamp, local_tz)
         by_day.setdefault(day, []).append(s)
 
     cleaned: dict[datetime, list[GenerationReading]] = {}
@@ -116,22 +125,26 @@ def _group_samples_by_day(
 
 
 def _total_at(
-    t: datetime, samples_by_day: dict[datetime, list[GenerationReading]]
+    t: datetime,
+    samples_by_day: dict[datetime, list[GenerationReading]],
+    local_tz: TzInfo,
 ) -> float:
     """Estimate the cumulative today-total counter value at time t via linear interpolation.
 
-    Anchored at (UTC midnight, 0.0); linearly interpolated to the first sample;
-    linearly interpolated between adjacent samples; clamped to the last sample
-    after it. Returns 0.0 when the day has no samples.
+    Anchored at (local midnight, 0.0) — matching the inverter's reset point;
+    linearly interpolated to the first sample; linearly interpolated between
+    adjacent samples; clamped to the last sample after it. Returns 0.0 when the
+    day has no samples.
 
     Args:
         t: Time at which to estimate the counter (tz-aware UTC).
         samples_by_day: Output of _group_samples_by_day.
+        local_tz: Timezone used to determine local-day boundaries.
 
     Returns:
         Estimated cumulative kWh at time t.
     """
-    day = _utc_midnight(t)
+    day = _day_start(t, local_tz)
     day_samples = samples_by_day.get(day)
     if not day_samples:
         return 0.0
@@ -161,23 +174,28 @@ def _total_at(
 
 
 def _compute_totals(
-    slots: list[ObservedGenerationSlot], now: datetime
+    slots: list[ObservedGenerationSlot], now: datetime, local_tz: TzInfo
 ) -> dict[str, float]:
     """Sum observed generation slots into yesterday/today totals.
 
+    Uses local-date classification so slots spanning local midnight are
+    attributed to the correct local day.
+
     Args:
         slots: ObservedGenerationSlots in any order.
-        now: Reference time used to determine today's and yesterday's dates.
+        now: Reference time used to determine today's and yesterday's local dates.
+        local_tz: Timezone for local-date classification.
 
     Returns:
         Dict with keys "yesterday" and "today" in kWh.
     """
-    today = now.date()
+    local_now = now.astimezone(local_tz)
+    today = local_now.date()
     yesterday = today - timedelta(days=1)
     yest_sum = 0.0
     today_sum = 0.0
     for s in slots:
-        d = s.start.date()
+        d = s.start.astimezone(local_tz).date()
         if d == yesterday:
             yest_sum += s.generated_kwh
         elif d == today:
@@ -185,16 +203,23 @@ def _compute_totals(
     return {"yesterday": round(yest_sum, 4), "today": round(today_sum, 4)}
 
 
-def _utc_midnight(t: datetime) -> datetime:
-    """Return the UTC midnight (00:00:00 UTC) of the day containing t.
+def _day_start(t: datetime, local_tz: TzInfo) -> datetime:
+    """Return local midnight for t's local day, expressed as a UTC-aware datetime.
+
+    This is the zero-anchor for inverter counter interpolation: the counter
+    resets to 0 at local midnight, so all per-slot differencing is relative
+    to that instant.
 
     Args:
-        t: Any datetime (tz-aware or naive; naive treated as UTC).
+        t: Any tz-aware datetime.
+        local_tz: Timezone defining "local midnight".
 
     Returns:
-        Timezone-aware UTC datetime at midnight of t's UTC date.
+        UTC-aware datetime of local midnight on t's local date.
     """
-    return datetime(t.year, t.month, t.day, 0, 0, 0, tzinfo=timezone.utc)
+    local_t = t.astimezone(local_tz)
+    local_midnight = local_t.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------

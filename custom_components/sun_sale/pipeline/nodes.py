@@ -161,7 +161,7 @@ class ObservedGenerationNode(DagNode):
         history = ctx.require(GenerationHistory)
         price_series = ctx.require(PriceSeries)
         series = generation_module.build_observed_generation_series(
-            history, price_series.slots, now=ctx.now
+            history, price_series.slots, now=ctx.now, local_tz=ctx.config.local_tz
         )
         return series, []
 
