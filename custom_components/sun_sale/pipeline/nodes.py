@@ -8,7 +8,7 @@ Tier map:
   T1: PricingNode, BatteryStateNode
   T2: GenerationNode, DegradationNode
   T3: LockoutNode
-  T4: OptimizerNode
+  T4: ScheduleNode
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from datetime import datetime
 
 from . import base_load as base_load_module
 from . import battery as battery_module
-from . import calculator, charging_profile as charging_profile_module, forecast_accuracy, optimizer
+from . import calculation, charging_profile as charging_profile_module, forecast_accuracy, schedule as schedule_module
 from . import profitability as profitability_module
 from ..inbound import battery as battery_inbound
 from ..inbound import forecast as forecast_module
@@ -296,7 +296,7 @@ class LockoutNode(DagNode):
         generation = ctx.require(GenerationSeries)
         battery_state = ctx.require(BatteryState)
 
-        result = calculator.calculate(
+        result = calculation.calculate(
             prices=price_series,
             generation=generation,
             battery_state=battery_state,
@@ -309,8 +309,8 @@ class LockoutNode(DagNode):
 # Tier 4 nodes — consume Tier 1–3 secondary
 # ---------------------------------------------------------------------------
 
-class OptimizerNode(DagNode):
-    """Greedy pair-match optimizer → Schedule + optional InverterActionEvent."""
+class ScheduleNode(DagNode):
+    """Greedy pair-match scheduler → Schedule + optional InverterActionEvent."""
 
     tier = 4
     output_type = Schedule
@@ -336,7 +336,7 @@ class OptimizerNode(DagNode):
         battery_state = ctx.require(BatteryState)
         deg_cost = ctx.require(DegradationCost)
 
-        schedule = optimizer.optimize_schedule(
+        schedule = schedule_module.optimize_schedule(
             price_series=price_series,
             calc=calc,
             battery_config=ctx.config.battery,

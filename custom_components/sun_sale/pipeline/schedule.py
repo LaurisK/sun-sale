@@ -1,4 +1,4 @@
-"""Core battery scheduling optimizer.
+"""Schedule stage: greedy pair-match optimizer producing the hourly action schedule.
 
 Pure Python — no Home Assistant imports. Takes a PriceSeries and CalculationResult,
 returns an hourly action schedule that maximises profit.

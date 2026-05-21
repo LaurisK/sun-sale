@@ -194,9 +194,9 @@ def test_build_capacity_observation_energy_computed():
 def _make_pipeline_data() -> dict:
     from custom_components.sun_sale.contract.models import GenerationSeries
     from custom_components.sun_sale.inbound.pricing import build_price_series
-    from custom_components.sun_sale.pipeline.calculator import calculate
+    from custom_components.sun_sale.pipeline.calculation import calculate
     from custom_components.sun_sale.pipeline.battery import degradation_cost_per_kwh
-    from custom_components.sun_sale.pipeline.optimizer import optimize_schedule
+    from custom_components.sun_sale.pipeline.schedule import optimize_schedule
     from tests.conftest import default_battery_config, default_battery_state, default_tariff_config, make_price
 
     now = BASE

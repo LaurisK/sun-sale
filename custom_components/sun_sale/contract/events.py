@@ -16,6 +16,6 @@ class ControlEvent:
 
 @dataclass(frozen=True)
 class InverterActionEvent(ControlEvent):
-    """Emitted by OptimizerNode when the current-slot action changes."""
+    """Emitted by ScheduleNode when the current-slot action changes."""
     action: Action
     power_kw: float

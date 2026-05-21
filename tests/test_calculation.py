@@ -1,7 +1,7 @@
-"""Tests for calculator.py — pure Python, no HA required."""
+"""Tests for calculation.py — pure Python, no HA required."""
 from datetime import datetime, timedelta, timezone
 
-from custom_components.sun_sale.pipeline.calculator import calculate, _coalesce_lockout_windows
+from custom_components.sun_sale.pipeline.calculation import calculate, _coalesce_lockout_windows
 from custom_components.sun_sale.contract.models import (
     BatteryState, GenerationSeries, GenerationSlot, SlotDecision,
 )

@@ -131,7 +131,7 @@ from ..pipeline.nodes import (
     GenerationNode,
     LockoutNode,
     ObservedGenerationNode,
-    OptimizerNode,
+    ScheduleNode,
     PricingNode,
     ProfitabilityNode,
     make_last_ref,
@@ -299,7 +299,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ForecastAccuracyNode(),
             ProfitabilityNode(),
             LockoutNode(),
-            OptimizerNode(last_inverter_action_ref=inverter_last_ref),
+            ScheduleNode(last_inverter_action_ref=inverter_last_ref),
         ]
 
         self._engine = DagEngine(nodes)

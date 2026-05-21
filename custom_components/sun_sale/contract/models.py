@@ -219,7 +219,7 @@ class GenerationSeries:
     """Output of the forecast stage. Deliverables:
 
     - slots: price-grid-aligned GenerationSlots covering yesterday 00:00 → tomorrow 23:59,
-      one per pricing slot. Consumed by calculator (energy_between, per-slot expected solar
+      one per pricing slot. Consumed by calculation (energy_between, per-slot expected solar
       for lockout logic) and charging_profile (today's remaining slots to decide store vs sell).
     - today_remaining_kwh: sum of expected_kwh for today's slots with start >= now.
       Consumed by charging_profile to select case 1 (fits in battery) vs case 2 (sell excess).
@@ -423,7 +423,7 @@ class HouseholdLoadReading:
     """Primary data: one snapshot of measured household load (per cycle).
 
     Distinct from `BatteryReading.household_load_kw`: that field carries a
-    0.2 kW stub when the sensor is unavailable, so downstream calculator/
+    0.2 kW stub when the sensor is unavailable, so downstream calculation/
     dashboard always have a number. This reading returns None on absence
     so the persisted history isn't polluted (see docs/base_load_missing.md §8).
     """
@@ -546,7 +546,7 @@ class BatteryRuntimeEstimate:
     """How long the battery can sustain household baseload before hitting min_soc.
 
     Forward-simulates net drain (baseload − forecast solar) from `now` over
-    `horizon_hours`. Intentionally does NOT account for the optimizer's
+    `horizon_hours`. Intentionally does NOT account for the schedule node's
     scheduled discharge/charge — the output is a "baseload-only reserve".
     `runtime_minutes` and `until` are None when the battery never drains
     within the horizon (e.g. forecast solar covers baseload).

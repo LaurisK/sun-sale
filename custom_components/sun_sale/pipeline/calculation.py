@@ -1,4 +1,4 @@
-"""Calculator stage: derive per-slot decision flags from prices and generation.
+"""Calculation stage: derive per-slot decision flags from prices and generation.
 
 Pure Python — no Home Assistant imports.
 Consumption is out of scope for v1; GenerationSeries stays solar-only.

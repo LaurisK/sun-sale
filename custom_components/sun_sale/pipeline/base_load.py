@@ -16,7 +16,7 @@ Design decisions (see docs/base_load_missing.md §1):
 
   - No day-class bucketing — 24 hour-of-day buckets only.
   - All bucket keys computed in local time; storage stays tz-aware UTC.
-  - Runtime estimate ignores both forecast solar and the optimizer Schedule.
+  - Runtime estimate ignores both forecast solar and the schedule node's Schedule.
 """
 from __future__ import annotations
 
