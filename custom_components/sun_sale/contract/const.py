@@ -56,6 +56,7 @@ STORAGE_KEY_YESTERDAY = f"{DOMAIN}_yesterday"
 STORAGE_KEY_GENERATION = f"{DOMAIN}_generation"
 STORAGE_KEY_HOUSEHOLD_LOAD = f"{DOMAIN}_household_load"
 STORAGE_KEY_PRICE_HISTORY = f"{DOMAIN}_price_history"
+STORAGE_KEY_FORECAST_QUALITY = f"{DOMAIN}_forecast_quality"
 STORAGE_VERSION = 1
 
 # Rolling generation-sample retention (days). Anything older than this is

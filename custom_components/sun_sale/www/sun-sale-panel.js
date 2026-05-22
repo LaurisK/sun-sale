@@ -72,6 +72,9 @@
       super();
       this._hass        = null;
       this._chart       = null;
+      this._g1Chart     = null;
+      this._g2Chart     = null;
+      this._g3Chart     = null;
       this._initialized = false;
       this.attachShadow({ mode: 'open' });
     }
@@ -89,7 +92,10 @@
     }
 
     disconnectedCallback() {
-      if (this._chart) { this._chart.destroy(); this._chart = null; }
+      if (this._chart)   { this._chart.destroy();   this._chart   = null; }
+      if (this._g1Chart) { this._g1Chart.destroy();  this._g1Chart = null; }
+      if (this._g2Chart) { this._g2Chart.destroy();  this._g2Chart = null; }
+      if (this._g3Chart) { this._g3Chart.destroy();  this._g3Chart = null; }
     }
 
     // ── Boot ──────────────────────────────────────────────────────────────────
@@ -179,6 +185,21 @@
             color: var(--secondary-text-color, #888);
           }
           #chart { width: 100%; }
+          #accuracy { margin-top: 24px; }
+          .accuracy-title {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--secondary-text-color, #888);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin: 16px 0 4px;
+          }
+          .accuracy-subtitle {
+            font-size: 0.75rem;
+            color: var(--secondary-text-color, #666);
+            margin: 0 0 4px;
+          }
+          .accuracy-chart { width: 100%; }
         </style>
         <div id="card">
           <h2>☀ Sun Sale</h2>
@@ -187,6 +208,7 @@
           <div id="profile"></div>
           <div id="status">Loading…</div>
           <div id="chart"></div>
+          <div id="accuracy"></div>
         </div>
       `;
     }
@@ -701,6 +723,208 @@
       const el = this.shadowRoot.querySelector('#chart');
       this._chart = new ApexCharts(el, options);
       this._chart.render().then(() => drawErrorOverlay(this._chart));
+
+      const dashAttrsForQuality = this._hass.states[DASHBOARD_ENTITY]?.attributes;
+      this._renderAccuracySection(dashAttrsForQuality?.forecast_quality ?? null);
+    }
+
+    // ── Forecast Quality Charts ────────────────────────────────────────────────
+
+    _buildQualityChartOptions(title, xLabels, metricsArr) {
+      // metricsArr: [{n, bias_wh, mae_wh, rmse_wh, mape_pct, r2}, ...] aligned with xLabels.
+      const get = (key) => metricsArr.map(m => (m && m[key] != null) ? m[key] : null);
+
+      const maeSeries   = get('mae_wh');
+      const rmseSeries  = get('rmse_wh');
+      const biasSeries  = get('bias_wh');
+      const mapeSeries  = get('mape_pct');
+      const r2Series    = get('r2').map(v => v != null ? +(v * 100).toFixed(2) : null);
+      const nSeries     = metricsArr.map(m => m ? m.n : 0);
+
+      return {
+        series: [
+          { name: 'MAE (Wh)',   type: 'bar',  data: maeSeries  },
+          { name: 'RMSE (Wh)',  type: 'line', data: rmseSeries },
+          { name: 'Bias (Wh)',  type: 'line', data: biasSeries },
+          { name: 'MAPE (%)',   type: 'line', data: mapeSeries },
+          { name: 'R²×100 (%)', type: 'line', data: r2Series   },
+        ],
+        chart: {
+          type:       'line',
+          height:     300,
+          background: 'transparent',
+          toolbar:    { show: false },
+          animations: { enabled: false },
+          fontFamily: 'inherit',
+        },
+        theme: { mode: 'dark' },
+        plotOptions: {
+          bar: { horizontal: false, columnWidth: '60%' },
+        },
+        stroke: {
+          show:      true,
+          curve:     ['smooth', 'smooth', 'smooth', 'smooth', 'smooth'],
+          width:     [0,        2,        2,        2,        2       ],
+          dashArray: [0,        5,        3,        0,        8       ],
+        },
+        colors: ['#ffb300', '#ff7043', '#42a5f5', '#66bb6a', '#ab47bc'],
+        fill: {
+          type:    ['solid', 'solid', 'solid', 'solid', 'solid'],
+          opacity: [0.8,     1,       1,       1,       1      ],
+        },
+        xaxis: {
+          categories: xLabels,
+          labels: {
+            style:  { colors: '#aaa', fontSize: '10px' },
+            rotate: -30,
+          },
+          axisBorder: { show: false },
+          axisTicks:  { show: false },
+        },
+        yaxis: [
+          {
+            seriesName: ['MAE (Wh)', 'RMSE (Wh)', 'Bias (Wh)'],
+            title: {
+              text:  'Wh',
+              style: { color: '#ffb300', fontSize: '10px' },
+            },
+            forceNiceScale:  true,
+            decimalsInFloat: 1,
+            labels: {
+              style:     { colors: '#ffb300', fontSize: '10px' },
+              formatter: v => (v != null ? v.toFixed(1) : ''),
+            },
+          },
+          {
+            seriesName: ['MAPE (%)', 'R²×100 (%)'],
+            opposite:   true,
+            title: {
+              text:  '%',
+              style: { color: '#66bb6a', fontSize: '10px' },
+            },
+            forceNiceScale:  true,
+            decimalsInFloat: 1,
+            labels: {
+              style:     { colors: '#66bb6a', fontSize: '10px' },
+              formatter: v => (v != null ? v.toFixed(1) : ''),
+            },
+          },
+        ],
+        tooltip: {
+          shared:    true,
+          intersect: false,
+          theme:     'dark',
+          y: {
+            formatter: (val, { seriesIndex }) => {
+              if (val == null) return '—';
+              const units = ['Wh', 'Wh', 'Wh', '%', '%'];
+              const label = ['MAE', 'RMSE', 'Bias', 'MAPE', 'R²×100'][seriesIndex] || '';
+              const n = nSeries[/* dataPointIndex not avail here */0] || '';
+              return `${val.toFixed(1)} ${units[seriesIndex]}`;
+            },
+          },
+        },
+        legend: {
+          show:   true,
+          labels: { colors: '#aaa' },
+        },
+        grid: {
+          borderColor: 'rgba(255,255,255,0.07)',
+          xaxis: { lines: { show: false } },
+          yaxis: { lines: { show: true  } },
+        },
+        markers:    { size: 0 },
+        dataLabels: { enabled: false },
+        title: {
+          text:  title,
+          style: { color: '#aaa', fontSize: '12px', fontWeight: '600' },
+          margin: 4,
+        },
+      };
+    }
+
+    _renderAccuracySection(quality) {
+      const container = this.shadowRoot.querySelector('#accuracy');
+      if (!container) return;
+
+      if (!quality || (!Object.keys(quality.group1 || {}).length &&
+                       !Object.keys(quality.group2 || {}).length &&
+                       !Object.keys(quality.group3 || {}).length)) {
+        container.innerHTML = '<div class="accuracy-title">Forecast Quality</div>'
+          + '<div class="accuracy-subtitle" style="color:#666">No quality data yet — accumulates over time.</div>';
+        return;
+      }
+
+      // Destroy previous charts.
+      if (this._g1Chart) { this._g1Chart.destroy(); this._g1Chart = null; }
+      if (this._g2Chart) { this._g2Chart.destroy(); this._g2Chart = null; }
+      if (this._g3Chart) { this._g3Chart.destroy(); this._g3Chart = null; }
+
+      const sunriseStr = quality.sunrise_utc
+        ? new Date(quality.sunrise_utc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+        : '—';
+      const sunsetStr = quality.sunset_utc
+        ? new Date(quality.sunset_utc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+        : '—';
+
+      container.innerHTML = `
+        <div class="accuracy-title">Forecast Quality</div>
+        <div class="accuracy-subtitle">Sunrise ${sunriseStr} · Sunset ${sunsetStr} (local)</div>
+        <div class="accuracy-subtitle">EMA α=0.1 running accuracy per bucket</div>
+        <div id="g1-chart" class="accuracy-chart"></div>
+        <div id="g2-chart" class="accuracy-chart"></div>
+        <div id="g3-chart" class="accuracy-chart"></div>
+      `;
+
+      // Group 1: intensity bins — sorted numerically by Wh.
+      {
+        const g1 = quality.group1 || {};
+        const keys = Object.keys(g1).map(Number).sort((a, b) => a - b);
+        const labels = keys.map(k => k + ' Wh');
+        const metrics = keys.map(k => g1[String(k)]);
+        const el = container.querySelector('#g1-chart');
+        const opts = this._buildQualityChartOptions(
+          'Group 1 — Accuracy by Predicted Intensity (per forecast-kWh bin)',
+          labels, metrics,
+        );
+        this._g1Chart = new ApexCharts(el, opts);
+        this._g1Chart.render();
+      }
+
+      // Group 2: solar-day positional buckets — sorted 1..N.
+      {
+        const g2 = quality.group2 || {};
+        const keys = Object.keys(g2).map(Number).sort((a, b) => a - b);
+        const n = keys.length;
+        const half = Math.ceil(n / 2);
+        const labels = keys.map(k => {
+          if (k <= half) return `Dawn +${k - 1}`;
+          return `Dusk -${n - k}`;
+        });
+        const metrics = keys.map(k => g2[String(k)]);
+        const el = container.querySelector('#g2-chart');
+        const opts = this._buildQualityChartOptions(
+          'Group 2 — Accuracy by Solar-Day Position (Dawn → Dusk)',
+          labels, metrics,
+        );
+        this._g2Chart = new ApexCharts(el, opts);
+        this._g2Chart.render();
+      }
+
+      // Group 3: horizon buckets d0–d6.
+      {
+        const g3 = quality.group3 || {};
+        const keys = Object.keys(g3).map(Number).sort((a, b) => a - b);
+        const labels = keys.map(k => `d${k}`);
+        const metrics = keys.map(k => g3[String(k)]);
+        const el = container.querySelector('#g3-chart');
+        const opts = this._buildQualityChartOptions(
+          'Group 3 — Accuracy by Forecast Horizon (d0 = same day, d6 = 6 days ahead)',
+          labels, metrics,
+        );
+        this._g3Chart = new ApexCharts(el, opts);
+        this._g3Chart.render();
+      }
     }
   }
 

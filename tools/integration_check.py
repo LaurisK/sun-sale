@@ -2287,11 +2287,196 @@ class ProfitabilityCheckWidget(Static):
             )
 
 
+@dataclass
+class ForecastQualityCheckResult:
+    """Result of the forecast quality deep-check: EMA bucket counts and metric ranges."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    sunrise_utc: str = ""
+    sunset_utc: str = ""
+    group1_bucket_count: int = 0
+    group2_bucket_count: int = 0
+    group3_bucket_count: int = 0
+    group3_pending_count: int = 0
+    group1_buckets: list[dict] = field(default_factory=list)
+    group2_buckets: list[dict] = field(default_factory=list)
+    group3_buckets: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_forecast_quality(snap: Snapshot) -> ForecastQualityCheckResult:
+    """Validate forecast quality store structure and metric plausibility.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.forecast_quality.
+
+    Returns:
+        ForecastQualityCheckResult with bucket counts and overall pass/fail.
+    """
+    result = ForecastQualityCheckResult()
+    fq = snap.pipeline.get("forecast_quality")
+    if not fq:
+        result.skipped = True
+        result.skip_reason = "pipeline.forecast_quality is null (no quality data yet)"
+        return result
+
+    result.sunrise_utc = fq.get("sunrise_utc") or ""
+    result.sunset_utc  = fq.get("sunset_utc") or ""
+    result.group3_pending_count = fq.get("group3_pending_count", 0)
+
+    def _validate_buckets(group_dict: dict, label: str) -> list[dict]:
+        rows: list[dict] = []
+        for key, m in (group_dict or {}).items():
+            n = m.get("n", 0)
+            mae = m.get("mae_wh")
+            rmse = m.get("rmse_wh")
+            mape = m.get("mape_pct")
+            r2   = m.get("r2")
+            ok = True
+            issues = []
+            if n < 0:
+                ok = False
+                issues.append("negative_n")
+            if mae is not None and mae < 0:
+                ok = False
+                issues.append("negative_mae")
+            if rmse is not None and rmse < 0:
+                ok = False
+                issues.append("negative_rmse")
+            if mape is not None and mape < 0:
+                ok = False
+                issues.append("negative_mape")
+            if r2 is not None and not (-10.0 <= r2 <= 1.0):
+                ok = False
+                issues.append("r2_out_of_range")
+            if not ok:
+                result.mismatches.append(f"{label}[{key}]: {','.join(issues)}")
+                result.overall_ok = False
+            rows.append({
+                "key": key, "n": n, "mae_wh": mae, "rmse_wh": rmse,
+                "bias_wh": m.get("bias_wh"), "mape_pct": mape, "r2": r2,
+                "ok": ok,
+            })
+        return rows
+
+    result.group1_buckets = _validate_buckets(fq.get("group1") or {}, "group1")
+    result.group2_buckets = _validate_buckets(fq.get("group2") or {}, "group2")
+    result.group3_buckets = _validate_buckets(fq.get("group3") or {}, "group3")
+    result.group1_bucket_count = len(result.group1_buckets)
+    result.group2_bucket_count = len(result.group2_buckets)
+    result.group3_bucket_count = len(result.group3_buckets)
+    return result
+
+
+class ForecastQualityBucketTable(Static):
+    """DataTable: bucket key | n | Bias | MAE | RMSE | MAPE% | R² | ✓/✗."""
+
+    DEFAULT_CSS = """
+    ForecastQualityBucketTable { height: auto; }
+    ForecastQualityBucketTable DataTable { height: 14; }
+    """
+
+    def __init__(self, title: str, rows: list[dict]) -> None:
+        """Initialise with a group title and pre-computed bucket rows.
+
+        Args:
+            title: Human-readable group label (e.g. "Group 1 — Intensity").
+            rows: List of dicts from _validate_buckets() with key, n, metrics, ok.
+        """
+        super().__init__()
+        self._title = title
+        self._rows = rows
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield Static(f"  {self._title}", markup=False)
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per bucket."""
+        table = self.query_one(DataTable)
+        table.add_columns("Bucket", "n", "Bias Wh", "MAE Wh", "RMSE Wh", "MAPE %", "R²", "")
+        for row in self._rows:
+            fmt = lambda v: f"{v:.1f}" if v is not None else "—"
+            fmt4 = lambda v: f"{v:.4f}" if v is not None else "—"
+            ok_style = "" if row["ok"] else "red"
+            table.add_row(
+                Text(str(row["key"]),     style="cyan"),
+                Text(str(row["n"])),
+                Text(fmt(row["bias_wh"]),  style=ok_style),
+                Text(fmt(row["mae_wh"]),   style=ok_style),
+                Text(fmt(row["rmse_wh"]),  style=ok_style),
+                Text(fmt(row["mape_pct"]), style=ok_style),
+                Text(fmt4(row["r2"])),
+                Text("✓" if row["ok"] else "✗", style="green" if row["ok"] else "red"),
+            )
+
+
+class ForecastQualityCheckWidget(Static):
+    """Collapsible forecast quality deep-check: sunrise/sunset, per-group bucket tables."""
+
+    DEFAULT_CSS = "ForecastQualityCheckWidget { height: auto; }"
+
+    def __init__(self, fqr: ForecastQualityCheckResult) -> None:
+        """Initialise with the pre-computed forecast quality check result.
+
+        Args:
+            fqr: Result of check_forecast_quality() for one coordinator.
+        """
+        super().__init__()
+        self._fqr = fqr
+
+    def compose(self) -> ComposeResult:
+        """Render quality store summary and per-group bucket tables as a collapsible block."""
+        fqr = self._fqr
+
+        if fqr.skipped:
+            yield Static(f"  ⚠  forecast_quality   SKIP   {fqr.skip_reason}")
+            return
+
+        color = "green" if fqr.overall_ok else "red"
+        mark = "✓" if fqr.overall_ok else "✗"
+        status = "PASS" if fqr.overall_ok else "FAIL"
+        title = (
+            f"[{color}]{mark}[/{color}]  forecast_quality   [{color}]{status}[/{color}]"
+            f"   G1={fqr.group1_bucket_count}b"
+            f"  G2={fqr.group2_bucket_count}b"
+            f"  G3={fqr.group3_bucket_count}b"
+            f"  pending={fqr.group3_pending_count}"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            sunrise_str = fqr.sunrise_utc or "—"
+            sunset_str  = fqr.sunset_utc  or "—"
+            yield Static(
+                f"  Sunrise UTC: {sunrise_str}\n"
+                f"  Sunset  UTC: {sunset_str}\n"
+                f"  Group3 pending: {fqr.group3_pending_count}",
+                markup=False,
+            )
+            if fqr.mismatches:
+                yield Static(
+                    "  [red]Mismatches:[/red] " + ", ".join(fqr.mismatches),
+                    markup=True,
+                )
+            if fqr.group1_buckets:
+                sorted_g1 = sorted(fqr.group1_buckets, key=lambda r: int(r["key"]))
+                yield ForecastQualityBucketTable("Group 1 — Intensity (forecast Wh bin)", sorted_g1)
+            if fqr.group2_buckets:
+                sorted_g2 = sorted(fqr.group2_buckets, key=lambda r: int(r["key"]))
+                yield ForecastQualityBucketTable("Group 2 — Solar-Day Position (#1=sunrise, #N=sunset)", sorted_g2)
+            if fqr.group3_buckets:
+                sorted_g3 = sorted(fqr.group3_buckets, key=lambda r: int(r["key"]))
+                yield ForecastQualityBucketTable("Group 3 — Forecast Horizon (d0=today … d6=6d ahead)", sorted_g3)
+
+
 # Categories handled by deep-check widgets; excluded from the plain validator display.
 _DEEP_CATS: frozenset[str] = frozenset({
     "forecast", "pricing", "calculation", "schedule", "battery",
     "observed_generation", "forecast_accuracy", "charging_profile", "base_load",
-    "battery_runtime", "household_consumption", "profitability",
+    "battery_runtime", "household_consumption", "profitability", "forecast_quality",
 })
 
 
@@ -2734,6 +2919,8 @@ class IntegrationCheckApp(App):
     BatteryRuntimeCheckWidget { height: auto; }
     HouseholdConsumptionCheckWidget { height: auto; }
     ProfitabilityCheckWidget { height: auto; }
+    ForecastQualityCheckWidget { height: auto; }
+    ForecastQualityBucketTable DataTable { height: 14; }
     """
 
     def __init__(
@@ -2751,6 +2938,7 @@ class IntegrationCheckApp(App):
         battery_runtime_results: dict[str, BatteryRuntimeCheckResult],
         household_consumption_results: dict[str, HouseholdConsumptionCheckResult],
         profitability_results: dict[str, ProfitabilityCheckResult],
+        forecast_quality_results: dict[str, ForecastQualityCheckResult],
     ) -> None:
         """Initialise with validator report and all deep-check results.
 
@@ -2768,6 +2956,7 @@ class IntegrationCheckApp(App):
             battery_runtime_results: Per-entry battery runtime deep-check results.
             household_consumption_results: Per-entry household consumption deep-check results.
             profitability_results: Per-entry profitability score deep-check results.
+            forecast_quality_results: Per-entry forecast quality EMA bucket deep-check results.
         """
         super().__init__()
         self._report = report
@@ -2783,6 +2972,7 @@ class IntegrationCheckApp(App):
         self._battery_runtime_results = battery_runtime_results
         self._household_consumption_results = household_consumption_results
         self._profitability_results = profitability_results
+        self._forecast_quality_results = forecast_quality_results
         self.exit_code = 0
 
     def _all_deep(self) -> list:
@@ -2804,6 +2994,7 @@ class IntegrationCheckApp(App):
             + list(self._battery_runtime_results.values())
             + list(self._household_consumption_results.values())
             + list(self._profitability_results.values())
+            + list(self._forecast_quality_results.values())
         )
 
     def compose(self) -> ComposeResult:
@@ -2837,6 +3028,7 @@ class IntegrationCheckApp(App):
                 ("battery_runtime",         BatteryRuntimeCheckWidget,          self._battery_runtime_results),
                 ("household_consumption",   HouseholdConsumptionCheckWidget,    self._household_consumption_results),
                 ("profitability",           ProfitabilityCheckWidget,           self._profitability_results),
+                ("forecast_quality",        ForecastQualityCheckWidget,         self._forecast_quality_results),
             ):
                 r = results_map.get(eid)
                 if r is not None:
@@ -3031,6 +3223,7 @@ def main(argv: list[str] | None = None) -> int:
     battery_runtime_results        = {s.entry_id: check_battery_runtime(s)           for s in snapshots}
     household_consumption_results  = {s.entry_id: check_household_consumption(s)     for s in snapshots}
     profitability_results          = {s.entry_id: check_profitability(s)             for s in snapshots}
+    forecast_quality_results       = {s.entry_id: check_forecast_quality(s)          for s in snapshots}
     app = IntegrationCheckApp(
         report,
         forecast_results, pricing_results, calculation_results,
@@ -3038,6 +3231,7 @@ def main(argv: list[str] | None = None) -> int:
         observed_gen_results, forecast_acc_results, charging_profile_results,
         base_load_results, battery_runtime_results,
         household_consumption_results, profitability_results,
+        forecast_quality_results,
     )
     app.run(inline=True)
     return app.exit_code

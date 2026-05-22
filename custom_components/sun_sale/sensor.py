@@ -25,10 +25,12 @@ from .contract.models import (
     ChargeMode,
     ChargingProfile,
     ForecastErrorSeries,
+    ForecastQualityStore,
     GenerationSeries,
     PriceSeries,
     PriceSlot,
     Schedule,
+    SunTimes,
 )
 
 
@@ -482,6 +484,18 @@ class DashboardSensor(_BaseSensor):
         else:
             battery_state = "discharging"
 
+        quality: ForecastQualityStore | None = self.coordinator.data.get("forecast_quality")
+        sun_times: SunTimes | None = self.coordinator.data.get("sun_times")
+        forecast_quality_data = None
+        if quality is not None:
+            forecast_quality_data = {
+                "sunrise_utc": sun_times.today_sunrise.isoformat() if (sun_times and sun_times.today_sunrise) else None,
+                "sunset_utc": sun_times.today_sunset.isoformat() if (sun_times and sun_times.today_sunset) else None,
+                "group1": {k: v.metrics() for k, v in quality.group1.items()},
+                "group2": {k: v.metrics() for k, v in quality.group2.items()},
+                "group3": {k: v.metrics() for k, v in quality.group3.items()},
+            }
+
         return {
             "generated_at": now.isoformat(),
             "now_ts": int(now.timestamp() * 1000),
@@ -495,6 +509,7 @@ class DashboardSensor(_BaseSensor):
             "solar_energy_entity_id": config.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
             "charging_profile_slots": charging_profile_slots,
             "charging_profile_summary": charging_profile_summary,
+            "forecast_quality": forecast_quality_data,
         }
 
 

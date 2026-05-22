@@ -75,6 +75,7 @@ from ..contract.const import (
     GENERATION_HISTORY_RETENTION_DAYS,
     PRICE_HISTORY_RETENTION_DAYS,
     STORAGE_KEY_CAPACITY,
+    STORAGE_KEY_FORECAST_QUALITY,
     STORAGE_KEY_GENERATION,
     STORAGE_KEY_HOUSEHOLD_LOAD,
     STORAGE_KEY_PRICE_HISTORY,
@@ -99,7 +100,8 @@ from ..contract.models import (
     DayClass,
     DegradationCost,
     EstimatedCapacity,
-    ForecastErrorSeries,
+    ForecastAccuracyResult,
+    ForecastQualityStore,
     GenerationHistory,
     GenerationReading,
     GenerationSeries,
@@ -117,6 +119,7 @@ from ..contract.models import (
     SolarEntry,
     Schedule,
     SunSaleConfig,
+    SunTimes,
     TariffConfig,
     YesterdayPrices,
 )
@@ -136,6 +139,7 @@ from ..pipeline.nodes import (
     ProfitabilityNode,
     make_last_ref,
 )
+from ..pipeline import forecast_accuracy as forecast_accuracy_module
 from ..pipeline import profitability as profitability_module
 from ..inbound.battery import BatteryTranslator
 from ..inbound.forecast import SolarTranslator
@@ -191,6 +195,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._household_load_samples: list[HouseholdLoadSample] = []
         self._price_history_store: Store | None = None
         self._daily_peak_history: list[DailyPeak] = []
+        self._forecast_quality_store: Store | None = None
+        self._forecast_quality: ForecastQualityStore = ForecastQualityStore()
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
@@ -350,6 +356,13 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 except (KeyError, ValueError):
                     continue
 
+        self._forecast_quality_store = Store(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_FORECAST_QUALITY,
+        )
+        quality_stored = await self._forecast_quality_store.async_load()
+        if quality_stored:
+            self._forecast_quality = forecast_accuracy_module.store_from_dict(quality_stored)
+
         self._yesterday_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_YESTERDAY)
         yesterday_stored = await self._yesterday_store.async_load()
         if yesterday_stored:
@@ -478,6 +491,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             )
 
             primary[PriceHistory] = PriceHistory(peaks=tuple(self._daily_peak_history))
+            primary[ForecastQualityStore] = self._forecast_quality
+            primary[SunTimes] = self._read_sun_times(now)
 
             current_reading: BatteryReading | None = primary.get(BatteryReading)
             if current_reading is not None:
@@ -493,6 +508,14 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             )
 
             secondary, events = await self._engine.run(primary, self._sun_sale_config, now)
+
+            acc_result: ForecastAccuracyResult | None = secondary.get(ForecastAccuracyResult)
+            if acc_result is not None:
+                self._forecast_quality = acc_result.quality
+                if self._forecast_quality_store is not None:
+                    await self._forecast_quality_store.async_save(
+                        forecast_accuracy_module.store_to_dict(acc_result.quality)
+                    )
 
             pricing_result: PriceSeries | None = secondary.get(PriceSeries)
             if pricing_result is not None:
@@ -616,11 +639,12 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             HouseholdConsumptionReading,
         )
 
+        _acc: ForecastAccuracyResult | None = secondary.get(ForecastAccuracyResult)
         return {
             "pricing": secondary.get(PriceSeries),
             "forecast": secondary.get(GenerationSeries),
             "observed_generation": secondary.get(ObservedGenerationSeries),
-            "forecast_error": secondary.get(ForecastErrorSeries),
+            "forecast_error": _acc.error_series if _acc else None,
             "calculation": secondary.get(CalculationResult),
             "schedule": secondary.get(Schedule),
             "battery_state": secondary.get(BatteryState),
@@ -638,7 +662,54 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "consumption_today_kwh": (
                 consumption.today_total_kwh if consumption else None
             ),
+            "forecast_quality": _acc.quality if _acc else None,
+            "sun_times": primary.get(SunTimes),
         }
+
+    def _read_sun_times(self, now: datetime) -> SunTimes:
+        """Read today's sunrise and sunset from the sun.sun HA entity.
+
+        HA only exposes *next* rising/setting. If the next event is today
+        (sun hasn't risen yet) it is this cycle's sunrise; if it's tomorrow,
+        today's sunrise was approximately one sidereal day earlier.
+
+        Args:
+            now: Current cycle UTC timestamp for computing today's local date.
+
+        Returns:
+            SunTimes with today_sunrise and today_sunset in UTC, or None fields
+            when the sun.sun entity is unavailable.
+        """
+        local_today = now.astimezone(self._sun_sale_config.local_tz).date()
+
+        def _parse(attr: str) -> datetime | None:
+            state = self.hass.states.get("sun.sun")
+            if state is None:
+                return None
+            raw = state.attributes.get(attr)
+            if not raw:
+                return None
+            try:
+                dt = datetime.fromisoformat(raw)
+                return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                return None
+
+        def _today_event(next_event: datetime | None) -> datetime | None:
+            if next_event is None:
+                return None
+            local_date = next_event.astimezone(self._sun_sale_config.local_tz).date()
+            if local_date == local_today:
+                return next_event
+            # next_event is tomorrow → today's event was ~1 day ago
+            return next_event - timedelta(days=1)
+
+        next_rising  = _parse("next_rising")
+        next_setting = _parse("next_setting")
+        return SunTimes(
+            today_sunrise=_today_event(next_rising),
+            today_sunset=_today_event(next_setting),
+        )
 
     def _build_capacity_observation(
         self,

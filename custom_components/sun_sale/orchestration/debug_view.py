@@ -49,6 +49,8 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     batt_status = data.get("battery_status")
     batt_runtime = data.get("battery_runtime")
     profitability = data.get("profitability_score")
+    forecast_quality = data.get("forecast_quality")
+    sun_times = data.get("sun_times")
 
     cfg = coordinator._config  # noqa: SLF001
     return {
@@ -249,6 +251,14 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "window_days": profitability.window_days,
                 "computed_at": profitability.computed_at.isoformat(),
             } if profitability is not None else None,
+            "forecast_quality": {
+                "sunrise_utc": sun_times.today_sunrise.isoformat() if (sun_times and sun_times.today_sunrise) else None,
+                "sunset_utc": sun_times.today_sunset.isoformat() if (sun_times and sun_times.today_sunset) else None,
+                "group1": {k: v.metrics() for k, v in forecast_quality.group1.items()},
+                "group2": {k: v.metrics() for k, v in forecast_quality.group2.items()},
+                "group3": {k: v.metrics() for k, v in forecast_quality.group3.items()},
+                "group3_pending_count": len(forecast_quality.group3_pending),
+            } if forecast_quality is not None else None,
         },
         "outputs": {
             "schedule": {

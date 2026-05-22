@@ -5,9 +5,9 @@ Each node declares its tier, output_type, and consumed types.
 Observer wiring is auto-built by DagEngine._wire() based on these declarations.
 
 Tier map:
-  T1: PricingNode, BatteryStateNode
-  T2: GenerationNode, DegradationNode
-  T3: LockoutNode
+  T1: PricingNode, BatteryStateNode, BatteryStatusNode, BaseLoadProfileNode
+  T2: GenerationNode, ObservedGenerationNode, DegradationNode, BatteryRuntimeNode, ProfitabilityNode
+  T3: ForecastAccuracyNode, ChargingProfileNode, LockoutNode
   T4: ScheduleNode
 """
 from __future__ import annotations
@@ -37,7 +37,8 @@ from ..contract.models import (
     ChargingProfile,
     DegradationCost,
     EstimatedCapacity,
-    ForecastErrorSeries,
+    ForecastAccuracyResult,
+    ForecastQualityStore,
     GenerationHistory,
     GenerationSeries,
     HouseholdLoadHistory,
@@ -48,6 +49,7 @@ from ..contract.models import (
     ProfitabilityScore,
     SolarData,
     Schedule,
+    SunTimes,
     YesterdayPrices,
 )
 
@@ -237,27 +239,31 @@ class BatteryRuntimeNode(DagNode):
 
 
 class ForecastAccuracyNode(DagNode):
-    """Pair forecast vs. observed solar slots → ForecastErrorSeries.
+    """Per-slot error series + EMA quality buckets → ForecastAccuracyResult.
 
-    Read-only signal today (MAE/bias/MAPE for monitoring); the same series is
-    the input a future calibration stage would consume to fit a per-hour
-    correction or to compare forecast sources.
+    Combines per-cycle slot alignment (MAE/bias/MAPE) with persistent EMA
+    quality tracking across three bucket groups (intensity, solar-day position,
+    forecast horizon). ForecastQualityStore and SunTimes come from primary and
+    are NOT listed in consumes to avoid self-referential DAG wiring.
     """
 
     tier = 3
-    output_type = ForecastErrorSeries
+    output_type = ForecastAccuracyResult
     consumes = [GenerationSeries, ObservedGenerationSeries]
 
     async def _compute(
         self, ctx: NodeContext
-    ) -> tuple[ForecastErrorSeries, list[ControlEvent]]:
-        """Align forecast vs. observed solar slots and compute MAE/bias/MAPE."""
-        forecast = ctx.require(GenerationSeries)
-        observed = ctx.require(ObservedGenerationSeries)
-        series = forecast_accuracy.build_forecast_error_series(
-            forecast, observed, now=ctx.now,
+    ) -> tuple[ForecastAccuracyResult, list[ControlEvent]]:
+        """Build error series and update EMA quality buckets in one pass."""
+        result = forecast_accuracy.build_forecast_accuracy_result(
+            forecast=ctx.require(GenerationSeries),
+            observed=ctx.require(ObservedGenerationSeries),
+            quality_store=ctx.get(ForecastQualityStore),
+            sun_times=ctx.get(SunTimes),
+            local_tz=ctx.config.local_tz,
+            now=ctx.now,
         )
-        return series, []
+        return result, []
 
 
 class ProfitabilityNode(DagNode):

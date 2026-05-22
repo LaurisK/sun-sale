@@ -1,6 +1,7 @@
 """Shared data structures for sunSale. No logic, no HA imports."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
@@ -573,3 +574,89 @@ class SunSaleConfig:
     tariff: TariffConfig
     battery: BatteryConfig
     local_tz: tzinfo = field(default=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Forecast quality — EMA running state and persistent store
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AccuracyBucketState:
+    """Mutable EMA running state for one forecast quality bucket.
+
+    Updated in-place each time a new (forecast, observed) pair falls into
+    this bucket. All EMA fields are in kWh units; display conversion happens
+    at serialization time (×1000 → Wh).
+    """
+    ema_error: float = 0.0       # mean signed error — drives Bias metric
+    ema_abs_error: float = 0.0   # mean |error| — drives MAE metric
+    ema_sq_error: float = 0.0    # mean error² — drives RMSE metric (sqrt at display)
+    ema_rel_error: float = 0.0   # mean |error|/forecast — drives MAPE metric
+    ema_obs: float = 0.0         # mean observed — needed for R² denominator
+    ema_obs_sq: float = 0.0      # mean observed² — needed for R² denominator
+    n: int = 0                   # total samples absorbed into EMA
+
+    def metrics(self) -> dict:
+        """Compute the five quality metrics from current EMA state.
+
+        Returns:
+            Dict with keys n, bias_wh, mae_wh, rmse_wh, mape_pct, r2.
+            Fields other than n are None when n == 0.
+        """
+        if self.n == 0:
+            return {"n": 0, "bias_wh": None, "mae_wh": None,
+                    "rmse_wh": None, "mape_pct": None, "r2": None}
+        bias_wh = round(self.ema_error * 1000, 2)
+        mae_wh  = round(self.ema_abs_error * 1000, 2)
+        rmse_wh = round(math.sqrt(max(0.0, self.ema_sq_error)) * 1000, 2)
+        mape_pct = round(self.ema_rel_error * 100, 2)
+        obs_var = self.ema_obs_sq - self.ema_obs ** 2
+        if obs_var > 1e-12:
+            r2 = round(max(-9.99, min(1.0, 1.0 - self.ema_sq_error / obs_var)), 4)
+        else:
+            r2 = None
+        return {"n": self.n, "bias_wh": bias_wh, "mae_wh": mae_wh,
+                "rmse_wh": rmse_wh, "mape_pct": mape_pct, "r2": r2}
+
+
+@dataclass(frozen=True)
+class SunTimes:
+    """Approximate sunrise and sunset datetimes for today, derived from sun.sun.
+
+    Both fields are UTC-aware. None when the sun.sun entity is unavailable or
+    the times cannot be derived from next_rising / next_setting attributes.
+    """
+    today_sunrise: datetime | None
+    today_sunset: datetime | None
+
+
+@dataclass
+class ForecastQualityStore:
+    """Persistent quality store — mutable EMA state for all three accuracy groups.
+
+    group1: keyed by bin_start_Wh as str ("0", "100", "200", ...).
+    group2: keyed by solar-day position as str ("1"–"20" for 15 min,
+            "1"–"6" for 1 h). Positions 1–10 are dawn (sunrise slot = #1),
+            positions 11–20 are dusk (sunset slot = #20).
+    group3: keyed by day-ahead horizon as str ("0"–"6").
+    group3_pending: unresolved day-ahead forecast records awaiting actual
+            generation data.  Each entry is a dict with keys
+            target_date (ISO str), horizon (int), forecast_kwh (float).
+    """
+    group1: dict[str, AccuracyBucketState] = field(default_factory=dict)
+    group2: dict[str, AccuracyBucketState] = field(default_factory=dict)
+    group3: dict[str, AccuracyBucketState] = field(default_factory=dict)
+    group3_pending: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class ForecastAccuracyResult:
+    """Single output of ForecastAccuracyNode: per-cycle slot errors + persistent EMA quality.
+
+    error_series carries the aligned forecast/observed deltas for this cycle.
+    quality carries the updated persistent EMA buckets across all three groups
+    and is saved to storage by the coordinator after each cycle.
+    """
+    error_series: ForecastErrorSeries
+    quality: ForecastQualityStore
