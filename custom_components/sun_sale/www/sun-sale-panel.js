@@ -1,10 +1,10 @@
 /* Sun Sale Dashboard Panel
  *
- * Weekly forecast row (above main chart):
- *   Compact bar chart — 8 days: yesterday → +6 days.
- *   Series 1 "Forecast kWh" — per-bar colour: past = grey, today = blue, future = dim blue.
- *   Series 2 "Actual kWh"   — green bars for yesterday (full day) and today-so-far; null elsewhere.
- *   Data comes from forecast_daily_kwh / actual_yesterday_kwh / actual_today_kwh dashboard attrs.
+ * Daily generation row (above main chart):
+ *   Compact text pills — 8 days: yesterday → +6 days.
+ *   Yesterday/Today show predicted / actual (today also shows remaining-forecast).
+ *   Future days show predicted only. Data: forecast_daily_kwh,
+ *   actual_yesterday_kwh, actual_today_kwh, charging_profile_summary.
  *
  * 72-hour window: yesterday 00:00 → tomorrow 23:59 (local)
  *
@@ -78,7 +78,6 @@
       super();
       this._hass        = null;
       this._chart       = null;
-      this._weekChart   = null;
       this._g1Chart     = null;
       this._g2Chart     = null;
       this._g3Chart     = null;
@@ -95,12 +94,12 @@
         const dashAttrs = hass.states[DASHBOARD_ENTITY]?.attributes;
         this._renderBatteryRow(dashAttrs);
         this._renderProfileRow(dashAttrs);
+        this._renderGenerationRow(dashAttrs);
       }
     }
 
     disconnectedCallback() {
       if (this._chart)     { this._chart.destroy();     this._chart     = null; }
-      if (this._weekChart) { this._weekChart.destroy();  this._weekChart = null; }
       if (this._g1Chart)   { this._g1Chart.destroy();    this._g1Chart   = null; }
       if (this._g2Chart)   { this._g2Chart.destroy();    this._g2Chart   = null; }
       if (this._g3Chart)   { this._g3Chart.destroy();    this._g3Chart   = null; }
@@ -187,10 +186,33 @@
           #profile .pill.charge  { background: rgba(66, 165, 245, 0.16); border-left-color: #42a5f5; }
           #profile .pill.sell    { background: rgba(255, 179, 0, 0.16);  border-left-color: #ffb300; }
           #profile .pill.curtail { background: rgba(229, 57, 53, 0.16);  border-left-color: #e53935; }
-          #weekly-chart {
-            width: 100%;
-            margin-bottom: 12px;
+          #generation {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 10px;
+            margin: 0 0 12px;
+            font-size: 0.85rem;
+            color: var(--primary-text-color, #fff);
           }
+          #generation .day {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 4px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.04);
+            border-left: 3px solid rgba(66, 165, 245, 0.40);
+            line-height: 1.3;
+          }
+          #generation .day.today { border-left-color: #42a5f5; background: rgba(66, 165, 245, 0.10); }
+          #generation .day.past  { border-left-color: rgba(158, 158, 158, 0.60); }
+          #generation .day .name { color: var(--secondary-text-color, #888); font-weight: 600; }
+          #generation .day .pred { font-weight: 600; }
+          #generation .day .actual { color: #66bb6a; font-weight: 600; }
+          #generation .day .remain { color: #ffb300; font-size: 0.75rem; }
+          #generation .day .sep  { color: var(--secondary-text-color, #444); }
+          #generation .day .unit { color: var(--secondary-text-color, #888); font-size: 0.75rem; }
           #status {
             padding: 40px;
             text-align: center;
@@ -218,7 +240,7 @@
           <div id="subtitle">Buy &amp; Sell prices · Solar — 72 h window</div>
           <div id="battery"></div>
           <div id="profile"></div>
-          <div id="weekly-chart"></div>
+          <div id="generation"></div>
           <div id="status">Loading…</div>
           <div id="chart"></div>
           <div id="accuracy"></div>
@@ -274,6 +296,62 @@
         <span class="pill sell">Sell <span class="value">${sell}</span> kWh</span>
         <span class="pill curtail">Curtail <span class="value">${curtail}</span> kWh</span>
       `;
+    }
+
+    _renderGenerationRow(dashAttrs) {
+      const el = this.shadowRoot.querySelector('#generation');
+      if (!el) return;
+      if (!dashAttrs) { el.innerHTML = ''; return; }
+
+      const daily = dashAttrs.forecast_daily_kwh;
+      if (!daily) { el.innerHTML = ''; return; }
+
+      const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
+      const remainingToday = dashAttrs.charging_profile_summary?.today_remaining_generation_kwh;
+
+      const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const OFFSETS   = [-1, 0, 1, 2, 3, 4, 5, 6];
+      const KEYS      = ['yesterday', 'today', 'tomorrow', 'd2', 'd3', 'd4', 'd5', 'd6'];
+
+      const dayLabel = (off) => {
+        if (off === -1) return 'Yday';
+        if (off === 0)  return 'Today';
+        if (off === 1)  return 'Tmrw';
+        const d = new Date();
+        d.setDate(d.getDate() + off);
+        return DAY_NAMES[d.getDay()];
+      };
+
+      const parts = OFFSETS.map((off, i) => {
+        const pred = daily[KEYS[i]];
+        const predTxt = fmt(pred);
+        const cls = off < 0 ? 'past' : (off === 0 ? 'today' : '');
+
+        let inner = `<span class="name">${dayLabel(off)}</span>`;
+        if (off === -1) {
+          const actual = dashAttrs.actual_yesterday_kwh;
+          inner += `<span class="pred">${predTxt}</span>`
+                +  `<span class="sep">/</span>`
+                +  `<span class="actual">${fmt(actual)}</span>`
+                +  `<span class="unit">kWh</span>`;
+        } else if (off === 0) {
+          const actual = dashAttrs.actual_today_kwh;
+          let predCell = `<span class="pred">${predTxt}</span>`;
+          if (typeof remainingToday === 'number') {
+            predCell += `<span class="remain">(${fmt(remainingToday)} rem)</span>`;
+          }
+          inner += predCell
+                +  `<span class="sep">/</span>`
+                +  `<span class="actual">${fmt(actual)}</span>`
+                +  `<span class="unit">kWh</span>`;
+        } else {
+          inner += `<span class="pred">${predTxt}</span>`
+                +  `<span class="unit">kWh</span>`;
+        }
+        return `<span class="day ${cls}">${inner}</span>`;
+      });
+
+      el.innerHTML = parts.join('');
     }
 
     _setStatus(msg) {
@@ -403,130 +481,6 @@
       return out;
     }
 
-    // ── Weekly forecast chart ──────────────────────────────────────────────────
-
-    _renderWeeklyForecast(dashAttrs) {
-      const el = this.shadowRoot.querySelector('#weekly-chart');
-      if (!el) return;
-
-      const daily = dashAttrs?.forecast_daily_kwh;
-      if (!daily) { el.style.display = 'none'; return; }
-      el.style.display = '';
-
-      if (this._weekChart) { this._weekChart.destroy(); this._weekChart = null; }
-
-      // Day-offset → forecast key and label.
-      const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-      const OFFSETS   = [-1, 0, 1, 2, 3, 4, 5, 6];
-      const KEYS      = ['yesterday', 'today', 'tomorrow', 'd2', 'd3', 'd4', 'd5', 'd6'];
-
-      const labels = OFFSETS.map(off => {
-        const d = new Date();
-        d.setDate(d.getDate() + off);
-        const base = DAY_NAMES[d.getDay()] + ' ' + d.getDate();
-        if (off === -1) return base + '\n(yday)';
-        if (off === 0)  return base + '\n(today)';
-        return base;
-      });
-
-      // Per-bar fill: past = grey, today = blue, future = dim blue.
-      const forecastFills = OFFSETS.map(off => {
-        if (off < 0)  return 'rgba(158,158,158,0.50)';
-        if (off === 0) return '#42a5f5';
-        return 'rgba(66,165,245,0.40)';
-      });
-
-      const forecastData = KEYS.map((k, i) => ({
-        x:         labels[i],
-        y:         daily[k] ?? 0,
-        fillColor: forecastFills[i],
-      }));
-
-      // Actual bars: yesterday = full day, today = so-far; rest null (skipped).
-      const actualData = KEYS.map((k, i) => ({
-        x: labels[i],
-        y: i === 0 ? (dashAttrs?.actual_yesterday_kwh ?? null)
-         : i === 1 ? (dashAttrs?.actual_today_kwh     ?? null)
-         : null,
-      }));
-
-      const opts = {
-        series: [
-          { name: 'Forecast', data: forecastData },
-          { name: 'Actual',   data: actualData   },
-        ],
-        chart: {
-          type:       'bar',
-          height:     210,
-          background: 'transparent',
-          toolbar:    { show: false },
-          animations: { enabled: false },
-          fontFamily: 'inherit',
-        },
-        theme: { mode: 'dark' },
-        plotOptions: {
-          bar: {
-            horizontal:  false,
-            columnWidth: '65%',
-            borderRadius: 2,
-          },
-        },
-        // Series 0 colours are overridden per-bar via fillColor above.
-        // Series 1 (Actual) uses this fallback green for all bars.
-        colors: ['#42a5f5', '#66bb6a'],
-        fill:   { type: 'solid', opacity: 1 },
-        xaxis: {
-          type:       'category',
-          categories: labels,
-          labels: {
-            style:  { colors: '#aaa', fontSize: '10px' },
-            rotate: 0,
-          },
-          axisBorder: { show: false },
-          axisTicks:  { show: false },
-        },
-        yaxis: {
-          title: {
-            text:  'kWh / day',
-            style: { color: '#aaa', fontSize: '10px' },
-          },
-          min:             0,
-          forceNiceScale:  true,
-          decimalsInFloat: 1,
-          labels: {
-            style:     { colors: '#aaa', fontSize: '10px' },
-            formatter: v => (v != null ? v.toFixed(1) : ''),
-          },
-        },
-        tooltip: {
-          shared:    true,
-          intersect: false,
-          theme:     'dark',
-          y: {
-            formatter: (val, { seriesIndex }) => {
-              if (val == null) return '—';
-              const suffix = seriesIndex === 1 ? ' kWh actual' : ' kWh forecast';
-              return val.toFixed(2) + suffix;
-            },
-          },
-        },
-        legend: {
-          show:   true,
-          labels: { colors: '#aaa' },
-        },
-        grid: {
-          borderColor: 'rgba(255,255,255,0.07)',
-          xaxis: { lines: { show: false } },
-          yaxis: { lines: { show: true  } },
-        },
-        markers:    { size: 0 },
-        dataLabels: { enabled: false },
-      };
-
-      this._weekChart = new ApexCharts(el, opts);
-      this._weekChart.render();
-    }
-
     // ── Render ─────────────────────────────────────────────────────────────────
 
     async _render() {
@@ -544,7 +498,7 @@
 
       this._renderBatteryRow(dashAttrs);
       this._renderProfileRow(dashAttrs);
-      this._renderWeeklyForecast(dashAttrs);
+      this._renderGenerationRow(dashAttrs);
 
       // Merge past history + future pricing sensor into continuous price lines.
       const _merge = (histPoints, pricingPoints, windowStartMs) => {
