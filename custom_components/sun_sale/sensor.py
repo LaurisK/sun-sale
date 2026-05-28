@@ -27,6 +27,7 @@ from .contract.models import (
     ForecastErrorSeries,
     ForecastQualityStore,
     GenerationSeries,
+    ObservedGenerationSeries,
     PriceSeries,
     PriceSlot,
     Schedule,
@@ -496,6 +497,21 @@ class DashboardSensor(_BaseSensor):
                 "group3": {k: v.metrics() for k, v in quality.group3.items()},
             }
 
+        gen: GenerationSeries | None = self.coordinator.data.get("forecast")
+        observed: ObservedGenerationSeries | None = self.coordinator.data.get("observed_generation")
+        forecast_daily_kwh: dict[str, float] | None = None
+        if gen is not None:
+            forecast_daily_kwh = {
+                "yesterday": round(gen.total_yesterday_kwh, 3),
+                "today":     round(gen.total_today_kwh, 3),
+                "tomorrow":  round(gen.total_tomorrow_kwh, 3),
+                "d2":        round(gen.total_d2_kwh, 3),
+                "d3":        round(gen.total_d3_kwh, 3),
+                "d4":        round(gen.total_d4_kwh, 3),
+                "d5":        round(gen.total_d5_kwh, 3),
+                "d6":        round(gen.total_d6_kwh, 3),
+            }
+
         return {
             "generated_at": now.isoformat(),
             "now_ts": int(now.timestamp() * 1000),
@@ -510,6 +526,9 @@ class DashboardSensor(_BaseSensor):
             "charging_profile_slots": charging_profile_slots,
             "charging_profile_summary": charging_profile_summary,
             "forecast_quality": forecast_quality_data,
+            "forecast_daily_kwh": forecast_daily_kwh,
+            "actual_yesterday_kwh": round(observed.total_yesterday_kwh, 3) if observed else None,
+            "actual_today_kwh": round(observed.total_today_so_far_kwh, 3) if observed else None,
         }
 
 
