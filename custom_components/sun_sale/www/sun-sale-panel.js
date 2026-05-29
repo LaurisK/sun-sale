@@ -572,15 +572,16 @@
         opacity:     1,
       }));
 
-      // Series: 0=buy(line) 1=sell(line) 2=solar forecast(bar).
+      // Series: 0=solar forecast(bar) 1=buy(line) 2=sell(line).
+      // Bar is first so price lines render on top of generation bars.
       // All three use {x, y} object format. Mixing tuple-format line data
       // with object-format bar data on a datetime xaxis causes ApexCharts
       // to create the bar <g> group but emit zero <rect>s (bars invisible).
       const toXY = pts => pts.map(([x, y]) => ({ x, y }));
       const series = [
+        { name: 'Solar forecast', type: 'bar',  data: forecastBars   },
         { name: 'Buy price',      type: 'line', data: toXY(buyData)  },
         { name: 'Sell price',     type: 'line', data: toXY(sellData) },
-        { name: 'Solar forecast', type: 'bar',  data: forecastBars   },
       ];
 
       // Forecast-accuracy overlay drawn straight into the SVG plot area.
@@ -606,8 +607,8 @@
           // Wipe previous paint.
           plotEl.querySelectorAll('.' + OVL_GROUP).forEach(n => n.remove());
 
-          // Solar-forecast bar is series index 2 → yaxis index 2 (single per-series).
-          const yIdx  = 2;
+          // Solar-forecast bar is series index 0 → yaxis index 0 (single per-series).
+          const yIdx  = 0;
           const xMin  = w.globals.minX;
           const xMax  = w.globals.maxX;
           const yMin  = w.globals.minYArr?.[yIdx] ?? w.globals.minY;
@@ -652,6 +653,20 @@
         }
       };
 
+      // Price y-axis: tightly bounded to actual buy/sell price range.
+      const allPriceVals = [...buyData, ...sellData].map(([, v]) => v).filter(isFinite);
+      const pMin = allPriceVals.length ? Math.min(...allPriceVals) : 0;
+      const pMax = allPriceVals.length ? Math.max(...allPriceVals) : 0.2;
+      const pPad = Math.max((pMax - pMin) * 0.05, 0.005);
+      const priceYMin = pMin - pPad;
+      const priceYMax = pMax + pPad;
+
+      // Generation y-axis: max = current max * 1.1, rounded up to nearest 100 Wh.
+      const maxForecastKwh = forecastBars.length
+        ? Math.max(...forecastBars.map(b => b.y))
+        : 1.0;
+      const genYMaxKwh = Math.ceil(maxForecastKwh * 1000 * 1.1 / 100) * 100 / 1000;
+
       const options = {
         series,
 
@@ -682,13 +697,13 @@
 
         stroke: {
           show:      true,
-          curve:     ['stepline', 'stepline', 'smooth'],
-          width:     [2,          2,          0       ],
-          dashArray: [0,          0,          0       ],
+          curve:     ['smooth',   'stepline', 'stepline'],
+          width:     [0,          2,          2         ],
+          dashArray: [0,          0,          0         ],
         },
 
-        // 0:amber buy 1:coral sell 2:forecast (per-point fillColor; this is the fallback)
-        colors: ['#ffb300', '#ff7043', GREY_BAR],
+        // 0:forecast (per-point fillColor; fallback) 1:amber buy 2:coral sell
+        colors: [GREY_BAR, '#ffb300', '#ff7043'],
 
         fill: {
           type:    ['solid', 'solid', 'solid'],
@@ -722,7 +737,8 @@
               text:  'EUR / kWh',
               style: { color: '#ffb300', fontSize: '11px' },
             },
-            forceNiceScale:  true,
+            min:             priceYMin,
+            max:             priceYMax,
             decimalsInFloat: 3,
             labels: {
               style: { colors: '#ffb300', fontSize: '10px' },
@@ -737,7 +753,7 @@
               style: { color: '#cfcfcf', fontSize: '11px' },
             },
             min:             0,
-            forceNiceScale:  true,
+            max:             genYMaxKwh,
             decimalsInFloat: 3,
             labels: {
               style: { colors: '#cfcfcf', fontSize: '10px' },
@@ -780,9 +796,9 @@
           y: {
             formatter: (val, { seriesIndex, dataPointIndex, w }) => {
               if (val == null) return null;
-              if (seriesIndex < 2) return val.toFixed(4) + ' €/kWh';
+              if (seriesIndex > 0) return val.toFixed(4) + ' €/kWh';
 
-              // Forecast bar — annotate with charging-profile disposition.
+              // Forecast bar (seriesIndex === 0) — annotate with charging-profile disposition.
               const pt    = w.config.series[seriesIndex].data[dataPointIndex];
               const slotT = pt?.x;
               const prof  = slotT != null ? profileSlots.get(slotT) : null;

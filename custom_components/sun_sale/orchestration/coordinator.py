@@ -10,6 +10,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 try:
@@ -19,7 +20,6 @@ except ImportError:    # pragma: no cover — Python < 3.9 fallback
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from ..pipeline.battery import CapacityEstimator
@@ -141,6 +141,7 @@ from ..pipeline.nodes import (
 )
 from ..pipeline import forecast_accuracy as forecast_accuracy_module
 from ..pipeline import profitability as profitability_module
+from .persistent_store import PersistentStore
 from ..inbound.battery import BatteryTranslator
 from ..inbound.forecast import SolarTranslator
 from ..inbound.generation import GenerationTranslator
@@ -149,6 +150,187 @@ from ..inbound.household_load import HouseholdLoadTranslator
 from ..inbound.pricing import NordpoolTranslator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Yesterday/today two-bucket state
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _YesterdayBuckets:
+    """In-memory state for the two-bucket yesterday/today price + solar store."""
+
+    yesterday_date: str | None = None
+    yesterday_nordpool: list[PriceEntry] = field(default_factory=list)
+    yesterday_solar: list[SolarEntry] = field(default_factory=list)
+    today_date: str | None = None
+    today_nordpool: list[PriceEntry] = field(default_factory=list)
+    today_solar: list[SolarEntry] = field(default_factory=list)
+
+
+def _parse_nordpool_entries(payload: dict) -> list[PriceEntry]:
+    """Deserialise a list of price entries from a stored payload dict."""
+    return [
+        PriceEntry(
+            start=datetime.fromisoformat(e["start"]),
+            end=datetime.fromisoformat(e["end"]),
+            price_eur_kwh=e["price"],
+        )
+        for e in payload.get("nordpool", [])
+    ]
+
+
+def _parse_solar_entries(payload: dict) -> list[SolarEntry]:
+    """Deserialise a list of solar entries from a stored payload dict."""
+    return [
+        SolarEntry(
+            start=datetime.fromisoformat(e["start"]),
+            end=datetime.fromisoformat(e["end"]),
+            expected_kwh=e["kwh"],
+            source=e["source"],
+        )
+        for e in payload.get("solar", [])
+    ]
+
+
+def _serialize_yesterday(buckets: _YesterdayBuckets) -> dict:
+    """Serialise yesterday buckets to the two-bucket storage layout."""
+    def _ser_nordpool(xs: list[PriceEntry]) -> list[dict]:
+        return [{"start": e.start.isoformat(), "end": e.end.isoformat(), "price": e.price_eur_kwh} for e in xs]
+
+    def _ser_solar(xs: list[SolarEntry]) -> list[dict]:
+        return [{"start": e.start.isoformat(), "end": e.end.isoformat(), "kwh": e.expected_kwh, "source": e.source} for e in xs]
+
+    return {
+        "yesterday": {
+            "date":     buckets.yesterday_date,
+            "nordpool": _ser_nordpool(buckets.yesterday_nordpool),
+            "solar":    _ser_solar(buckets.yesterday_solar),
+        },
+        "today": {
+            "date":     buckets.today_date,
+            "nordpool": _ser_nordpool(buckets.today_nordpool),
+            "solar":    _ser_solar(buckets.today_solar),
+        },
+    }
+
+
+def _deserialize_yesterday(d: dict) -> _YesterdayBuckets:
+    """Deserialise yesterday buckets, handling the legacy single-bucket layout."""
+    if "yesterday" in d or "today" in d:
+        y = d.get("yesterday") or {}
+        t = d.get("today") or {}
+        return _YesterdayBuckets(
+            yesterday_date=y.get("date"),
+            yesterday_nordpool=_parse_nordpool_entries(y),
+            yesterday_solar=_parse_solar_entries(y),
+            today_date=t.get("date"),
+            today_nordpool=_parse_nordpool_entries(t),
+            today_solar=_parse_solar_entries(t),
+        )
+    # Legacy single-bucket layout {"date","nordpool","solar"} — treat as yesterday.
+    return _YesterdayBuckets(
+        yesterday_date=d.get("date"),
+        yesterday_nordpool=_parse_nordpool_entries(d),
+        yesterday_solar=_parse_solar_entries(d),
+    )
+
+
+def _rotate_yesterday_buckets(
+    buckets: _YesterdayBuckets,
+    today_str: str,
+    today_nordpool: list[PriceEntry],
+    today_solar: list[SolarEntry],
+) -> _YesterdayBuckets:
+    """Apply day-rollover rotation and replace the today slice.
+
+    On the first save of a new local day the previous today bucket becomes
+    yesterday; within the same day only the today slice is overwritten.
+
+    Args:
+        buckets: Current bucket state.
+        today_str: ISO date string for the current local day.
+        today_nordpool: Today's price entries to store.
+        today_solar: Today's solar entries to store.
+
+    Returns:
+        Updated _YesterdayBuckets.
+    """
+    if buckets.today_date is not None and buckets.today_date != today_str:
+        return _YesterdayBuckets(
+            yesterday_date=buckets.today_date,
+            yesterday_nordpool=buckets.today_nordpool,
+            yesterday_solar=buckets.today_solar,
+            today_date=today_str,
+            today_nordpool=today_nordpool,
+            today_solar=today_solar,
+        )
+    return _YesterdayBuckets(
+        yesterday_date=buckets.yesterday_date,
+        yesterday_nordpool=buckets.yesterday_nordpool,
+        yesterday_solar=buckets.yesterday_solar,
+        today_date=today_str,
+        today_nordpool=today_nordpool,
+        today_solar=today_solar,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-store serialisation helpers
+# ---------------------------------------------------------------------------
+
+def _serialize_generation(samples: list[GenerationReading]) -> dict:
+    """Serialise a list of generation readings."""
+    return {"samples": [{"ts": s.timestamp.isoformat(), "kwh": s.today_total_kwh} for s in samples]}
+
+
+def _deserialize_generation(d: dict) -> list[GenerationReading]:
+    """Deserialise a list of generation readings."""
+    return [
+        GenerationReading(
+            today_total_kwh=s["kwh"],
+            timestamp=datetime.fromisoformat(s["ts"]),
+        )
+        for s in d.get("samples", [])
+    ]
+
+
+def _serialize_household_load(samples: list[HouseholdLoadSample]) -> dict:
+    """Serialise a list of household load samples."""
+    return {"samples": [{"ts": s.timestamp.isoformat(), "kw": s.load_kw} for s in samples]}
+
+
+def _deserialize_household_load(d: dict) -> list[HouseholdLoadSample]:
+    """Deserialise a list of household load samples."""
+    return [
+        HouseholdLoadSample(
+            timestamp=datetime.fromisoformat(s["ts"]),
+            load_kw=s["kw"],
+        )
+        for s in d.get("samples", [])
+    ]
+
+
+def _serialize_price_history(peaks: list[DailyPeak]) -> dict:
+    """Serialise a list of daily peaks."""
+    return {
+        "peaks": [{"day": p.day.isoformat(), "peak": p.peak_eur_kwh, "class": p.day_class.value} for p in peaks]
+    }
+
+
+def _deserialize_price_history(d: dict) -> list[DailyPeak]:
+    """Deserialise a list of daily peaks, silently skipping malformed entries."""
+    result: list[DailyPeak] = []
+    for p in d.get("peaks", []):
+        try:
+            result.append(DailyPeak(
+                day=date.fromisoformat(p["day"]),
+                peak_eur_kwh=p["peak"],
+                day_class=DayClass(p["class"]),
+            ))
+        except (KeyError, ValueError):
+            continue
+    return result
 
 
 class SunSaleCoordinator(DataUpdateCoordinator):
@@ -170,33 +352,17 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._entry = config_entry
         self._config: dict = {}
         self._sun_sale_config: SunSaleConfig | None = None
-        self._store: Store | None = None
+        self._capacity_store: PersistentStore[CapacityEstimator] | None = None
         self._capacity_estimator: CapacityEstimator | None = None
         self._engine: DagEngine | None = None
         self._translators: list = []
         self._event_router: EventRouter | None = None
         self._last_battery_reading: BatteryReading | None = None
-        self._yesterday_store: Store | None = None
-        # Persisted across cycles, rotated only at local-day rollover. The
-        # "today" bucket is overwritten each cycle (catches the latest forecast);
-        # the "yesterday" bucket is what gets prepended to solar.entries so the
-        # chart can render yesterday's column. Rotation: when a save fires with
-        # today_str != _today_stored_date, the previous _today_* becomes
-        # _yesterday_*, and the new data becomes _today_*.
-        self._yesterday_nordpool: list[PriceEntry] = []
-        self._yesterday_solar: list[SolarEntry] = []
-        self._yesterday_stored_date: str | None = None
-        self._today_nordpool: list[PriceEntry] = []
-        self._today_solar: list[SolarEntry] = []
-        self._today_stored_date: str | None = None
-        self._generation_store: Store | None = None
-        self._generation_samples: list[GenerationReading] = []
-        self._household_load_store: Store | None = None
-        self._household_load_samples: list[HouseholdLoadSample] = []
-        self._price_history_store: Store | None = None
-        self._daily_peak_history: list[DailyPeak] = []
-        self._forecast_quality_store: Store | None = None
-        self._forecast_quality: ForecastQualityStore = ForecastQualityStore()
+        self._yesterday_store: PersistentStore[_YesterdayBuckets] | None = None
+        self._generation_store: PersistentStore[list[GenerationReading]] | None = None
+        self._household_load_store: PersistentStore[list[HouseholdLoadSample]] | None = None
+        self._price_history_store: PersistentStore[list[DailyPeak]] | None = None
+        self._forecast_quality_store: PersistentStore[ForecastQualityStore] | None = None
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
@@ -311,97 +477,50 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._engine = DagEngine(nodes)
         self._event_router = EventRouter(inverter=inverter)
 
-        self._store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_CAPACITY)
-        stored = await self._store.async_load()
+        self._capacity_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_CAPACITY,
+            serialize=lambda e: e.to_dict(),
+            deserialize=CapacityEstimator.from_dict,
+        )
         self._capacity_estimator = (
-            CapacityEstimator.from_dict(stored)
-            if stored
-            else CapacityEstimator(battery_config.nominal_capacity_kwh)
+            await self._capacity_store.load()
+            or CapacityEstimator(battery_config.nominal_capacity_kwh)
         )
 
-        self._generation_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_GENERATION)
-        generation_stored = await self._generation_store.async_load()
-        if generation_stored:
-            self._generation_samples = [
-                GenerationReading(
-                    today_total_kwh=s["kwh"],
-                    timestamp=datetime.fromisoformat(s["ts"]),
-                )
-                for s in generation_stored.get("samples", [])
-            ]
+        self._generation_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_GENERATION,
+            serialize=_serialize_generation,
+            deserialize=_deserialize_generation,
+        )
+        await self._generation_store.load()
 
-        self._household_load_store = Store(
+        self._household_load_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_HOUSEHOLD_LOAD,
+            serialize=_serialize_household_load,
+            deserialize=_deserialize_household_load,
         )
-        household_stored = await self._household_load_store.async_load()
-        if household_stored:
-            self._household_load_samples = [
-                HouseholdLoadSample(
-                    timestamp=datetime.fromisoformat(s["ts"]),
-                    load_kw=s["kw"],
-                )
-                for s in household_stored.get("samples", [])
-            ]
+        await self._household_load_store.load()
 
-        self._price_history_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_PRICE_HISTORY)
-        price_history_stored = await self._price_history_store.async_load()
-        if price_history_stored:
-            for p in price_history_stored.get("peaks", []):
-                try:
-                    self._daily_peak_history.append(DailyPeak(
-                        day=date.fromisoformat(p["day"]),
-                        peak_eur_kwh=p["peak"],
-                        day_class=DayClass(p["class"]),
-                    ))
-                except (KeyError, ValueError):
-                    continue
+        self._price_history_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_PRICE_HISTORY,
+            serialize=_serialize_price_history,
+            deserialize=_deserialize_price_history,
+        )
+        await self._price_history_store.load()
 
-        self._forecast_quality_store = Store(
+        self._forecast_quality_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_FORECAST_QUALITY,
+            serialize=forecast_accuracy_module.store_to_dict,
+            deserialize=forecast_accuracy_module.store_from_dict,
         )
-        quality_stored = await self._forecast_quality_store.async_load()
-        if quality_stored:
-            self._forecast_quality = forecast_accuracy_module.store_from_dict(quality_stored)
+        await self._forecast_quality_store.load()
 
-        self._yesterday_store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY_YESTERDAY)
-        yesterday_stored = await self._yesterday_store.async_load()
-        if yesterday_stored:
-            # New layout: {"yesterday": {date,nordpool,solar}, "today": {…}}.
-            # Older single-bucket layout {"date","nordpool","solar"} also still
-            # loaded into "yesterday" so a fresh install upgrades cleanly.
-            def _load_solar(payload):
-                return [
-                    SolarEntry(
-                        start=datetime.fromisoformat(e["start"]),
-                        end=datetime.fromisoformat(e["end"]),
-                        expected_kwh=e["kwh"],
-                        source=e["source"],
-                    )
-                    for e in payload.get("solar", [])
-                ]
-            def _load_nordpool(payload):
-                return [
-                    PriceEntry(
-                        start=datetime.fromisoformat(e["start"]),
-                        end=datetime.fromisoformat(e["end"]),
-                        price_eur_kwh=e["price"],
-                    )
-                    for e in payload.get("nordpool", [])
-                ]
-            if "yesterday" in yesterday_stored or "today" in yesterday_stored:
-                y = yesterday_stored.get("yesterday") or {}
-                t = yesterday_stored.get("today") or {}
-                self._yesterday_stored_date = y.get("date")
-                self._yesterday_nordpool    = _load_nordpool(y)
-                self._yesterday_solar       = _load_solar(y)
-                self._today_stored_date     = t.get("date")
-                self._today_nordpool        = _load_nordpool(t)
-                self._today_solar           = _load_solar(t)
-            else:
-                # Legacy single-bucket store — treat as yesterday.
-                self._yesterday_stored_date = yesterday_stored.get("date")
-                self._yesterday_nordpool    = _load_nordpool(yesterday_stored)
-                self._yesterday_solar       = _load_solar(yesterday_stored)
+        self._yesterday_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_YESTERDAY,
+            serialize=_serialize_yesterday,
+            deserialize=_deserialize_yesterday,
+        )
+        await self._yesterday_store.load()
 
     async def _async_update_data(self) -> dict:
         """One DAG cycle: translate → capacity update → DAG → event routing."""
@@ -425,73 +544,58 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             nordpool_data: NordpoolData | None = primary.get(NordpoolData)
             solar_data: SolarData | None = primary.get(SolarData)
 
+            buckets = (self._yesterday_store.value if self._yesterday_store else None) or _YesterdayBuckets()
+
             # Pricing: pass yesterday in via a primary input; inbound.pricing
             # owns the 72h yesterday→today→tomorrow assembly. Stored data older
             # than yesterday is treated as empty.
             yesterday_pricing_entries = (
-                tuple(self._yesterday_nordpool)
-                if self._yesterday_stored_date == yesterday_str
+                tuple(buckets.yesterday_nordpool)
+                if buckets.yesterday_date == yesterday_str
                 else ()
             )
             primary[YesterdayPrices] = YesterdayPrices(entries=yesterday_pricing_entries)
 
-            if self._yesterday_stored_date == yesterday_str and solar_data is not None:
-                solar_data.entries = self._yesterday_solar + solar_data.entries
+            if buckets.yesterday_date == yesterday_str and solar_data is not None:
+                solar_data.entries = buckets.yesterday_solar + solar_data.entries
 
             # Persist today's slice; rotate yesterday at LOCAL date rollover.
-            # Without rotation, the single-bucket save kept overwriting whatever
-            # the "yesterday" lookup needed, dropping yesterday's column from
-            # the chart after the first cycle of any new day.
-            if nordpool_data is not None and solar_data is not None:
+            if nordpool_data is not None and solar_data is not None and self._yesterday_store is not None:
                 _local = self._sun_sale_config.local_tz
                 today_nordpool = [e for e in nordpool_data.entries
                                    if e.start.astimezone(_local).date().isoformat() == today_str]
                 today_solar = [e for e in solar_data.entries
                                 if e.start.astimezone(_local).date().isoformat() == today_str]
-
-                # Rotation: only on the first save of a new local day.
-                # _today_stored_date is the date of the previously-saved "today".
-                if self._today_stored_date is not None and self._today_stored_date != today_str:
-                    self._yesterday_stored_date = self._today_stored_date
-                    self._yesterday_nordpool    = self._today_nordpool
-                    self._yesterday_solar       = self._today_solar
-                self._today_stored_date = today_str
-                self._today_nordpool    = today_nordpool
-                self._today_solar       = today_solar
-
-                def _ser_solar(xs):
-                    return [{"start": e.start.isoformat(), "end": e.end.isoformat(),
-                             "kwh": e.expected_kwh, "source": e.source} for e in xs]
-                def _ser_nordpool(xs):
-                    return [{"start": e.start.isoformat(), "end": e.end.isoformat(),
-                             "price": e.price_eur_kwh} for e in xs]
-                await self._yesterday_store.async_save({
-                    "yesterday": {
-                        "date":     self._yesterday_stored_date,
-                        "nordpool": _ser_nordpool(self._yesterday_nordpool),
-                        "solar":    _ser_solar(self._yesterday_solar),
-                    },
-                    "today": {
-                        "date":     self._today_stored_date,
-                        "nordpool": _ser_nordpool(self._today_nordpool),
-                        "solar":    _ser_solar(self._today_solar),
-                    },
-                })
+                new_buckets = _rotate_yesterday_buckets(buckets, today_str, today_nordpool, today_solar)
+                await self._yesterday_store.save(new_buckets)
 
             current_generation: GenerationReading | None = primary.get(GenerationReading)
-            if current_generation is not None:
-                await self._append_generation_sample(current_generation, now)
-            primary[GenerationHistory] = GenerationHistory(samples=tuple(self._generation_samples))
-
-            current_load: HouseholdLoadReading | None = primary.get(HouseholdLoadReading)
-            if current_load is not None:
-                await self._append_household_load_sample(current_load, now)
-            primary[HouseholdLoadHistory] = HouseholdLoadHistory(
-                samples=tuple(self._household_load_samples),
+            if current_generation is not None and self._generation_store is not None:
+                cutoff = now - timedelta(days=GENERATION_HISTORY_RETENTION_DAYS)
+                await self._generation_store.append_and_trim(
+                    current_generation, cutoff, lambda s: s.timestamp,
+                )
+            primary[GenerationHistory] = GenerationHistory(
+                samples=tuple((self._generation_store.value or []) if self._generation_store else []),
             )
 
-            primary[PriceHistory] = PriceHistory(peaks=tuple(self._daily_peak_history))
-            primary[ForecastQualityStore] = self._forecast_quality
+            current_load: HouseholdLoadReading | None = primary.get(HouseholdLoadReading)
+            if current_load is not None and self._household_load_store is not None:
+                sample = HouseholdLoadSample(timestamp=now, load_kw=current_load.load_kw)
+                cutoff = now - timedelta(days=HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS)
+                await self._household_load_store.append_and_trim(
+                    sample, cutoff, lambda s: s.timestamp,
+                )
+            primary[HouseholdLoadHistory] = HouseholdLoadHistory(
+                samples=tuple((self._household_load_store.value or []) if self._household_load_store else []),
+            )
+
+            primary[PriceHistory] = PriceHistory(
+                peaks=tuple((self._price_history_store.value or []) if self._price_history_store else []),
+            )
+            primary[ForecastQualityStore] = (
+                self._forecast_quality_store.value if self._forecast_quality_store else None
+            ) or ForecastQualityStore()
             primary[SunTimes] = self._read_sun_times(now)
 
             current_reading: BatteryReading | None = primary.get(BatteryReading)
@@ -499,8 +603,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 obs = self._build_capacity_observation(current_reading, now)
                 if obs is not None:
                     self._capacity_estimator.add_observation(obs)
-                    if self._store is not None:
-                        await self._store.async_save(self._capacity_estimator.to_dict())
+                    if self._capacity_store is not None:
+                        await self._capacity_store.save(self._capacity_estimator)
                 self._last_battery_reading = current_reading
 
             primary[EstimatedCapacity] = EstimatedCapacity(
@@ -510,15 +614,11 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             secondary, events = await self._engine.run(primary, self._sun_sale_config, now)
 
             acc_result: ForecastAccuracyResult | None = secondary.get(ForecastAccuracyResult)
-            if acc_result is not None:
-                self._forecast_quality = acc_result.quality
-                if self._forecast_quality_store is not None:
-                    await self._forecast_quality_store.async_save(
-                        forecast_accuracy_module.store_to_dict(acc_result.quality)
-                    )
+            if acc_result is not None and self._forecast_quality_store is not None:
+                await self._forecast_quality_store.save(acc_result.quality)
 
             pricing_result: PriceSeries | None = secondary.get(PriceSeries)
-            if pricing_result is not None:
+            if pricing_result is not None and self._price_history_store is not None:
                 today_utc = now.date()
                 today_peak_val = profitability_module.today_peak_from_price_series(
                     pricing_result, today_utc
@@ -529,26 +629,12 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                         peak_eur_kwh=today_peak_val,
                         day_class=profitability_module.classify_day(today_utc),
                     )
-                    self._daily_peak_history = [
-                        p for p in self._daily_peak_history if p.day != today_utc
-                    ]
-                    self._daily_peak_history.append(new_peak)
-                    self._daily_peak_history.sort(key=lambda p: p.day)
-                    cutoff = today_utc - timedelta(days=PRICE_HISTORY_RETENTION_DAYS)
-                    self._daily_peak_history = [
-                        p for p in self._daily_peak_history if p.day >= cutoff
-                    ]
-                    if self._price_history_store is not None:
-                        await self._price_history_store.async_save({
-                            "peaks": [
-                                {
-                                    "day": p.day.isoformat(),
-                                    "peak": p.peak_eur_kwh,
-                                    "class": p.day_class.value,
-                                }
-                                for p in self._daily_peak_history
-                            ]
-                        })
+                    peaks = [p for p in (self._price_history_store.value or []) if p.day != today_utc]
+                    peaks.append(new_peak)
+                    peaks.sort(key=lambda p: p.day)
+                    cutoff_day = today_utc - timedelta(days=PRICE_HISTORY_RETENTION_DAYS)
+                    peaks = [p for p in peaks if p.day >= cutoff_day]
+                    await self._price_history_store.save(peaks)
 
             if self.automation_enabled and self._event_router is not None:
                 for event in events:
@@ -561,48 +647,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
 
         except Exception as exc:
             raise UpdateFailed(f"Error updating sunSale data: {exc}") from exc
-
-    async def _append_generation_sample(
-        self, reading: GenerationReading, now: datetime
-    ) -> None:
-        """Append a generation reading, trim to retention window, and persist.
-
-        Args:
-            reading: New today-total snapshot to add.
-            now: Cycle timestamp used to compute the retention cutoff.
-        """
-        cutoff = now - timedelta(days=GENERATION_HISTORY_RETENTION_DAYS)
-        kept = [s for s in self._generation_samples if s.timestamp >= cutoff]
-        kept.append(reading)
-        self._generation_samples = kept
-        if self._generation_store is not None:
-            await self._generation_store.async_save({
-                "samples": [
-                    {"ts": s.timestamp.isoformat(), "kwh": s.today_total_kwh}
-                    for s in self._generation_samples
-                ],
-            })
-
-    async def _append_household_load_sample(
-        self, reading: HouseholdLoadReading, now: datetime
-    ) -> None:
-        """Append a household load reading, trim to retention window, and persist.
-
-        Args:
-            reading: New load snapshot to add.
-            now: Cycle timestamp used to compute the retention cutoff.
-        """
-        cutoff = now - timedelta(days=HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS)
-        kept = [s for s in self._household_load_samples if s.timestamp >= cutoff]
-        kept.append(HouseholdLoadSample(timestamp=now, load_kw=reading.load_kw))
-        self._household_load_samples = kept
-        if self._household_load_store is not None:
-            await self._household_load_store.async_save({
-                "samples": [
-                    {"ts": s.timestamp.isoformat(), "kw": s.load_kw}
-                    for s in self._household_load_samples
-                ],
-            })
 
     def _resolve_local_tz(self):
         """Return the HA-configured local timezone, falling back to UTC.
