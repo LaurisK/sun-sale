@@ -380,11 +380,29 @@ class BatteryReading:
 
 
 @dataclass(frozen=True)
+class PvPowerReading:
+    """Primary data: one snapshot of instantaneous PV power in watts."""
+    power_w: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class PvPowerHistory:
+    """Primary data: ordered snapshots of instantaneous PV power.
+
+    Coordinator appends each cycle's `PvPowerReading` and persists the
+    rolling list (2 days) so per-slot kWh can be averaged over yesterday
+    and today.
+    """
+    samples: tuple[PvPowerReading, ...]   # sorted by timestamp ascending
+
+
+@dataclass(frozen=True)
 class GenerationReading:
     """Primary data: one snapshot of the inverter's today-total kWh counter.
 
-    The counter is cumulative and resets at local midnight; per-slot energy is
-    derived by differencing consecutive samples in `GenerationHistory`.
+    The counter is cumulative and resets at local midnight. Used as the
+    authoritative total for end-of-day correction of power-averaged slots.
     """
     today_total_kwh: float
     timestamp: datetime
@@ -396,7 +414,7 @@ class GenerationHistory:
 
     Coordinator appends each cycle's `GenerationReading` and persists the
     rolling list (≥ 2 days) so the inbound module can difference samples
-    across yesterday → now.
+    across yesterday → now (fallback) and apply end-of-day correction.
     """
     samples: tuple[GenerationReading, ...]   # sorted by timestamp ascending
 

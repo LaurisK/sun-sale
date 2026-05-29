@@ -51,6 +51,7 @@ from ..contract.const import (
     CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH,
     CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_NORDPOOL_ENTITY,
+    CONF_SOLIS_CONFIG_ENTRY_ID,
     CONF_SOLAR_FORECAST_ENTITY,
     CONF_SOLAR_FORECAST_ENTITY_2,
     CONF_TARIFF_DISTRIBUTION_FEE,
@@ -72,13 +73,16 @@ from ..contract.const import (
     DEFAULT_SOLIS_SELF_USE_MODE_SWITCH,
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
     DOMAIN,
+    CONF_INVERTER_ENTITY_PV_POWER,
     GENERATION_HISTORY_RETENTION_DAYS,
     PRICE_HISTORY_RETENTION_DAYS,
+    PV_POWER_HISTORY_RETENTION_DAYS,
     STORAGE_KEY_CAPACITY,
     STORAGE_KEY_FORECAST_QUALITY,
     STORAGE_KEY_GENERATION,
     STORAGE_KEY_HOUSEHOLD_LOAD,
     STORAGE_KEY_PRICE_HISTORY,
+    STORAGE_KEY_PV_POWER,
     STORAGE_KEY_YESTERDAY,
     STORAGE_VERSION,
     UPDATE_INTERVAL_MINUTES,
@@ -105,6 +109,8 @@ from ..contract.models import (
     GenerationHistory,
     GenerationReading,
     GenerationSeries,
+    PvPowerHistory,
+    PvPowerReading,
     HouseholdConsumptionReading,
     HouseholdLoadHistory,
     HouseholdLoadReading,
@@ -143,8 +149,9 @@ from ..pipeline import forecast_accuracy as forecast_accuracy_module
 from ..pipeline import profitability as profitability_module
 from .persistent_store import PersistentStore
 from ..inbound.battery import BatteryTranslator
+from ..inbound.solis_entity_resolver import resolve_solis_entities
 from ..inbound.forecast import SolarTranslator
-from ..inbound.generation import GenerationTranslator
+from ..inbound.generation import GenerationTranslator, PvPowerTranslator
 from ..inbound.household_consumption import HouseholdConsumptionTranslator
 from ..inbound.household_load import HouseholdLoadTranslator
 from ..inbound.pricing import NordpoolTranslator
@@ -295,6 +302,22 @@ def _deserialize_generation(d: dict) -> list[GenerationReading]:
     ]
 
 
+def _serialize_pv_power(samples: list[PvPowerReading]) -> dict:
+    """Serialise a list of PV power readings."""
+    return {"samples": [{"ts": s.timestamp.isoformat(), "w": s.power_w} for s in samples]}
+
+
+def _deserialize_pv_power(d: dict) -> list[PvPowerReading]:
+    """Deserialise a list of PV power readings."""
+    return [
+        PvPowerReading(
+            power_w=s["w"],
+            timestamp=datetime.fromisoformat(s["ts"]),
+        )
+        for s in d.get("samples", [])
+    ]
+
+
 def _serialize_household_load(samples: list[HouseholdLoadSample]) -> dict:
     """Serialise a list of household load samples."""
     return {"samples": [{"ts": s.timestamp.isoformat(), "kw": s.load_kw} for s in samples]}
@@ -360,6 +383,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._last_battery_reading: BatteryReading | None = None
         self._yesterday_store: PersistentStore[_YesterdayBuckets] | None = None
         self._generation_store: PersistentStore[list[GenerationReading]] | None = None
+        self._pv_power_store: PersistentStore[list[PvPowerReading]] | None = None
         self._household_load_store: PersistentStore[list[HouseholdLoadSample]] | None = None
         self._price_history_store: PersistentStore[list[DailyPeak]] | None = None
         self._forecast_quality_store: PersistentStore[ForecastQualityStore] | None = None
@@ -405,20 +429,26 @@ class SunSaleCoordinator(DataUpdateCoordinator):
 
         inverter_platform = InverterPlatform(data[CONF_INVERTER_PLATFORM])
         if inverter_platform == InverterPlatform.SOLIS:
-            inverter_entity_ids = {
-                "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
-                "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
-                "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
-                "solis_charge_current": data.get(CONF_INVERTER_SOLIS_CHARGE_CURRENT, DEFAULT_SOLIS_CHARGE_CURRENT),
-                "solis_discharge_current": data.get(CONF_INVERTER_SOLIS_DISCHARGE_CURRENT, DEFAULT_SOLIS_DISCHARGE_CURRENT),
-                "solis_charge_start_time_1": data.get(CONF_INVERTER_SOLIS_CHARGE_START_TIME_1, DEFAULT_SOLIS_CHARGE_START_TIME_1),
-                "solis_charge_end_time_1": data.get(CONF_INVERTER_SOLIS_CHARGE_END_TIME_1, DEFAULT_SOLIS_CHARGE_END_TIME_1),
-                "solis_discharge_start_time_1": data.get(CONF_INVERTER_SOLIS_DISCHARGE_START_TIME_1, DEFAULT_SOLIS_DISCHARGE_START_TIME_1),
-                "solis_discharge_end_time_1": data.get(CONF_INVERTER_SOLIS_DISCHARGE_END_TIME_1, DEFAULT_SOLIS_DISCHARGE_END_TIME_1),
-                "solis_tou_mode_switch": data.get(CONF_INVERTER_SOLIS_TOU_MODE_SWITCH, DEFAULT_SOLIS_TOU_MODE_SWITCH),
-                "solis_allow_grid_charge_switch": data.get(CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH, DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH),
-                "solis_self_use_mode_switch": data.get(CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH, DEFAULT_SOLIS_SELF_USE_MODE_SWITCH),
-            }
+            solis_entry_id = data.get(CONF_SOLIS_CONFIG_ENTRY_ID)
+            if solis_entry_id:
+                # Auto-detected path: resolve all entity IDs from the entity registry.
+                inverter_entity_ids = resolve_solis_entities(self.hass, solis_entry_id)
+            else:
+                # Legacy path: entity IDs stored directly in config entry data.
+                inverter_entity_ids = {
+                    "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
+                    "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
+                    "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
+                    "solis_charge_current": data.get(CONF_INVERTER_SOLIS_CHARGE_CURRENT, DEFAULT_SOLIS_CHARGE_CURRENT),
+                    "solis_discharge_current": data.get(CONF_INVERTER_SOLIS_DISCHARGE_CURRENT, DEFAULT_SOLIS_DISCHARGE_CURRENT),
+                    "solis_charge_start_time_1": data.get(CONF_INVERTER_SOLIS_CHARGE_START_TIME_1, DEFAULT_SOLIS_CHARGE_START_TIME_1),
+                    "solis_charge_end_time_1": data.get(CONF_INVERTER_SOLIS_CHARGE_END_TIME_1, DEFAULT_SOLIS_CHARGE_END_TIME_1),
+                    "solis_discharge_start_time_1": data.get(CONF_INVERTER_SOLIS_DISCHARGE_START_TIME_1, DEFAULT_SOLIS_DISCHARGE_START_TIME_1),
+                    "solis_discharge_end_time_1": data.get(CONF_INVERTER_SOLIS_DISCHARGE_END_TIME_1, DEFAULT_SOLIS_DISCHARGE_END_TIME_1),
+                    "solis_tou_mode_switch": data.get(CONF_INVERTER_SOLIS_TOU_MODE_SWITCH, DEFAULT_SOLIS_TOU_MODE_SWITCH),
+                    "solis_allow_grid_charge_switch": data.get(CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH, DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH),
+                    "solis_self_use_mode_switch": data.get(CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH, DEFAULT_SOLIS_SELF_USE_MODE_SWITCH),
+                }
         else:
             inverter_entity_ids = {
                 "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
@@ -448,6 +478,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ),
             GenerationTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
+            ),
+            PvPowerTranslator(
+                entity_id=data.get(CONF_INVERTER_ENTITY_PV_POWER, ""),
             ),
             HouseholdLoadTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
@@ -493,6 +526,13 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             deserialize=_deserialize_generation,
         )
         await self._generation_store.load()
+
+        self._pv_power_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_PV_POWER,
+            serialize=_serialize_pv_power,
+            deserialize=_deserialize_pv_power,
+        )
+        await self._pv_power_store.load()
 
         self._household_load_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_HOUSEHOLD_LOAD,
@@ -577,6 +617,16 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 )
             primary[GenerationHistory] = GenerationHistory(
                 samples=tuple((self._generation_store.value or []) if self._generation_store else []),
+            )
+
+            current_pv_power: PvPowerReading | None = primary.get(PvPowerReading)
+            if current_pv_power is not None and self._pv_power_store is not None:
+                cutoff = now - timedelta(days=PV_POWER_HISTORY_RETENTION_DAYS)
+                await self._pv_power_store.append_and_trim(
+                    current_pv_power, cutoff, lambda s: s.timestamp,
+                )
+            primary[PvPowerHistory] = PvPowerHistory(
+                samples=tuple((self._pv_power_store.value or []) if self._pv_power_store else []),
             )
 
             current_load: HouseholdLoadReading | None = primary.get(HouseholdLoadReading)

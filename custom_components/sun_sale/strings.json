@@ -45,9 +45,10 @@
         }
       },
       "inverter_solis": {
-        "title": "Solis Inverter Entity Mapping",
-        "description": "Map the solis_modbus entities. Defaults are the canonical entity IDs — accept them unless your integration uses a custom prefix.",
+        "title": "Solis Inverter Setup",
+        "description": "If solis_modbus is installed with multiple inverters, select which one sunSale should control. If only one inverter is detected this step is skipped automatically. If solis_modbus is not installed, map entities manually.",
         "data": {
+          "solis_config_entry_id": "Solis inverter",
           "inverter_entity_battery_soc": "Battery SoC entity",
           "inverter_entity_battery_power": "Battery power entity (kW)",
           "inverter_entity_grid_power": "Grid power entity (kW)",
@@ -130,9 +131,10 @@
         }
       },
       "inverter_solis": {
-        "title": "Solis Inverter Entity Mapping",
-        "description": "Map the solis_modbus entities. Defaults are the canonical entity IDs — accept them unless your integration uses a custom prefix.",
+        "title": "Solis Inverter Setup",
+        "description": "If solis_modbus is installed with multiple inverters, select which one sunSale should control. If only one inverter is detected this step is skipped automatically. If solis_modbus is not installed, map entities manually.",
         "data": {
+          "solis_config_entry_id": "Solis inverter",
           "inverter_entity_battery_soc": "Battery SoC entity",
           "inverter_entity_battery_power": "Battery power entity (kW)",
           "inverter_entity_grid_power": "Grid power entity (kW)",

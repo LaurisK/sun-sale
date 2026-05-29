@@ -22,6 +22,7 @@ from ...contract.models import (
     PriceHistory,
     PriceSeries,
     ProfitabilityScore,
+    PvPowerHistory,
     SolarData,
 )
 
@@ -46,25 +47,28 @@ class GenerationNode(DagNode):
 
 
 class ObservedGenerationNode(DagNode):
-    """Difference inverter today-total samples → ObservedGenerationSeries.
+    """Average PV power samples → ObservedGenerationSeries with end-of-day correction.
 
-    Tier 2 because it depends on `PriceSeries` (T1 secondary) for the grid;
-    `GenerationHistory` is primary, deposited by the coordinator from the
-    persistent sample store.
+    Primary source: `PvPowerHistory` (instantaneous W, averaged per slot).
+    Correction: `GenerationHistory` today-total counter anchors slot sums at day-end.
+    Fallback: counter differencing when no power samples are present.
+    Tier 2 because it depends on `PriceSeries` (T1 secondary) for the grid.
     """
 
     tier = 2
     output_type = ObservedGenerationSeries
-    consumes = [GenerationHistory, PriceSeries]
+    consumes = [PvPowerHistory, GenerationHistory, PriceSeries]
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[ObservedGenerationSeries, list[ControlEvent]]:
-        """Difference persisted today-total samples into per-slot ObservedGenerationSeries."""
+        """Build per-slot ObservedGenerationSeries from power history with counter correction."""
+        pv_power_history = ctx.require(PvPowerHistory)
         history = ctx.require(GenerationHistory)
         price_series = ctx.require(PriceSeries)
         series = generation_module.build_observed_generation_series(
-            history, price_series.slots, now=ctx.now, local_tz=ctx.config.local_tz
+            pv_power_history, history, price_series.slots,
+            now=ctx.now, local_tz=ctx.config.local_tz,
         )
         return series, []
 

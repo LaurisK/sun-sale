@@ -29,6 +29,7 @@ CONF_INVERTER_ENTITY_BATTERY_POWER = "inverter_entity_battery_power"
 CONF_INVERTER_ENTITY_CHARGE_CONTROL = "inverter_entity_charge_control"
 
 # Config entry keys — Solis-specific inverter entities
+CONF_SOLIS_CONFIG_ENTRY_ID = "solis_config_entry_id"
 CONF_INVERTER_SOLIS_CHARGE_CURRENT = "inverter_solis_charge_current"
 CONF_INVERTER_SOLIS_DISCHARGE_CURRENT = "inverter_solis_discharge_current"
 CONF_INVERTER_SOLIS_CHARGE_START_TIME_1 = "inverter_solis_charge_start_time_1"
@@ -49,11 +50,13 @@ CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY = (
     "inverter_entity_household_consumption_energy"
 )
 CONF_INVERTER_ENTITY_SOLAR_ENERGY = "inverter_entity_solar_energy"
+CONF_INVERTER_ENTITY_PV_POWER = "inverter_entity_pv_power"
 
 # Persistent storage
 STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"
 STORAGE_KEY_YESTERDAY = f"{DOMAIN}_yesterday"
 STORAGE_KEY_GENERATION = f"{DOMAIN}_generation"
+STORAGE_KEY_PV_POWER = f"{DOMAIN}_pv_power"
 STORAGE_KEY_HOUSEHOLD_LOAD = f"{DOMAIN}_household_load"
 STORAGE_KEY_PRICE_HISTORY = f"{DOMAIN}_price_history"
 STORAGE_KEY_FORECAST_QUALITY = f"{DOMAIN}_forecast_quality"
@@ -62,6 +65,9 @@ STORAGE_VERSION = 1
 # Rolling generation-sample retention (days). Anything older than this is
 # trimmed before persistence each cycle.
 GENERATION_HISTORY_RETENTION_DAYS = 2
+
+# Rolling PV-power-sample retention (days). Covers yesterday + today slots.
+PV_POWER_HISTORY_RETENTION_DAYS = 2
 
 # Rolling household-load retention (days). Sized at ~1.5× the baseload
 # profile window (30d) so a few stale samples at the tail don't strand

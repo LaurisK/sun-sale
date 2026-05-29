@@ -42,10 +42,12 @@ from .contract.const import (
     CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY,
     CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
     CONF_INVERTER_ENTITY_SOLAR_ENERGY,
+    CONF_INVERTER_ENTITY_PV_POWER,
     CONF_NORDPOOL_ENTITY,
     CONF_NORDPOOL_RESOLUTION,
     CONF_SOLAR_FORECAST_ENTITY,
     CONF_SOLAR_FORECAST_ENTITY_2,
+    CONF_SOLIS_CONFIG_ENTRY_ID,
     CONF_TARIFF_DISTRIBUTION_FEE,
     CONF_TARIFF_MARKUP,
     CONF_TARIFF_SELL_DISTRIBUTION_FEE,
@@ -215,6 +217,23 @@ def _inverter_solis_schema(d: dict) -> vol.Schema:
     })
 
 
+def _inverter_solis_pick_schema(options: list[dict], d: dict) -> vol.Schema:
+    """Build a single-field schema for selecting which solis_modbus config entry to use.
+
+    Args:
+        options: List of ``{"value": entry_id, "label": title}`` dicts from discovered entries.
+        d: Existing config/options dict used for the default value.
+
+    Returns:
+        Schema with one SelectSelector field for the solis_modbus config entry ID.
+    """
+    return vol.Schema({
+        _req(CONF_SOLIS_CONFIG_ENTRY_ID, d): SelectSelector(
+            SelectSelectorConfig(options=options, mode=SelectSelectorMode.LIST)
+        )
+    })
+
+
 _NORDPOOL_RESOLUTION_SELECTOR = SelectSelector(SelectSelectorConfig(
     options=[
         {"value": "15min", "label": "15-minute (recommended)"},
@@ -240,6 +259,7 @@ def _sources_schema(d: dict) -> vol.Schema:
         _opt(CONF_SOLAR_FORECAST_ENTITY, d): _SENSOR_ENERGY,
         _opt(CONF_SOLAR_FORECAST_ENTITY_2, d): _SENSOR_ENERGY,
         _opt(CONF_INVERTER_ENTITY_SOLAR_ENERGY, d): _SENSOR_ENERGY,
+        _opt(CONF_INVERTER_ENTITY_PV_POWER, d): _SENSOR_POWER,
         _opt(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, d): _SENSOR_POWER,
         _opt(CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY, d): _SENSOR_ENERGY,
     })
@@ -323,10 +343,29 @@ class SunSaleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_inverter_solis(self, user_input: dict | None = None) -> FlowResult:
-        """Step 3b (Solis): TOU-model entity mapping for solis_modbus."""
+        """Step 3b (Solis): Auto-detect solis_modbus or show entity mapping.
+
+        When exactly one solis_modbus config entry exists the step auto-proceeds
+        without showing a form. When multiple entries exist a compact picker is
+        shown. When none exist the full manual entity mapping form is shown as a
+        fallback.
+        """
         if user_input is not None:
             self._data.update(user_input)
             return await self.async_step_sources()
+
+        solis_entries = self.hass.config_entries.async_entries("solis_modbus")
+
+        if len(solis_entries) == 1:
+            self._data[CONF_SOLIS_CONFIG_ENTRY_ID] = solis_entries[0].entry_id
+            return await self.async_step_sources()
+
+        if len(solis_entries) > 1:
+            options = [{"value": e.entry_id, "label": e.title} for e in solis_entries]
+            return self.async_show_form(
+                step_id="inverter_solis",
+                data_schema=_inverter_solis_pick_schema(options, {}),
+            )
 
         return self.async_show_form(
             step_id="inverter_solis",
@@ -449,14 +488,32 @@ class SunSaleOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def async_step_inverter_solis(self, user_input: dict | None = None) -> FlowResult:
-        """Step 3b (Solis): TOU-model entity mapping."""
+        """Step 3b (Solis): Auto-detect solis_modbus or show entity mapping.
+
+        Mirrors the config-flow Solis step. Single-entry detection auto-proceeds;
+        multiple entries show a picker; no entries fall back to manual mapping.
+        """
         if user_input is not None:
             self._data.update(user_input)
             return await self.async_step_sources()
 
+        solis_entries = self.hass.config_entries.async_entries("solis_modbus")
+        d = self._defaults()
+
+        if len(solis_entries) == 1:
+            self._data[CONF_SOLIS_CONFIG_ENTRY_ID] = solis_entries[0].entry_id
+            return await self.async_step_sources()
+
+        if len(solis_entries) > 1:
+            options = [{"value": e.entry_id, "label": e.title} for e in solis_entries]
+            return self.async_show_form(
+                step_id="inverter_solis",
+                data_schema=_inverter_solis_pick_schema(options, d),
+            )
+
         return self.async_show_form(
             step_id="inverter_solis",
-            data_schema=_inverter_solis_schema(self._defaults()),
+            data_schema=_inverter_solis_schema(d),
         )
 
     async def async_step_sources(self, user_input: dict | None = None) -> FlowResult:
