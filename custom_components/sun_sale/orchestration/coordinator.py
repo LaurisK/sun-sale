@@ -62,6 +62,7 @@ from ..contract.const import (
     CONF_TARIFF_TAX_RATE,
     CAPACITY_OBS_MIN_SOC_DELTA,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
+    GRID_POWER_HISTORY_RETENTION_DAYS,
     HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS,
     DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     DEFAULT_SOLIS_CHARGE_CURRENT,
@@ -80,7 +81,9 @@ from ..contract.const import (
     STORAGE_KEY_CAPACITY,
     STORAGE_KEY_FORECAST_QUALITY,
     STORAGE_KEY_GENERATION,
+    STORAGE_KEY_GRID_POWER,
     STORAGE_KEY_HOUSEHOLD_LOAD,
+    STORAGE_KEY_MONTHLY_BILL,
     STORAGE_KEY_PRICE_HISTORY,
     STORAGE_KEY_PV_POWER,
     STORAGE_KEY_YESTERDAY,
@@ -109,6 +112,10 @@ from ..contract.models import (
     GenerationHistory,
     GenerationReading,
     GenerationSeries,
+    GridPowerHistory,
+    GridPowerReading,
+    MonthlyBillResult,
+    MonthlyBillState,
     PvPowerHistory,
     PvPowerReading,
     HouseholdConsumptionReading,
@@ -139,6 +146,7 @@ from ..pipeline.nodes import (
     ForecastAccuracyNode,
     GenerationNode,
     LockoutNode,
+    MonthlyBillNode,
     ObservedGenerationNode,
     ScheduleNode,
     PricingNode,
@@ -356,6 +364,48 @@ def _deserialize_price_history(d: dict) -> list[DailyPeak]:
     return result
 
 
+def _serialize_grid_power(samples: list[GridPowerReading]) -> dict:
+    """Serialise a list of grid power readings."""
+    return {"samples": [{"ts": s.timestamp.isoformat(), "kw": s.power_kw} for s in samples]}
+
+
+def _deserialize_grid_power(d: dict) -> list[GridPowerReading]:
+    """Deserialise a list of grid power readings."""
+    return [
+        GridPowerReading(
+            power_kw=s["kw"],
+            timestamp=datetime.fromisoformat(s["ts"]),
+        )
+        for s in d.get("samples", [])
+    ]
+
+
+def _serialize_monthly_bill(state: MonthlyBillState) -> dict:
+    """Serialise the monthly bill state."""
+    return {
+        "month_str": state.month_str,
+        "carry_eur": state.carry_eur,
+        "yday_str": state.yday_str,
+        "previous_month_str": state.previous_month_str,
+        "previous_month_eur": state.previous_month_eur,
+    }
+
+
+def _deserialize_monthly_bill(d: dict) -> MonthlyBillState:
+    """Deserialise the monthly bill state.
+
+    Tolerates legacy entries that still carry the removed `last_yday_total_eur`
+    key by ignoring it; previous_month_* default to empty/zero when absent.
+    """
+    return MonthlyBillState(
+        month_str=d["month_str"],
+        carry_eur=d["carry_eur"],
+        yday_str=d["yday_str"],
+        previous_month_str=d.get("previous_month_str", ""),
+        previous_month_eur=d.get("previous_month_eur", 0.0),
+    )
+
+
 class SunSaleCoordinator(DataUpdateCoordinator):
     """Thin orchestrator: translators → capacity update → DAG → event routing."""
 
@@ -387,6 +437,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._household_load_store: PersistentStore[list[HouseholdLoadSample]] | None = None
         self._price_history_store: PersistentStore[list[DailyPeak]] | None = None
         self._forecast_quality_store: PersistentStore[ForecastQualityStore] | None = None
+        self._grid_power_store: PersistentStore[list[GridPowerReading]] | None = None
+        self._monthly_bill_store: PersistentStore[MonthlyBillState] | None = None
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
@@ -499,6 +551,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             GenerationNode(),
             ObservedGenerationNode(),
             DegradationNode(),
+            MonthlyBillNode(),
             ChargingProfileNode(),
             BatteryRuntimeNode(),
             ForecastAccuracyNode(),
@@ -554,6 +607,20 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             deserialize=forecast_accuracy_module.store_from_dict,
         )
         await self._forecast_quality_store.load()
+
+        self._grid_power_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_POWER,
+            serialize=_serialize_grid_power,
+            deserialize=_deserialize_grid_power,
+        )
+        await self._grid_power_store.load()
+
+        self._monthly_bill_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_MONTHLY_BILL,
+            serialize=_serialize_monthly_bill,
+            deserialize=_deserialize_monthly_bill,
+        )
+        await self._monthly_bill_store.load()
 
         self._yesterday_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_YESTERDAY,
@@ -629,6 +696,23 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 samples=tuple((self._pv_power_store.value or []) if self._pv_power_store else []),
             )
 
+            current_reading_for_grid: BatteryReading | None = primary.get(BatteryReading)
+            if current_reading_for_grid is not None and self._grid_power_store is not None:
+                grid_sample = GridPowerReading(
+                    power_kw=current_reading_for_grid.grid_power_kw,
+                    timestamp=now,
+                )
+                cutoff = now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
+                await self._grid_power_store.append_and_trim(
+                    grid_sample, cutoff, lambda s: s.timestamp,
+                )
+            primary[GridPowerHistory] = GridPowerHistory(
+                samples=tuple((self._grid_power_store.value or []) if self._grid_power_store else []),
+            )
+            primary[MonthlyBillState] = (
+                self._monthly_bill_store.value if self._monthly_bill_store else None
+            )
+
             current_load: HouseholdLoadReading | None = primary.get(HouseholdLoadReading)
             if current_load is not None and self._household_load_store is not None:
                 sample = HouseholdLoadSample(timestamp=now, load_kw=current_load.load_kw)
@@ -666,6 +750,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             acc_result: ForecastAccuracyResult | None = secondary.get(ForecastAccuracyResult)
             if acc_result is not None and self._forecast_quality_store is not None:
                 await self._forecast_quality_store.save(acc_result.quality)
+
+            bill_result: MonthlyBillResult | None = secondary.get(MonthlyBillResult)
+            if bill_result is not None and self._monthly_bill_store is not None:
+                await self._monthly_bill_store.save(bill_result.updated_state)
 
             pricing_result: PriceSeries | None = secondary.get(PriceSeries)
             if pricing_result is not None and self._price_history_store is not None:
@@ -758,6 +846,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ),
             "forecast_quality": _acc.quality if _acc else None,
             "sun_times": primary.get(SunTimes),
+            "monthly_bill": secondary.get(MonthlyBillResult),
         }
 
     def _read_sun_times(self, now: datetime) -> SunTimes:

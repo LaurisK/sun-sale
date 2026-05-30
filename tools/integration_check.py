@@ -2472,11 +2472,184 @@ class ForecastQualityCheckWidget(Static):
                 yield ForecastQualityBucketTable("Group 3 — Forecast Horizon (d0=today … d6=6d ahead)", sorted_g3)
 
 
+# ---------------------------------------------------------------------------
+# Monthly bill deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MonthlyBillCheckResult:
+    """Result of the monthly bill deep-check: total verification and per-slot cost."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    slot_count: int = 0
+    carry_eur: float = 0.0
+    yday_to_now_eur: float = 0.0
+    total_month_eur: float = 0.0
+    month_str: str = ""
+    previous_month_str: str = ""
+    previous_month_eur: float = 0.0
+    pricing_mismatch_count: int = 0
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
+    """Validate monthly bill totals, per-slot cost formulas, and pricing alignment.
+
+    Cross-checks:
+      * carry + yday_to_now == total_month_eur
+      * sum(slot.net_cost_eur) == yday_to_now_eur
+      * per-slot net_cost_eur == imported_kwh*buy − exported_kwh*sell
+        (no floor on sell — negative prices honoured)
+      * each bill slot's buy/sell prices match the overlapping `pipeline.pricing`
+        slot, verifying the upstream PriceSeries was applied faithfully.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.monthly_bill and pipeline.pricing.
+
+    Returns:
+        MonthlyBillCheckResult with aggregation cross-checks and overall pass/fail.
+    """
+    result = MonthlyBillCheckResult()
+
+    mb = snap.pipeline.get("monthly_bill")
+    if not mb:
+        result.skipped = True
+        result.skip_reason = "pipeline.monthly_bill is null (no grid power history yet)"
+        return result
+
+    result.slot_count = mb.get("slot_count", 0)
+    result.carry_eur = mb.get("carry_eur", 0.0)
+    result.yday_to_now_eur = mb.get("yday_to_now_eur", 0.0)
+    result.total_month_eur = mb.get("total_month_eur", 0.0)
+    result.month_str = mb.get("month_str", "")
+    result.previous_month_str = mb.get("previous_month_str", "")
+    result.previous_month_eur = mb.get("previous_month_eur", 0.0)
+
+    if abs((result.carry_eur + result.yday_to_now_eur) - result.total_month_eur) > 1e-4:
+        result.mismatches.append("total_mismatch")
+        result.overall_ok = False
+
+    slots = mb.get("slots") or []
+    slot_sum = sum(s.get("net_cost_eur", 0.0) for s in slots)
+    if abs(slot_sum - result.yday_to_now_eur) > 1e-4:
+        result.mismatches.append("yday_sum_mismatch")
+        result.overall_ok = False
+
+    slot_formula_errors = 0
+    for s in slots:
+        imp = s.get("imported_kwh", 0.0)
+        exp = s.get("exported_kwh", 0.0)
+        buy = s.get("buy_eur_kwh", 0.0)
+        sell = s.get("sell_eur_kwh", 0.0)
+        expected = imp * buy - exp * sell
+        actual = s.get("net_cost_eur", 0.0)
+        if abs(expected - actual) > 1e-4:
+            slot_formula_errors += 1
+    if slot_formula_errors:
+        result.mismatches.append(f"{slot_formula_errors}_slot_formula_mismatch")
+        result.overall_ok = False
+
+    pricing = snap.pipeline.get("pricing") or {}
+    pricing_slots = pricing.get("slots") or []
+    parsed_pricing: list[tuple[datetime, float, float]] = []
+    for p in pricing_slots:
+        try:
+            parsed_pricing.append((
+                datetime.fromisoformat(p.get("start", "")),
+                float(p.get("buy", 0.0)),
+                float(p.get("sell", 0.0)),
+            ))
+        except (ValueError, TypeError):
+            continue
+    parsed_pricing.sort(key=lambda x: x[0])
+
+    pricing_mismatches = 0
+    for s in slots:
+        try:
+            bs = datetime.fromisoformat(s.get("start", ""))
+        except (ValueError, TypeError):
+            continue
+        match = None
+        for i, (ps_start, _, _) in enumerate(parsed_pricing):
+            next_start = parsed_pricing[i + 1][0] if i + 1 < len(parsed_pricing) else None
+            if ps_start <= bs and (next_start is None or bs < next_start):
+                match = parsed_pricing[i]
+                break
+        if match is None:
+            continue
+        _, buy, sell = match
+        if (
+            abs(buy - s.get("buy_eur_kwh", 0.0)) > 1e-4
+            or abs(sell - s.get("sell_eur_kwh", 0.0)) > 1e-4
+        ):
+            pricing_mismatches += 1
+    result.pricing_mismatch_count = pricing_mismatches
+    if pricing_mismatches:
+        result.mismatches.append(f"{pricing_mismatches}_pricing_mismatch")
+        result.overall_ok = False
+
+    return result
+
+
+class MonthlyBillCheckWidget(Static):
+    """Collapsible monthly bill deep-check: total verification and bill breakdown."""
+
+    DEFAULT_CSS = "MonthlyBillCheckWidget { height: auto; }"
+
+    def __init__(self, mb: MonthlyBillCheckResult) -> None:
+        """Initialise with the pre-computed monthly bill check result.
+
+        Args:
+            mb: Result of check_monthly_bill() for one coordinator.
+        """
+        super().__init__()
+        self._mb = mb
+
+    def compose(self) -> ComposeResult:
+        """Render bill summary and mismatch status as a collapsible static block."""
+        mb = self._mb
+
+        if mb.skipped:
+            yield Static(f"  ⚠  monthly_bill_check   SKIP   {mb.skip_reason}")
+            return
+
+        color = "green" if mb.overall_ok else "red"
+        mark = "✓" if mb.overall_ok else "✗"
+        status = "PASS" if mb.overall_ok else "FAIL"
+        title = (
+            f"[{color}]{mark}[/{color}]  monthly_bill_check   [{color}]{status}[/{color}]"
+            f"   {mb.slot_count} slots  carry={mb.carry_eur:.4f}€"
+            f"  yday_to_now={mb.yday_to_now_eur:.4f}€  total={mb.total_month_eur:.4f}€"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            mismatches_str = ", ".join(mb.mismatches) if mb.mismatches else "none"
+            prev = (
+                f"{mb.previous_month_str}: {mb.previous_month_eur:.4f} EUR"
+                if mb.previous_month_str else "—"
+            )
+            yield Static(
+                f"  Month: {mb.month_str}\n"
+                f"  Carry (month start → yday start): {mb.carry_eur:.4f} EUR\n"
+                f"  Live (since carry boundary): {mb.yday_to_now_eur:.4f} EUR\n"
+                f"  Total month bill: {mb.total_month_eur:.4f} EUR\n"
+                f"  Previous month: {prev}\n"
+                f"  Slots: {mb.slot_count}\n"
+                f"  Pricing mismatches: {mb.pricing_mismatch_count}\n"
+                f"  Mismatches: {mismatches_str}",
+                markup=True,
+            )
+
+
 # Categories handled by deep-check widgets; excluded from the plain validator display.
 _DEEP_CATS: frozenset[str] = frozenset({
     "forecast", "pricing", "calculation", "schedule", "battery",
     "observed_generation", "forecast_accuracy", "charging_profile", "base_load",
     "battery_runtime", "household_consumption", "profitability", "forecast_quality",
+    "monthly_bill",
 })
 
 
@@ -2921,6 +3094,7 @@ class IntegrationCheckApp(App):
     ProfitabilityCheckWidget { height: auto; }
     ForecastQualityCheckWidget { height: auto; }
     ForecastQualityBucketTable DataTable { height: 14; }
+    MonthlyBillCheckWidget { height: auto; }
     """
 
     def __init__(
@@ -2939,6 +3113,7 @@ class IntegrationCheckApp(App):
         household_consumption_results: dict[str, HouseholdConsumptionCheckResult],
         profitability_results: dict[str, ProfitabilityCheckResult],
         forecast_quality_results: dict[str, ForecastQualityCheckResult],
+        monthly_bill_results: dict[str, MonthlyBillCheckResult],
     ) -> None:
         """Initialise with validator report and all deep-check results.
 
@@ -2957,6 +3132,7 @@ class IntegrationCheckApp(App):
             household_consumption_results: Per-entry household consumption deep-check results.
             profitability_results: Per-entry profitability score deep-check results.
             forecast_quality_results: Per-entry forecast quality EMA bucket deep-check results.
+            monthly_bill_results: Per-entry monthly electricity bill deep-check results.
         """
         super().__init__()
         self._report = report
@@ -2973,6 +3149,7 @@ class IntegrationCheckApp(App):
         self._household_consumption_results = household_consumption_results
         self._profitability_results = profitability_results
         self._forecast_quality_results = forecast_quality_results
+        self._monthly_bill_results = monthly_bill_results
         self.exit_code = 0
 
     def _all_deep(self) -> list:
@@ -2995,6 +3172,7 @@ class IntegrationCheckApp(App):
             + list(self._household_consumption_results.values())
             + list(self._profitability_results.values())
             + list(self._forecast_quality_results.values())
+            + list(self._monthly_bill_results.values())
         )
 
     def compose(self) -> ComposeResult:
@@ -3029,6 +3207,7 @@ class IntegrationCheckApp(App):
                 ("household_consumption",   HouseholdConsumptionCheckWidget,    self._household_consumption_results),
                 ("profitability",           ProfitabilityCheckWidget,           self._profitability_results),
                 ("forecast_quality",        ForecastQualityCheckWidget,         self._forecast_quality_results),
+                ("monthly_bill",            MonthlyBillCheckWidget,             self._monthly_bill_results),
             ):
                 r = results_map.get(eid)
                 if r is not None:
@@ -3224,6 +3403,7 @@ def main(argv: list[str] | None = None) -> int:
     household_consumption_results  = {s.entry_id: check_household_consumption(s)     for s in snapshots}
     profitability_results          = {s.entry_id: check_profitability(s)             for s in snapshots}
     forecast_quality_results       = {s.entry_id: check_forecast_quality(s)          for s in snapshots}
+    monthly_bill_results           = {s.entry_id: check_monthly_bill(s)              for s in snapshots}
     app = IntegrationCheckApp(
         report,
         forecast_results, pricing_results, calculation_results,
@@ -3232,6 +3412,7 @@ def main(argv: list[str] | None = None) -> int:
         base_load_results, battery_runtime_results,
         household_consumption_results, profitability_results,
         forecast_quality_results,
+        monthly_bill_results,
     )
     app.run(inline=True)
     return app.exit_code

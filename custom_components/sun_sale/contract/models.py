@@ -668,6 +668,85 @@ class ForecastQualityStore:
     group3_pending: list[dict] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class GridPowerReading:
+    """Primary data: one snapshot of instantaneous grid power.
+
+    Positive values indicate import from grid; negative values indicate export.
+    """
+    power_kw: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class GridPowerHistory:
+    """Primary data: ordered snapshots of instantaneous grid power.
+
+    Coordinator appends each cycle's GridPowerReading and persists the
+    rolling list (2 days) so per-slot net import/export can be derived
+    for electricity bill computation.
+    """
+    samples: tuple[GridPowerReading, ...]
+
+
+@dataclass(frozen=True)
+class MonthlyBillState:
+    """Persistent accumulator state for the monthly electricity bill.
+
+    carry_eur covers the bill from the start of the current calendar month
+    up to (but not including) the start of the current yday. yday_str pins
+    the local date that carry currently advances to; at day rollover the
+    bill module recomputes the just-finished day fresh from grid samples
+    and folds it into carry. previous_month_* snapshot the most recent
+    finalized month so that total can still be displayed after rollover.
+    """
+    month_str: str                # "YYYY-MM" — resets when this changes
+    carry_eur: float              # bill from month_start to yday_start
+    yday_str: str                 # local date string of the current yday
+    previous_month_str: str = ""        # most recent finalized month
+    previous_month_eur: float = 0.0     # final bill for previous_month_str
+
+
+@dataclass(frozen=True)
+class BillSlot:
+    """Per-pricing-slot electricity cost breakdown.
+
+    net_cost_eur = imported_kwh * buy_eur_kwh - exported_kwh * sell_eur_kwh.
+    No floor is applied to sell_eur_kwh — negative sell prices charge the
+    exporter, matching real-market behaviour. Positive net_cost_eur means
+    net cost; negative means net revenue.
+    """
+    start: datetime
+    end: datetime
+    imported_kwh: float    # net energy bought from grid this slot
+    exported_kwh: float    # net energy sold to grid this slot
+    buy_eur_kwh: float     # effective buy price
+    sell_eur_kwh: float    # effective sell price (may be negative)
+    net_cost_eur: float    # cost to the household this slot
+
+
+@dataclass(frozen=True)
+class MonthlyBillResult:
+    """Net electricity bill accumulated for the current calendar month.
+
+    Covers from month_start to now, split into a persisted carry (up to yday_start
+    or month_start on the first day of a new month, whichever is later) and a
+    live portion derived from grid power history + price series. Slots span the
+    live window only — they never include data attributed to a previous month.
+    previous_month_eur captures the most recently finalized month so the UI can
+    keep showing it after rollover.
+    """
+    slots: tuple[BillSlot, ...]      # live-window slots (yday_start or month_start → now)
+    carry_eur: float                  # bill from month_start to start of yesterday
+    yday_to_now_eur: float           # sum of slot net_cost_eur (live-window total)
+    total_month_eur: float           # carry_eur + yday_to_now_eur
+    month_str: str                    # current month "YYYY-MM"
+    previous_month_str: str           # finalized prior month, "" before first rollover
+    previous_month_eur: float         # bill total for previous_month_str
+    updated_state: MonthlyBillState  # coordinator persists this after each cycle
+    computed_at: datetime
+
+
 @dataclass
 class ForecastAccuracyResult:
     """Single output of ForecastAccuracyNode: per-cycle slot errors + persistent EMA quality.

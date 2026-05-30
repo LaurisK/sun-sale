@@ -60,6 +60,8 @@ STORAGE_KEY_PV_POWER = f"{DOMAIN}_pv_power"
 STORAGE_KEY_HOUSEHOLD_LOAD = f"{DOMAIN}_household_load"
 STORAGE_KEY_PRICE_HISTORY = f"{DOMAIN}_price_history"
 STORAGE_KEY_FORECAST_QUALITY = f"{DOMAIN}_forecast_quality"
+STORAGE_KEY_GRID_POWER = f"{DOMAIN}_grid_power"
+STORAGE_KEY_MONTHLY_BILL = f"{DOMAIN}_monthly_bill"
 STORAGE_VERSION = 1
 
 # Rolling generation-sample retention (days). Anything older than this is
@@ -68,6 +70,9 @@ GENERATION_HISTORY_RETENTION_DAYS = 2
 
 # Rolling PV-power-sample retention (days). Covers yesterday + today slots.
 PV_POWER_HISTORY_RETENTION_DAYS = 2
+
+# Rolling grid-power-sample retention (days). Covers yesterday + today for billing.
+GRID_POWER_HISTORY_RETENTION_DAYS = 2
 
 # Rolling household-load retention (days). Sized at ~1.5× the baseload
 # profile window (30d) so a few stale samples at the tail don't strand

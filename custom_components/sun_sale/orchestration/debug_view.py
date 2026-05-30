@@ -51,6 +51,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     profitability = data.get("profitability_score")
     forecast_quality = data.get("forecast_quality")
     sun_times = data.get("sun_times")
+    monthly_bill = data.get("monthly_bill")
 
     cfg = coordinator._config  # noqa: SLF001
     return {
@@ -259,6 +260,28 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "group3": {k: v.metrics() for k, v in forecast_quality.group3.items()},
                 "group3_pending_count": len(forecast_quality.group3_pending),
             } if forecast_quality is not None else None,
+            "monthly_bill": {
+                "slot_count": len(monthly_bill.slots),
+                "carry_eur": round(monthly_bill.carry_eur, 4),
+                "yday_to_now_eur": round(monthly_bill.yday_to_now_eur, 4),
+                "total_month_eur": round(monthly_bill.total_month_eur, 4),
+                "month_str": monthly_bill.month_str,
+                "previous_month_str": monthly_bill.previous_month_str,
+                "previous_month_eur": round(monthly_bill.previous_month_eur, 4),
+                "computed_at": monthly_bill.computed_at.isoformat(),
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "end": s.end.isoformat(),
+                        "imported_kwh": round(s.imported_kwh, 4),
+                        "exported_kwh": round(s.exported_kwh, 4),
+                        "buy_eur_kwh": round(s.buy_eur_kwh, 4),
+                        "sell_eur_kwh": round(s.sell_eur_kwh, 4),
+                        "net_cost_eur": round(s.net_cost_eur, 6),
+                    }
+                    for s in monthly_bill.slots
+                ],
+            } if monthly_bill is not None else None,
         },
         "outputs": {
             "schedule": {

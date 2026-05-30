@@ -27,6 +27,7 @@ from .contract.models import (
     ForecastErrorSeries,
     ForecastQualityStore,
     GenerationSeries,
+    MonthlyBillResult,
     ObservedGenerationSeries,
     PriceSeries,
     PriceSlot,
@@ -67,6 +68,7 @@ async def async_setup_entry(
         BatteryRuntimeMinutesSensor(coordinator, entry),
         BatteryDrainUntilSensor(coordinator, entry),
         BaseloadConfidenceSensor(coordinator, entry),
+        MonthlyBillSensor(coordinator, entry),
     ])
 
 
@@ -850,3 +852,67 @@ class BaseloadConfidenceSensor(_BaseloadSensor):
         if profile is None or profile.confidence is None:
             return None
         return round(profile.confidence, 3)
+
+
+class MonthlyBillSensor(_BaseSensor):
+    """Sensor reporting the net electricity bill for the current calendar month.
+
+    The value is carry (month start → yesterday midnight) plus the live
+    yday-to-now portion derived from grid power history and current prices.
+    Resets to zero at the start of each new calendar month.
+    """
+
+    _attr_name = "sunSale Monthly Bill"
+    _attr_native_unit_of_measurement = "EUR"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:currency-eur"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise monthly bill sensor."""
+        super().__init__(coordinator, entry, "monthly_bill")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the net electricity bill for the current month in EUR.
+
+        Returns:
+            Total month bill rounded to 4 dp, or None when no data is available.
+        """
+        result: MonthlyBillResult | None = (self.coordinator.data or {}).get("monthly_bill")
+        if result is None:
+            return None
+        return round(result.total_month_eur, 4)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return bill breakdown: carry, yday-to-now, month, and per-slot detail.
+
+        Returns:
+            Dict with month_str, carry_eur, yday_to_now_eur, total_month_eur,
+            slot_count, computed_at, and per-slot import/export/cost data.
+        """
+        result: MonthlyBillResult | None = (self.coordinator.data or {}).get("monthly_bill")
+        if result is None:
+            return {}
+        return {
+            "month_str": result.month_str,
+            "carry_eur": round(result.carry_eur, 4),
+            "yday_to_now_eur": round(result.yday_to_now_eur, 4),
+            "total_month_eur": round(result.total_month_eur, 4),
+            "previous_month_str": result.previous_month_str,
+            "previous_month_eur": round(result.previous_month_eur, 4),
+            "slot_count": len(result.slots),
+            "computed_at": result.computed_at.isoformat(),
+            "slots": [
+                {
+                    "start": s.start.isoformat(),
+                    "end": s.end.isoformat(),
+                    "imported_kwh": round(s.imported_kwh, 4),
+                    "exported_kwh": round(s.exported_kwh, 4),
+                    "buy_eur_kwh": round(s.buy_eur_kwh, 4),
+                    "sell_eur_kwh": round(s.sell_eur_kwh, 4),
+                    "net_cost_eur": round(s.net_cost_eur, 6),
+                }
+                for s in result.slots
+            ],
+        }
