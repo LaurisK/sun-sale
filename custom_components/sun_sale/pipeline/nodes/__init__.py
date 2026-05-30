@@ -7,8 +7,8 @@ Observer wiring is auto-built by DagEngine._wire() based on these declarations.
 Tier map:
   T1: PricingNode, BatteryStateNode, BatteryStatusNode, BaseLoadProfileNode
   T2: GenerationNode, ObservedGenerationNode, ObservedGridNode, DegradationNode,
-      BatteryRuntimeNode, MonthlyBillNode, ProfitabilityNode
-  T3: ChargingProfileNode, ForecastAccuracyNode, LockoutNode
+      BatteryRuntimeNode, ProfitabilityNode
+  T3: ChargingProfileNode, ForecastAccuracyNode, LockoutNode, MonthlyBillNode
   T4: ScheduleNode
 """
 from .tier1 import (
@@ -21,7 +21,6 @@ from .tier2 import (
     BatteryRuntimeNode,
     DegradationNode,
     GenerationNode,
-    MonthlyBillNode,
     ObservedGenerationNode,
     ObservedGridNode,
     ProfitabilityNode,
@@ -30,6 +29,7 @@ from .tier3 import (
     ChargingProfileNode,
     ForecastAccuracyNode,
     LockoutNode,
+    MonthlyBillNode,
 )
 from .tier4 import ScheduleNode
 

@@ -6,6 +6,7 @@ import logging
 from .. import calculation
 from .. import charging_profile as charging_profile_module
 from .. import forecast_accuracy
+from .. import monthly_bill as monthly_bill_module
 from ..dag_engine import DagNode, NodeContext
 from ...contract.events import ControlEvent
 from ...contract.models import (
@@ -16,7 +17,10 @@ from ...contract.models import (
     ForecastAccuracyResult,
     ForecastQualityStore,
     GenerationSeries,
+    MonthlyBillResult,
+    MonthlyBillState,
     ObservedGenerationSeries,
+    ObservedGridSeries,
     PriceSeries,
     SunTimes,
 )
@@ -70,6 +74,35 @@ class ForecastAccuracyNode(DagNode):
             observed=ctx.require(ObservedGenerationSeries),
             quality_store=ctx.get(ForecastQualityStore),
             sun_times=ctx.get(SunTimes),
+            local_tz=ctx.config.local_tz,
+            now=ctx.now,
+        )
+        return result, []
+
+
+class MonthlyBillNode(DagNode):
+    """Accumulate per-slot electricity bill from yday 00:00 to now → MonthlyBillResult.
+
+    Consumes ObservedGridSeries (per-slot gross import/export kWh) and PriceSeries
+    (buy/sell prices) to compute net cost per slot. A carry persists the bill from
+    month_start to yday_start; it advances at day rollover and resets at month rollover.
+    MonthlyBillState comes from primary (loaded by coordinator) and is NOT listed in
+    consumes to match the ForecastQualityStore pattern for optional persistent state.
+    Tier 3 because it depends on ObservedGridSeries (T2).
+    """
+
+    tier = 3
+    output_type = MonthlyBillResult
+    consumes = [PriceSeries, ObservedGridSeries]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[MonthlyBillResult, list[ControlEvent]]:
+        """Compute monthly electricity bill: carry + per-slot yday-to-now costs."""
+        result = monthly_bill_module.build_monthly_bill_result(
+            grid_series=ctx.require(ObservedGridSeries),
+            price_series=ctx.require(PriceSeries),
+            stored_state=ctx.get(MonthlyBillState),
             local_tz=ctx.config.local_tz,
             now=ctx.now,
         )

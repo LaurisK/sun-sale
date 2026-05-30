@@ -5,7 +5,6 @@ import logging
 
 from .. import base_load as base_load_module
 from .. import battery as battery_module
-from .. import monthly_bill as monthly_bill_module
 from .. import profitability as profitability_module
 from ...inbound import forecast as forecast_module
 from ...inbound import generation as generation_module
@@ -23,8 +22,6 @@ from ...contract.models import (
     GridExportTodayHistory,
     GridImportTodayHistory,
     GridPowerHistory,
-    MonthlyBillResult,
-    MonthlyBillState,
     ObservedGenerationSeries,
     ObservedGridSeries,
     PriceHistory,
@@ -160,33 +157,6 @@ class ObservedGridNode(DagNode):
         )
         return series, []
 
-
-class MonthlyBillNode(DagNode):
-    """Accumulate per-slot electricity bill from yday 00:00 to now → MonthlyBillResult.
-
-    Consumes ObservedGridSeries (per-slot gross import/export kWh) and PriceSeries
-    (buy/sell prices) to compute net cost per slot. A carry persists the bill from
-    month_start to yday_start; it advances at day rollover and resets at month rollover.
-    MonthlyBillState comes from primary (loaded by coordinator) and is NOT listed in
-    consumes to match the ForecastQualityStore pattern for optional persistent state.
-    """
-
-    tier = 2
-    output_type = MonthlyBillResult
-    consumes = [PriceSeries, ObservedGridSeries]
-
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[MonthlyBillResult, list[ControlEvent]]:
-        """Compute monthly electricity bill: carry + per-slot yday-to-now costs."""
-        result = monthly_bill_module.build_monthly_bill_result(
-            grid_series=ctx.require(ObservedGridSeries),
-            price_series=ctx.require(PriceSeries),
-            stored_state=ctx.get(MonthlyBillState),
-            local_tz=ctx.config.local_tz,
-            now=ctx.now,
-        )
-        return result, []
 
 
 class ProfitabilityNode(DagNode):
