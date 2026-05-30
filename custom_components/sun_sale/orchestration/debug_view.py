@@ -53,6 +53,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     sun_times = data.get("sun_times")
     monthly_bill = data.get("monthly_bill")
     grid_power_history = data.get("grid_power_history")
+    observed_grid = data.get("observed_grid")
 
     cfg = coordinator._config  # noqa: SLF001
     return {
@@ -164,6 +165,23 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for s in observed_gen.slots
                 ],
             } if observed_gen is not None else None,
+            "observed_grid": {
+                "slot_count": len(observed_grid.slots),
+                "total_yesterday_imported_kwh": round(observed_grid.total_yesterday_imported_kwh, 4),
+                "total_yesterday_exported_kwh": round(observed_grid.total_yesterday_exported_kwh, 4),
+                "total_today_imported_kwh": round(observed_grid.total_today_imported_kwh, 4),
+                "total_today_exported_kwh": round(observed_grid.total_today_exported_kwh, 4),
+                "computed_at": observed_grid.computed_at.isoformat(),
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "end": s.end.isoformat(),
+                        "imported_kwh": round(s.imported_kwh, 4),
+                        "exported_kwh": round(s.exported_kwh, 4),
+                    }
+                    for s in observed_grid.slots
+                ],
+            } if observed_grid is not None else None,
             "forecast_error": {
                 "slot_count": len(forecast_err.slots),
                 "total_forecast_kwh": round(forecast_err.total_forecast_kwh, 4),

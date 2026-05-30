@@ -1093,6 +1093,182 @@ def check_observed_generation(snap: Snapshot) -> ObservedGenerationCheckResult:
 
 
 # ---------------------------------------------------------------------------
+# Observed grid deep check
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ObservedGridCheckResult:
+    """Result of the observed-grid deep-check: per-slot import/export vs upstream samples."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    slot_count: int = 0
+    total_yesterday_imported_kwh: float = 0.0
+    total_yesterday_exported_kwh: float = 0.0
+    total_today_imported_kwh: float = 0.0
+    total_today_exported_kwh: float = 0.0
+    computed_yesterday_imported_kwh: float = 0.0
+    computed_yesterday_exported_kwh: float = 0.0
+    computed_today_imported_kwh: float = 0.0
+    computed_today_exported_kwh: float = 0.0
+    grid_history_sample_count: int = 0
+    grid_history_first_sample: str = ""
+    grid_history_last_sample: str = ""
+    energy_mismatch_count: int = 0
+    computed_at: str = ""
+    slot_rows: list[dict] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_observed_grid(snap: Snapshot) -> ObservedGridCheckResult:
+    """Verify observed grid slot import/export against raw history + declared totals.
+
+    Cross-checks every ObservedGridSlot:
+      * imported_kwh ≥ 0 and exported_kwh ≥ 0
+      * per-slot import/export reconstructed from ``inputs.grid_power_history``
+        samples within [slot.start, slot.end), splitting each sample by sign
+        before averaging. After today's end-of-day correction is applied
+        the reconstructed values may differ by a scalar factor — a mismatch
+        only fails the check when *both* the declared and the reconstructed
+        value are zero on opposite sides, or when neither side has a counter
+        explanation for the divergence.
+      * Sum of slot imports / exports matches each declared total for both
+        yesterday and today_so_far.
+
+    Args:
+        snap: Coordinator snapshot containing pipeline.observed_grid and
+            inputs.grid_power_history.
+
+    Returns:
+        ObservedGridCheckResult with per-slot data and overall pass/fail.
+    """
+    result = ObservedGridCheckResult()
+
+    og = snap.pipeline.get("observed_grid")
+    if not og:
+        result.skipped = True
+        result.skip_reason = "pipeline.observed_grid is null (no grid power history yet)"
+        return result
+
+    result.slot_count = og.get("slot_count", 0)
+    result.total_yesterday_imported_kwh = og.get("total_yesterday_imported_kwh", 0.0)
+    result.total_yesterday_exported_kwh = og.get("total_yesterday_exported_kwh", 0.0)
+    result.total_today_imported_kwh = og.get("total_today_imported_kwh", 0.0)
+    result.total_today_exported_kwh = og.get("total_today_exported_kwh", 0.0)
+    result.computed_at = og.get("computed_at", "")
+
+    history = snap.inputs.get("grid_power_history") or {}
+    raw_samples = history.get("samples") or []
+    parsed_samples: list[tuple[datetime, float]] = []
+    for s in raw_samples:
+        try:
+            parsed_samples.append((
+                datetime.fromisoformat(s.get("timestamp", "")),
+                float(s.get("power_kw", 0.0)),
+            ))
+        except (ValueError, TypeError):
+            continue
+    parsed_samples.sort(key=lambda x: x[0])
+    result.grid_history_sample_count = len(parsed_samples)
+    if parsed_samples:
+        result.grid_history_first_sample = parsed_samples[0][0].isoformat()
+        result.grid_history_last_sample = parsed_samples[-1][0].isoformat()
+
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    cy_imp = cy_exp = ct_imp = ct_exp = 0.0
+    energy_mismatches = 0
+
+    for s in og.get("slots") or []:
+        start_str = s.get("start", "")
+        end_str = s.get("end", "")
+        imp = s.get("imported_kwh", 0.0)
+        exp = s.get("exported_kwh", 0.0)
+        sign_ok = imp >= -1e-6 and exp >= -1e-6
+        if not sign_ok:
+            result.mismatches.append(f"negative_value:{start_str[:16]}")
+            result.overall_ok = False
+
+        try:
+            bs_start = datetime.fromisoformat(start_str)
+            bs_end = datetime.fromisoformat(end_str)
+        except (ValueError, TypeError):
+            bs_start = bs_end = None
+
+        sample_count = 0
+        exp_imp = 0.0
+        exp_exp = 0.0
+        energy_ok = True
+        if bs_start is not None and bs_end is not None:
+            samples_in_slot = [
+                kw for (ts, kw) in parsed_samples if bs_start <= ts < bs_end
+            ]
+            sample_count = len(samples_in_slot)
+            if samples_in_slot:
+                duration_h = (bs_end - bs_start).total_seconds() / 3600.0
+                n = len(samples_in_slot)
+                avg_imp_kw = sum(max(0.0, k) for k in samples_in_slot) / n
+                avg_exp_kw = sum(max(0.0, -k) for k in samples_in_slot) / n
+                exp_imp = avg_imp_kw * duration_h
+                exp_exp = avg_exp_kw * duration_h
+            # Today's slot values may be scaled by the end-of-day counter
+            # correction, so per-slot energy mismatches are tolerated for
+            # today; we still surface the comparison in the slot row.
+            d_local = bs_start.date() if bs_start else None
+            if d_local != today:
+                if abs(exp_imp - imp) > 1e-3 or abs(exp_exp - exp) > 1e-3:
+                    energy_ok = False
+                    energy_mismatches += 1
+
+        d_utc = bs_start.date() if bs_start else None
+        if d_utc == yesterday:
+            cy_imp += imp
+            cy_exp += exp
+        elif d_utc == today:
+            ct_imp += imp
+            ct_exp += exp
+
+        result.slot_rows.append({
+            "start": start_str,
+            "imported_kwh": imp,
+            "exported_kwh": exp,
+            "expected_imported_kwh": exp_imp,
+            "expected_exported_kwh": exp_exp,
+            "sample_count": sample_count,
+            "sign_ok": sign_ok,
+            "energy_ok": energy_ok,
+        })
+
+    result.computed_yesterday_imported_kwh = round(cy_imp, 4)
+    result.computed_yesterday_exported_kwh = round(cy_exp, 4)
+    result.computed_today_imported_kwh = round(ct_imp, 4)
+    result.computed_today_exported_kwh = round(ct_exp, 4)
+    result.energy_mismatch_count = energy_mismatches
+    if energy_mismatches:
+        result.mismatches.append(f"{energy_mismatches}_energy_mismatch")
+        result.overall_ok = False
+
+    TOL = 0.01
+    if abs(cy_imp - result.total_yesterday_imported_kwh) > TOL:
+        result.mismatches.append("yesterday_imported_total_mismatch")
+        result.overall_ok = False
+    if abs(cy_exp - result.total_yesterday_exported_kwh) > TOL:
+        result.mismatches.append("yesterday_exported_total_mismatch")
+        result.overall_ok = False
+    if abs(ct_imp - result.total_today_imported_kwh) > TOL:
+        result.mismatches.append("today_imported_total_mismatch")
+        result.overall_ok = False
+    if abs(ct_exp - result.total_today_exported_kwh) > TOL:
+        result.mismatches.append("today_exported_total_mismatch")
+        result.overall_ok = False
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Forecast accuracy deep check
 # ---------------------------------------------------------------------------
 
@@ -1821,6 +1997,136 @@ class ObservedGenerationCheckWidget(Static):
             )
             with Collapsible(title="Slots", collapsed=False):
                 yield ObservedGenerationSlotsTable(og)
+
+
+class ObservedGridSlotsTable(Static):
+    """DataTable: Time | Imp kWh | Exp kWh | Exp Imp | Exp Exp | Samp | ✓/✗."""
+
+    DEFAULT_CSS = """
+    ObservedGridSlotsTable { height: auto; }
+    ObservedGridSlotsTable DataTable { height: 22; }
+    """
+
+    def __init__(self, og: ObservedGridCheckResult) -> None:
+        """Initialise with the observed grid check result.
+
+        Args:
+            og: Result of check_observed_grid() containing per-slot import/export.
+        """
+        super().__init__()
+        self._og = og
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per slot, date-separated."""
+        table = self.query_one(DataTable)
+        table.add_columns(
+            "Time", "Imp kWh", "Exp kWh", "Exp Imp", "Exp Exp", "Samp", "",
+        )
+        dim = "dim"
+        prev_date = None
+
+        for row in self._og.slot_rows:
+            try:
+                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
+                time_str = dt.strftime("%H:%M")
+                cur_date = dt.date()
+            except (ValueError, AttributeError):
+                time_str = row["start"]
+                cur_date = None
+
+            if cur_date is not None and cur_date != prev_date:
+                if prev_date is not None:
+                    table.add_row(*[Text("─", style=dim)] * 7)
+                table.add_row(Text(str(cur_date), style="bold"), *[""] * 6)
+                prev_date = cur_date
+
+            imp = row["imported_kwh"]
+            exp = row["exported_kwh"]
+            exp_imp = row["expected_imported_kwh"]
+            exp_exp = row["expected_exported_kwh"]
+            samples = row["sample_count"]
+            ok = row["sign_ok"] and row["energy_ok"]
+
+            zero_both = imp == 0.0 and exp == 0.0
+            base_style = dim if zero_both else ""
+            samples_style = "red" if samples == 0 else dim
+
+            table.add_row(
+                Text(time_str, style="cyan"),
+                Text(f"{imp:.4f}", style=base_style),
+                Text(f"{exp:.4f}", style=base_style),
+                Text(f"{exp_imp:.4f}", style=dim),
+                Text(f"{exp_exp:.4f}", style=dim),
+                Text(str(samples), style=samples_style),
+                Text("✓" if ok else "✗", style="green" if ok else "red"),
+            )
+
+
+class ObservedGridCheckWidget(Static):
+    """Collapsible observed-grid deep-check: per-slot import/export and daily totals."""
+
+    DEFAULT_CSS = "ObservedGridCheckWidget { height: auto; }"
+
+    def __init__(self, og: ObservedGridCheckResult) -> None:
+        """Initialise with the pre-computed observed grid check result.
+
+        Args:
+            og: Result of check_observed_grid() for one coordinator.
+        """
+        super().__init__()
+        self._og = og
+
+    def compose(self) -> ComposeResult:
+        """Render Slots sub-Collapsible and import/export totals for yesterday/today."""
+        og = self._og
+
+        if og.skipped:
+            yield Static(f"  ⚠  observed_grid_check   SKIP   {og.skip_reason}")
+            return
+
+        color = "green" if og.overall_ok else "red"
+        mark = "✓" if og.overall_ok else "✗"
+        status = "PASS" if og.overall_ok else "FAIL"
+        title = (
+            f"[{color}]{mark}[/{color}]  observed_grid_check   [{color}]{status}[/{color}]"
+            f"   {og.slot_count} slots"
+            f"   yest_imp={og.total_yesterday_imported_kwh:.3f}/exp={og.total_yesterday_exported_kwh:.3f}kWh"
+            f"   today_imp={og.total_today_imported_kwh:.3f}/exp={og.total_today_exported_kwh:.3f}kWh"
+        )
+
+        with Collapsible(title=title, collapsed=True):
+            yest_imp_ok = "yesterday_imported_total_mismatch" not in og.mismatches
+            yest_exp_ok = "yesterday_exported_total_mismatch" not in og.mismatches
+            today_imp_ok = "today_imported_total_mismatch" not in og.mismatches
+            today_exp_ok = "today_exported_total_mismatch" not in og.mismatches
+            yi_s = "green" if yest_imp_ok else "red"
+            ye_s = "green" if yest_exp_ok else "red"
+            ti_s = "green" if today_imp_ok else "red"
+            te_s = "green" if today_exp_ok else "red"
+            yield Static(
+                f"  yesterday imp: computed [{yi_s}]{og.computed_yesterday_imported_kwh:.4f}[/{yi_s}]kWh"
+                f"  declared {og.total_yesterday_imported_kwh:.4f}kWh\n"
+                f"  yesterday exp: computed [{ye_s}]{og.computed_yesterday_exported_kwh:.4f}[/{ye_s}]kWh"
+                f"  declared {og.total_yesterday_exported_kwh:.4f}kWh\n"
+                f"  today imp:     computed [{ti_s}]{og.computed_today_imported_kwh:.4f}[/{ti_s}]kWh"
+                f"  declared {og.total_today_imported_kwh:.4f}kWh\n"
+                f"  today exp:     computed [{te_s}]{og.computed_today_exported_kwh:.4f}[/{te_s}]kWh"
+                f"  declared {og.total_today_exported_kwh:.4f}kWh",
+                markup=True,
+            )
+            yield Static(
+                f"  grid_power_history: {og.grid_history_sample_count} sample(s)"
+                + (
+                    f"  first={og.grid_history_first_sample}  last={og.grid_history_last_sample}"
+                    if og.grid_history_sample_count else ""
+                )
+            )
+            with Collapsible(title="Slots", collapsed=False):
+                yield ObservedGridSlotsTable(og)
 
 
 class ForecastAccuracySlotsTable(Static):
@@ -2577,23 +2883,24 @@ class MonthlyBillCheckResult:
 def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
     """Validate monthly bill totals, per-slot cost formulas, pricing, and energy alignment.
 
-    Cross-checks (every BillSlot is verified, including zero-power slots):
+    Cross-checks (every BillSlot is verified, including zero-flow slots):
       * carry + yday_to_now == total_month_eur
       * sum(slot.net_cost_eur) == yday_to_now_eur
       * per-slot net_cost_eur == imported_kwh*buy − exported_kwh*sell
         (no floor on sell — negative prices honoured)
-      * per-slot imported_kwh / exported_kwh reconstructed from the upstream
-        ``inputs.grid_power_history`` samples within [slot.start, slot.end).
+      * per-slot imported_kwh / exported_kwh match the corresponding
+        ``pipeline.observed_grid`` slot, scaled by the partial-overlap
+        fraction when the window clips the slot edges.
       * each bill slot's buy/sell prices match the overlapping
         ``pipeline.pricing`` slot, verifying PriceSeries was applied faithfully.
 
     Builds a dense ``slot_rows`` list — one entry per BillSlot — so widgets can
     render every slot (including those with zero imported/exported) without
-    hiding gaps in the GridPowerHistory.
+    hiding gaps in the upstream series.
 
     Args:
-        snap: Coordinator snapshot containing pipeline.monthly_bill, pipeline.pricing,
-            and inputs.grid_power_history.
+        snap: Coordinator snapshot containing pipeline.monthly_bill,
+            pipeline.pricing, pipeline.observed_grid, and inputs.grid_power_history.
 
     Returns:
         MonthlyBillCheckResult with aggregation cross-checks, dense per-slot
@@ -2656,6 +2963,14 @@ def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
         result.grid_history_first_sample = parsed_samples[0][0].isoformat()
         result.grid_history_last_sample = parsed_samples[-1][0].isoformat()
 
+    observed_grid = snap.pipeline.get("observed_grid") or {}
+    grid_slot_by_start: dict[datetime, dict] = {}
+    for gs in observed_grid.get("slots") or []:
+        try:
+            grid_slot_by_start[datetime.fromisoformat(gs.get("start", ""))] = gs
+        except (ValueError, TypeError):
+            continue
+
     slot_formula_errors = 0
     pricing_mismatches = 0
     energy_mismatches = 0
@@ -2685,24 +3000,33 @@ def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
                 break
         pricing_ok = True
         if match_pricing is not None:
-            _, exp_buy, exp_sell = match_pricing
+            ps_start, exp_buy, exp_sell = match_pricing
             if abs(exp_buy - buy) > 1e-4 or abs(exp_sell - sell) > 1e-4:
                 pricing_mismatches += 1
                 pricing_ok = False
 
-        samples_in_slot = [
-            kw for (ts, kw) in parsed_samples if bs_start <= ts < bs_end
-        ]
-        sample_count = len(samples_in_slot)
-        duration_h = (bs_end - bs_start).total_seconds() / 3600.0
-        if samples_in_slot:
-            avg_kw = sum(samples_in_slot) / sample_count
-            net_kwh = avg_kw * duration_h
-            exp_imp = max(0.0, net_kwh)
-            exp_exp = max(0.0, -net_kwh)
+        # Cross-check against the upstream ObservedGridSeries slot. Bill
+        # slots may be partial overlaps of a price slot (month-rollover
+        # bridges, live window's leading edge), so pro-rate by the overlap
+        # fraction matching the bill module's own calculation.
+        gs = None
+        if match_pricing is not None:
+            gs = grid_slot_by_start.get(match_pricing[0])
+        if gs is not None:
+            try:
+                ps_end_dt = datetime.fromisoformat(gs.get("end", ""))
+                ps_start_dt = datetime.fromisoformat(gs.get("start", ""))
+                full_secs = (ps_end_dt - ps_start_dt).total_seconds()
+            except (ValueError, TypeError):
+                full_secs = 0
+            win_secs = (bs_end - bs_start).total_seconds()
+            overlap_fraction = (win_secs / full_secs) if full_secs > 0 else 0.0
+            exp_imp = gs.get("imported_kwh", 0.0) * overlap_fraction
+            exp_exp = gs.get("exported_kwh", 0.0) * overlap_fraction
         else:
             exp_imp = 0.0
             exp_exp = 0.0
+        sample_count = sum(1 for ts, _ in parsed_samples if bs_start <= ts < bs_end)
         energy_ok = abs(exp_imp - imp) <= 1e-3 and abs(exp_exp - exp) <= 1e-3
         if not energy_ok:
             energy_mismatches += 1
@@ -2874,8 +3198,9 @@ class MonthlyBillCheckWidget(Static):
 # Categories handled by deep-check widgets; excluded from the plain validator display.
 _DEEP_CATS: frozenset[str] = frozenset({
     "forecast", "pricing", "calculation", "schedule", "battery",
-    "observed_generation", "forecast_accuracy", "charging_profile", "base_load",
-    "battery_runtime", "household_consumption", "profitability", "forecast_quality",
+    "observed_generation", "observed_grid", "forecast_accuracy",
+    "charging_profile", "base_load", "battery_runtime",
+    "household_consumption", "profitability", "forecast_quality",
     "monthly_bill",
 })
 
@@ -3310,6 +3635,8 @@ class IntegrationCheckApp(App):
     _BatteryDataTable DataTable { height: 12; }
     ObservedGenerationCheckWidget { height: auto; }
     ObservedGenerationSlotsTable DataTable { height: 18; }
+    ObservedGridCheckWidget { height: auto; }
+    ObservedGridSlotsTable DataTable { height: 22; }
     ForecastAccuracyCheckWidget { height: auto; }
     ForecastAccuracySlotsTable DataTable { height: 18; }
     ChargingProfileCheckWidget { height: auto; }
@@ -3333,6 +3660,7 @@ class IntegrationCheckApp(App):
         schedule_results: dict[str, ScheduleCheckResult],
         battery_results: dict[str, BatteryCheckResult],
         observed_gen_results: dict[str, ObservedGenerationCheckResult],
+        observed_grid_results: dict[str, ObservedGridCheckResult],
         forecast_acc_results: dict[str, ForecastAccuracyCheckResult],
         charging_profile_results: dict[str, ChargingProfileCheckResult],
         base_load_results: dict[str, BaseLoadCheckResult],
@@ -3352,6 +3680,7 @@ class IntegrationCheckApp(App):
             schedule_results: Per-entry schedule deep-check results.
             battery_results: Per-entry battery state/status deep-check results.
             observed_gen_results: Per-entry observed generation deep-check results.
+            observed_grid_results: Per-entry observed grid import/export deep-check results.
             forecast_acc_results: Per-entry forecast accuracy deep-check results.
             charging_profile_results: Per-entry charging profile deep-check results.
             base_load_results: Per-entry base load profile deep-check results.
@@ -3369,6 +3698,7 @@ class IntegrationCheckApp(App):
         self._schedule_results = schedule_results
         self._battery_results = battery_results
         self._observed_gen_results = observed_gen_results
+        self._observed_grid_results = observed_grid_results
         self._forecast_acc_results = forecast_acc_results
         self._charging_profile_results = charging_profile_results
         self._base_load_results = base_load_results
@@ -3392,6 +3722,7 @@ class IntegrationCheckApp(App):
             + list(self._schedule_results.values())
             + list(self._battery_results.values())
             + list(self._observed_gen_results.values())
+            + list(self._observed_grid_results.values())
             + list(self._forecast_acc_results.values())
             + list(self._charging_profile_results.values())
             + list(self._base_load_results.values())
@@ -3427,6 +3758,7 @@ class IntegrationCheckApp(App):
                 ("schedule",                ScheduleCheckWidget,                self._schedule_results),
                 ("battery",                 BatteryCheckWidget,                 self._battery_results),
                 ("observed_generation",     ObservedGenerationCheckWidget,      self._observed_gen_results),
+                ("observed_grid",           ObservedGridCheckWidget,            self._observed_grid_results),
                 ("forecast_accuracy",       ForecastAccuracyCheckWidget,        self._forecast_acc_results),
                 ("charging_profile",        ChargingProfileCheckWidget,         self._charging_profile_results),
                 ("base_load",               BaseLoadCheckWidget,                self._base_load_results),
@@ -3623,6 +3955,7 @@ def main(argv: list[str] | None = None) -> int:
     schedule_results               = {s.entry_id: check_schedule(s)                  for s in snapshots}
     battery_results                = {s.entry_id: check_battery(s)                   for s in snapshots}
     observed_gen_results           = {s.entry_id: check_observed_generation(s)       for s in snapshots}
+    observed_grid_results          = {s.entry_id: check_observed_grid(s)             for s in snapshots}
     forecast_acc_results           = {s.entry_id: check_forecast_accuracy(s)         for s in snapshots}
     charging_profile_results       = {s.entry_id: check_charging_profile(s)          for s in snapshots}
     base_load_results              = {s.entry_id: check_base_load(s)                 for s in snapshots}
@@ -3635,7 +3968,8 @@ def main(argv: list[str] | None = None) -> int:
         report,
         forecast_results, pricing_results, calculation_results,
         schedule_results, battery_results,
-        observed_gen_results, forecast_acc_results, charging_profile_results,
+        observed_gen_results, observed_grid_results,
+        forecast_acc_results, charging_profile_results,
         base_load_results, battery_runtime_results,
         household_consumption_results, profitability_results,
         forecast_quality_results,

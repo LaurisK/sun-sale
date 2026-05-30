@@ -38,6 +38,8 @@ from ..contract.const import (
     CONF_INVERTER_ENTITY_CHARGE_CONTROL,
     CONF_INVERTER_ENTITY_GRID_POWER,
     CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY,
+    CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY,
+    CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY,
     CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
     CONF_INVERTER_ENTITY_SOLAR_ENERGY,
     CONF_INVERTER_PLATFORM,
@@ -65,6 +67,8 @@ from ..contract.const import (
     CONF_TARIFF_TAX_RATE,
     CAPACITY_OBS_MIN_SOC_DELTA,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
+    GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS,
+    GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS,
     GRID_POWER_HISTORY_RETENTION_DAYS,
     HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS,
     DEFAULT_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH,
@@ -87,6 +91,8 @@ from ..contract.const import (
     STORAGE_KEY_CAPACITY,
     STORAGE_KEY_FORECAST_QUALITY,
     STORAGE_KEY_GENERATION,
+    STORAGE_KEY_GRID_EXPORT_TOTAL,
+    STORAGE_KEY_GRID_IMPORT_TOTAL,
     STORAGE_KEY_GRID_POWER,
     STORAGE_KEY_HOUSEHOLD_LOAD,
     STORAGE_KEY_MODE_HISTORY,
@@ -119,6 +125,10 @@ from ..contract.models import (
     GenerationHistory,
     GenerationReading,
     GenerationSeries,
+    GridExportTodayHistory,
+    GridExportTodayReading,
+    GridImportTodayHistory,
+    GridImportTodayReading,
     GridPowerHistory,
     GridPowerReading,
     InverterModeChange,
@@ -134,6 +144,7 @@ from ..contract.models import (
     HouseholdLoadSample,
     NordpoolData,
     ObservedGenerationSeries,
+    ObservedGridSeries,
     PriceEntry,
     PriceHistory,
     PriceSeries,
@@ -159,6 +170,7 @@ from ..pipeline.nodes import (
     LockoutNode,
     MonthlyBillNode,
     ObservedGenerationNode,
+    ObservedGridNode,
     ScheduleNode,
     PricingNode,
     ProfitabilityNode,
@@ -172,6 +184,11 @@ from ..inbound.forecast import SolarTranslator
 from ..inbound.generation import GenerationTranslator, PvPowerTranslator
 from ..inbound.household_consumption import HouseholdConsumptionTranslator
 from ..inbound.household_load import HouseholdLoadTranslator
+from ..inbound.grid import (
+    GridExportTotalTranslator,
+    GridImportTotalTranslator,
+    GridObserver,
+)
 from ..inbound.inverter_mode import InverterModeTranslator
 from ..inbound.pricing import NordpoolTranslator
 
@@ -391,6 +408,38 @@ def _deserialize_grid_power(d: dict) -> list[GridPowerReading]:
     ]
 
 
+def _serialize_grid_import_total(samples: list[GridImportTodayReading]) -> dict:
+    """Serialise a list of today-total grid-import readings."""
+    return {"samples": [{"ts": s.timestamp.isoformat(), "kwh": s.today_total_kwh} for s in samples]}
+
+
+def _deserialize_grid_import_total(d: dict) -> list[GridImportTodayReading]:
+    """Deserialise a list of today-total grid-import readings."""
+    return [
+        GridImportTodayReading(
+            today_total_kwh=s["kwh"],
+            timestamp=datetime.fromisoformat(s["ts"]),
+        )
+        for s in d.get("samples", [])
+    ]
+
+
+def _serialize_grid_export_total(samples: list[GridExportTodayReading]) -> dict:
+    """Serialise a list of today-total grid-export readings."""
+    return {"samples": [{"ts": s.timestamp.isoformat(), "kwh": s.today_total_kwh} for s in samples]}
+
+
+def _deserialize_grid_export_total(d: dict) -> list[GridExportTodayReading]:
+    """Deserialise a list of today-total grid-export readings."""
+    return [
+        GridExportTodayReading(
+            today_total_kwh=s["kwh"],
+            timestamp=datetime.fromisoformat(s["ts"]),
+        )
+        for s in d.get("samples", [])
+    ]
+
+
 def _serialize_mode_history(history: InverterModeHistory) -> dict:
     """Serialise the rolling inverter-mode-change history."""
     return {
@@ -566,6 +615,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._forecast_quality_store: PersistentStore[ForecastQualityStore] | None = None
         self._grid_power_store: PersistentStore[list[GridPowerReading]] | None = None
         self._grid_power_entity_id: str = ""
+        self._grid_import_total_store: PersistentStore[list[GridImportTodayReading]] | None = None
+        self._grid_export_total_store: PersistentStore[list[GridExportTodayReading]] | None = None
         self._monthly_bill_store: PersistentStore[MonthlyBillState] | None = None
         self._mode_history_store: PersistentStore[InverterModeHistory] | None = None
         self.automation_enabled: bool = False
@@ -626,12 +677,24 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 inverter_entity_ids.setdefault(
                     "grid_power", data.get(CONF_INVERTER_ENTITY_GRID_POWER, ""),
                 )
+                inverter_entity_ids.setdefault(
+                    "grid_import_energy_today",
+                    data.get(CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY, ""),
+                )
+                inverter_entity_ids.setdefault(
+                    "grid_export_energy_today",
+                    data.get(CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY, ""),
+                )
             else:
                 # Manual-mapping fallback: entity IDs stored directly in config entry data.
                 inverter_entity_ids = {
                     "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
                     "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
                     "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
+                    "grid_import_energy_today":
+                        data.get(CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY, ""),
+                    "grid_export_energy_today":
+                        data.get(CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY, ""),
                     "storage_control_readback":      data.get(CONF_INVERTER_SOLIS_STORAGE_CONTROL_READBACK, DEFAULT_SOLIS_STORAGE_CONTROL_READBACK),
                     "battery_max_charge_current":    data.get(CONF_INVERTER_SOLIS_BATTERY_MAX_CHARGE_CURRENT, DEFAULT_SOLIS_BATTERY_MAX_CHARGE_CURRENT),
                     "battery_max_discharge_current": data.get(CONF_INVERTER_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT, DEFAULT_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT),
@@ -651,9 +714,15 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
                 "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
                 "charge_control": data[CONF_INVERTER_ENTITY_CHARGE_CONTROL],
+                "grid_import_energy_today":
+                    data.get(CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY, ""),
+                "grid_export_energy_today":
+                    data.get(CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY, ""),
             }
         inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
         self._grid_power_entity_id = inverter_entity_ids.get("grid_power", "")
+        grid_import_total_entity_id = inverter_entity_ids.get("grid_import_energy_today", "")
+        grid_export_total_entity_id = inverter_entity_ids.get("grid_export_energy_today", "")
 
         local_tz = self._resolve_local_tz()
         self._sun_sale_config = SunSaleConfig(
@@ -673,6 +742,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 inverter=inverter,
                 household_load_entity=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
             ),
+            GridObserver(entity_id=self._grid_power_entity_id),
+            GridImportTotalTranslator(entity_id=grid_import_total_entity_id),
+            GridExportTotalTranslator(entity_id=grid_export_total_entity_id),
             GenerationTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
             ),
@@ -695,6 +767,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             BaseLoadProfileNode(),
             GenerationNode(),
             ObservedGenerationNode(),
+            ObservedGridNode(),
             DegradationNode(),
             MonthlyBillNode(),
             ChargingProfileNode(),
@@ -776,6 +849,20 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         )
         if len(merged_samples) != len(existing_samples):
             await self._grid_power_store.save(merged_samples)
+
+        self._grid_import_total_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_IMPORT_TOTAL,
+            serialize=_serialize_grid_import_total,
+            deserialize=_deserialize_grid_import_total,
+        )
+        await self._grid_import_total_store.load()
+
+        self._grid_export_total_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_EXPORT_TOTAL,
+            serialize=_serialize_grid_export_total,
+            deserialize=_deserialize_grid_export_total,
+        )
+        await self._grid_export_total_store.load()
 
         self._monthly_bill_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_MONTHLY_BILL,
@@ -865,19 +952,42 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 samples=tuple((self._pv_power_store.value or []) if self._pv_power_store else []),
             )
 
-            current_reading_for_grid: BatteryReading | None = primary.get(BatteryReading)
-            if current_reading_for_grid is not None and self._grid_power_store is not None:
-                grid_sample = GridPowerReading(
-                    power_kw=current_reading_for_grid.grid_power_kw,
-                    timestamp=now,
-                )
+            current_grid_reading: GridPowerReading | None = primary.get(GridPowerReading)
+            if current_grid_reading is not None and self._grid_power_store is not None:
                 cutoff = now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
                 await self._grid_power_store.append_and_trim(
-                    grid_sample, cutoff, lambda s: s.timestamp,
+                    current_grid_reading, cutoff, lambda s: s.timestamp,
                 )
             primary[GridPowerHistory] = GridPowerHistory(
                 samples=tuple((self._grid_power_store.value or []) if self._grid_power_store else []),
             )
+
+            current_grid_import_total: GridImportTodayReading | None = primary.get(GridImportTodayReading)
+            if current_grid_import_total is not None and self._grid_import_total_store is not None:
+                cutoff = now - timedelta(days=GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS)
+                await self._grid_import_total_store.append_and_trim(
+                    current_grid_import_total, cutoff, lambda s: s.timestamp,
+                )
+            primary[GridImportTodayHistory] = GridImportTodayHistory(
+                samples=tuple(
+                    (self._grid_import_total_store.value or [])
+                    if self._grid_import_total_store else []
+                ),
+            )
+
+            current_grid_export_total: GridExportTodayReading | None = primary.get(GridExportTodayReading)
+            if current_grid_export_total is not None and self._grid_export_total_store is not None:
+                cutoff = now - timedelta(days=GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS)
+                await self._grid_export_total_store.append_and_trim(
+                    current_grid_export_total, cutoff, lambda s: s.timestamp,
+                )
+            primary[GridExportTodayHistory] = GridExportTodayHistory(
+                samples=tuple(
+                    (self._grid_export_total_store.value or [])
+                    if self._grid_export_total_store else []
+                ),
+            )
+
             primary[MonthlyBillState] = (
                 self._monthly_bill_store.value if self._monthly_bill_store else None
             )
@@ -1009,6 +1119,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             coordinator.data.
         """
         reading: BatteryReading | None = primary.get(BatteryReading)
+        grid_reading: GridPowerReading | None = primary.get(GridPowerReading)
         nordpool: NordpoolData | None = primary.get(NordpoolData)
         deg: DegradationCost | None = secondary.get(DegradationCost)
         consumption: HouseholdConsumptionReading | None = primary.get(
@@ -1020,6 +1131,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "pricing": secondary.get(PriceSeries),
             "forecast": secondary.get(GenerationSeries),
             "observed_generation": secondary.get(ObservedGenerationSeries),
+            "observed_grid": secondary.get(ObservedGridSeries),
             "forecast_error": _acc.error_series if _acc else None,
             "calculation": secondary.get(CalculationResult),
             "schedule": secondary.get(Schedule),
@@ -1029,7 +1141,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "degradation_cost": deg.value_kwh if deg else 0.0,
             "estimated_capacity": self._capacity_estimator.estimated_capacity_kwh,
             "prices": nordpool.entries if nordpool else [],
-            "grid_power_kw": reading.grid_power_kw if reading else 0.0,
+            "grid_power_kw": grid_reading.power_kw if grid_reading else 0.0,
             "battery_power_kw": reading.power_kw if reading else 0.0,
             "household_load_kw": reading.household_load_kw if reading else 0.0,
             "base_load_profile": secondary.get(BaseLoadProfile),

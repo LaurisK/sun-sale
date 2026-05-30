@@ -23,6 +23,10 @@ _SENSOR_SUFFIXES: dict[str, str] = {
     "battery_soc":                "solis_modbus_inverter_battery_soc",
     "battery_power":              "solis_modbus_inverter_battery_power",
     "grid_power":                 "solis_modbus_inverter_ac_grid_port_power",
+    # Daily-resetting energy counters used as authoritative totals for the
+    # ObservedGridSeries end-of-day correction (see inbound/grid.py).
+    "grid_import_energy_today":   "solis_modbus_inverter_energy_imported_today",
+    "grid_export_energy_today":   "solis_modbus_inverter_energy_exported_today",
     # Storage Control word readback (register 43110).
     "storage_control_readback":   "solis_modbus_inverter_storage_control_switch_value",
     # Battery max charge / discharge currents (per-slot; configured via numbers).

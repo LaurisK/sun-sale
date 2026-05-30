@@ -9,6 +9,7 @@ from .. import monthly_bill as monthly_bill_module
 from .. import profitability as profitability_module
 from ...inbound import forecast as forecast_module
 from ...inbound import generation as generation_module
+from ...inbound import grid as grid_module
 from ..dag_engine import DagNode, NodeContext
 from ...contract.events import ControlEvent
 from ...contract.models import (
@@ -19,10 +20,13 @@ from ...contract.models import (
     DegradationCost,
     GenerationHistory,
     GenerationSeries,
+    GridExportTodayHistory,
+    GridImportTodayHistory,
     GridPowerHistory,
     MonthlyBillResult,
     MonthlyBillState,
     ObservedGenerationSeries,
+    ObservedGridSeries,
     PriceHistory,
     PriceSeries,
     ProfitabilityScore,
@@ -121,26 +125,62 @@ class BatteryRuntimeNode(DagNode):
         return estimate, []
 
 
+class ObservedGridNode(DagNode):
+    """Average signed grid-power samples → per-slot ObservedGridSeries.
+
+    Splits each sample into its positive (import) and negative (export)
+    components before averaging so gross flows are preserved even when the
+    signed mean is near zero. Today's slot sums are scaled to the inverter's
+    daily-resetting import/export counters (when present) — same end-of-day
+    correction pattern as ObservedGenerationSeries.
+    Tier 2 because it depends on PriceSeries (T1 secondary) for the grid.
+    """
+
+    tier = 2
+    output_type = ObservedGridSeries
+    consumes = [
+        GridPowerHistory,
+        GridImportTodayHistory,
+        GridExportTodayHistory,
+        PriceSeries,
+    ]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[ObservedGridSeries, list[ControlEvent]]:
+        """Build per-slot ObservedGridSeries with end-of-day counter correction."""
+        price_series = ctx.require(PriceSeries)
+        series = grid_module.build_observed_grid_series(
+            grid_power_history=ctx.require(GridPowerHistory),
+            import_total_history=ctx.require(GridImportTodayHistory),
+            export_total_history=ctx.require(GridExportTodayHistory),
+            price_slots=price_series.slots,
+            now=ctx.now,
+            local_tz=ctx.config.local_tz,
+        )
+        return series, []
+
+
 class MonthlyBillNode(DagNode):
     """Accumulate per-slot electricity bill from yday 00:00 to now → MonthlyBillResult.
 
-    Uses GridPowerHistory (instantaneous kW samples) and PriceSeries (buy/sell prices)
-    to compute the net cost per slot.  A carry persists the bill from month_start to
-    yday_start; it advances at day rollover and resets at month rollover.
+    Consumes ObservedGridSeries (per-slot gross import/export kWh) and PriceSeries
+    (buy/sell prices) to compute net cost per slot. A carry persists the bill from
+    month_start to yday_start; it advances at day rollover and resets at month rollover.
     MonthlyBillState comes from primary (loaded by coordinator) and is NOT listed in
     consumes to match the ForecastQualityStore pattern for optional persistent state.
     """
 
     tier = 2
     output_type = MonthlyBillResult
-    consumes = [PriceSeries, GridPowerHistory]
+    consumes = [PriceSeries, ObservedGridSeries]
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[MonthlyBillResult, list[ControlEvent]]:
         """Compute monthly electricity bill: carry + per-slot yday-to-now costs."""
         result = monthly_bill_module.build_monthly_bill_result(
-            grid_history=ctx.require(GridPowerHistory),
+            grid_series=ctx.require(ObservedGridSeries),
             price_series=ctx.require(PriceSeries),
             stored_state=ctx.get(MonthlyBillState),
             local_tz=ctx.config.local_tz,

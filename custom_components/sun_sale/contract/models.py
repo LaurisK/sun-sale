@@ -687,6 +687,79 @@ class GridPowerHistory:
 
 
 @dataclass(frozen=True)
+class GridImportTodayReading:
+    """Primary data: one snapshot of the inverter's today-total imported-kWh counter.
+
+    Cumulative kWh imported from the grid since local midnight; resets at
+    local midnight. Used as the authoritative daily total for end-of-day
+    correction of power-derived import slots.
+    """
+    today_total_kwh: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class GridImportTodayHistory:
+    """Primary data: rolling samples of the today-total imported-kWh counter."""
+    samples: tuple[GridImportTodayReading, ...]   # sorted by timestamp ascending
+
+
+@dataclass(frozen=True)
+class GridExportTodayReading:
+    """Primary data: one snapshot of the inverter's today-total exported-kWh counter.
+
+    Cumulative kWh exported to the grid since local midnight; resets at
+    local midnight. Used as the authoritative daily total for end-of-day
+    correction of power-derived export slots.
+    """
+    today_total_kwh: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class GridExportTodayHistory:
+    """Primary data: rolling samples of the today-total exported-kWh counter."""
+    samples: tuple[GridExportTodayReading, ...]   # sorted by timestamp ascending
+
+
+@dataclass(frozen=True)
+class ObservedGridSlot:
+    """Observed (measured) grid flow for one price-grid-aligned time slot.
+
+    `imported_kwh` and `exported_kwh` are gross flows: positive grid-power
+    samples accumulate into `imported_kwh`, negative samples into
+    `exported_kwh`. Both are non-negative; a slot that imported 30 min and
+    exported 30 min reports non-zero values on both sides.
+    """
+    start: datetime
+    end: datetime
+    imported_kwh: float
+    exported_kwh: float
+    source: str           # "inverter"
+
+
+@dataclass(frozen=True)
+class ObservedGridSeries:
+    """Per-slot observed grid import/export aligned to PriceSeries resolution.
+
+    Covers two LOCAL days back through now (day-before-yesterday 00:00 →
+    now). The extra day beyond "yesterday" is required by `MonthlyBillNode`
+    so its day-rollover bake-in window stays inside the series. Today's
+    slots are scaled at end-of-day so their sums match the inverter's
+    today-total import/export counters (when present). Yesterday and the
+    older day are left unscaled; `total_yesterday_*` and `total_today_*`
+    aggregate those two days specifically — older slots are present in
+    `slots` but not summed.
+    """
+    slots: tuple[ObservedGridSlot, ...]
+    computed_at: datetime
+    total_yesterday_imported_kwh: float = 0.0
+    total_yesterday_exported_kwh: float = 0.0
+    total_today_imported_kwh: float = 0.0
+    total_today_exported_kwh: float = 0.0
+
+
+@dataclass(frozen=True)
 class MonthlyBillState:
     """Persistent accumulator state for the monthly electricity bill.
 

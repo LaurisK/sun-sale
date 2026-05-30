@@ -60,6 +60,8 @@ CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY = (
 )
 CONF_INVERTER_ENTITY_SOLAR_ENERGY = "inverter_entity_solar_energy"
 CONF_INVERTER_ENTITY_PV_POWER = "inverter_entity_pv_power"
+CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY = "inverter_entity_grid_import_energy"
+CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY = "inverter_entity_grid_export_energy"
 
 # Persistent storage
 STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"
@@ -70,6 +72,8 @@ STORAGE_KEY_HOUSEHOLD_LOAD = f"{DOMAIN}_household_load"
 STORAGE_KEY_PRICE_HISTORY = f"{DOMAIN}_price_history"
 STORAGE_KEY_FORECAST_QUALITY = f"{DOMAIN}_forecast_quality"
 STORAGE_KEY_GRID_POWER = f"{DOMAIN}_grid_power"
+STORAGE_KEY_GRID_IMPORT_TOTAL = f"{DOMAIN}_grid_import_total"
+STORAGE_KEY_GRID_EXPORT_TOTAL = f"{DOMAIN}_grid_export_total"
 STORAGE_KEY_MONTHLY_BILL = f"{DOMAIN}_monthly_bill"
 STORAGE_KEY_MODE_HISTORY = f"{DOMAIN}_mode_history"
 STORAGE_VERSION = 1
@@ -83,6 +87,12 @@ PV_POWER_HISTORY_RETENTION_DAYS = 2
 
 # Rolling grid-power-sample retention (days). Covers yesterday + today for billing.
 GRID_POWER_HISTORY_RETENTION_DAYS = 2
+
+# Rolling import/export today-total counter retention (days). Same window as
+# grid power so end-of-day correction always has yesterday's final value
+# available alongside today's samples.
+GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS = 2
+GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS = 2
 
 # Rolling household-load retention (days). Sized at ~1.5× the baseload
 # profile window (30d) so a few stale samples at the tail don't strand
