@@ -1,21 +1,41 @@
-"""Tests for Solis-specific inverter dispatch in inverter.py."""
+"""Tests for the StorageMode state-machine controller in outbound/inverter.py."""
 from __future__ import annotations
 
-import pytest
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from custom_components.sun_sale.contract.models import (
+    BatteryConfig,
+    StorageMode,
+)
 from custom_components.sun_sale.outbound.inverter import (
     InverterController,
     InverterPlatform,
     normalize_power_to_kw,
 )
-from custom_components.sun_sale.contract.models import BatteryConfig
+from custom_components.sun_sale.pipeline.storage_mode_specs import build_specs
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+SOLIS_ENTITY_IDS = {
+    "battery_soc":                "sensor.solis_battery_soc",
+    "battery_power":              "sensor.solis_battery_power",
+    "grid_power":                 "sensor.solis_ac_grid_port_power",
+    "storage_control_readback":   "sensor.solis_storage_control_word",
+    "battery_max_charge_current":    "number.solis_battery_max_charge_current",
+    "battery_max_discharge_current": "number.solis_battery_max_discharge_current",
+    "rc_setpoint":                "number.solis_rc_active_power",
+    "backflow_power":             "number.solis_backflow_power",
+    "self_use_switch":            "switch.solis_self_use_mode",
+    "tou_mode_switch":            "switch.solis_time_of_use_mode",
+    "allow_grid_charge_switch":   "switch.solis_allow_grid_to_charge_the_battery",
+    "feed_in_priority_switch":    "switch.solis_feed_in_priority_mode",
+}
+
 
 def make_battery_config(
     nominal_voltage_v: float = 48.0,
@@ -35,284 +55,258 @@ def make_battery_config(
     )
 
 
-SOLIS_ENTITY_IDS = {
-    "battery_soc": "sensor.solis_battery_soc",
-    "battery_power": "sensor.solis_battery_power",
-    "grid_power": "sensor.solis_ac_grid_port_power",
-    "solis_charge_current": "number.solis_time_charging_charge_current",
-    "solis_discharge_current": "number.solis_time_charging_discharge_current",
-    "solis_charge_start_time_1": "time.solis_time_charging_charge_start_slot_1",
-    "solis_charge_end_time_1": "time.solis_time_charging_charge_end_slot_1",
-    "solis_discharge_start_time_1": "time.solis_time_charging_discharge_start_slot_1",
-    "solis_discharge_end_time_1": "time.solis_time_charging_discharge_end_slot_1",
-    "solis_tou_mode_switch": "switch.solis_time_of_use_mode",
-    "solis_allow_grid_charge_switch": "switch.solis_allow_grid_to_charge_the_battery",
-    "solis_self_use_mode_switch": "switch.solis_self_use_mode",
-}
+class _State:
+    """Minimal HA state stub with .state and .attributes."""
+
+    def __init__(self, value: str, unit: str | None = None) -> None:
+        self.state = value
+        self.attributes = {"unit_of_measurement": unit} if unit is not None else {}
 
 
-def make_controller(battery_config: BatteryConfig | None = None) -> tuple[InverterController, MagicMock]:
-    hass = MagicMock()
-    hass.services.async_call = AsyncMock()
-    if battery_config is None:
-        battery_config = make_battery_config()
-    return InverterController(hass, InverterPlatform.SOLIS, SOLIS_ENTITY_IDS, battery_config), hass
+class _Hass:
+    """Hass stub allowing per-entity state lookup + AsyncMock service tracking."""
+
+    def __init__(self, state_map: dict[str, _State] | None = None) -> None:
+        self._states = state_map or {}
+        self.services = MagicMock()
+        self.services.async_call = AsyncMock()
+        self.states = MagicMock()
+        self.states.get = self._get
+
+    def _get(self, entity_id: str):
+        return self._states.get(entity_id)
+
+    def set_state(self, entity_id: str, value: str, unit: str | None = None) -> None:
+        self._states[entity_id] = _State(value, unit)
 
 
-def _calls_for(hass: MagicMock):
-    """Return all recorded async_call invocations as (domain, service, data) tuples."""
-    return [
-        (c.args[0], c.args[1], c.args[2])
-        for c in hass.services.async_call.call_args_list
-    ]
-
-
-def _entity_value(calls, entity_id: str):
-    """Return the value from the first number.set_value or time.set_value call to entity_id."""
-    for domain, svc, data in calls:
-        if svc == "set_value" and data.get("entity_id") == entity_id:
-            return data.get("value", data.get("time"))
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Charge tests
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_charge_issues_correct_service_calls():
-    controller, hass = make_controller()
-
-    fixed_now = datetime(2026, 4, 26, 10, 17, 0, tzinfo=timezone.utc)
-    with patch(
-        "custom_components.sun_sale.outbound.inverter.dt_util.now",
-        return_value=fixed_now,
-    ):
-        await controller.async_charge_from_grid(2.5)
-
-    calls = _calls_for(hass)
-    domains_svcs = [(d, s) for d, s, _ in calls]
-
-    # charge current written
-    assert ("number", "set_value") in domains_svcs
-    # time slots written
-    assert ("time", "set_value") in domains_svcs
-    # allow-grid-charge and TOU mode turned on
-    assert ("switch", "turn_on") in domains_svcs
-
-    # amps = 2500 / 48.0
-    expected_amps = 2500 / 48.0
-    actual_amps = _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_current"])
-    assert actual_amps is not None
-    assert abs(actual_amps - expected_amps) < 0.01
-
-    # 2 slot-time writes
-    for key in ("solis_charge_start_time_1", "solis_charge_end_time_1"):
-        assert _entity_value(calls, SOLIS_ENTITY_IDS[key]) is not None, f"missing write to {key}"
-
-    # start time: hour=10, minute rounded down to 15
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_start_time_1"]) == "10:15:00"
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_end_time_1"]) == "11:00:00"
-
-    # allow-grid-charge switched on
-    turn_on_entities = [d["entity_id"] for dom, svc, d in calls if svc == "turn_on"]
-    assert SOLIS_ENTITY_IDS["solis_allow_grid_charge_switch"] in turn_on_entities
-    assert SOLIS_ENTITY_IDS["solis_tou_mode_switch"] in turn_on_entities
-
-    # total calls: 1 charge_current + 2 time slots + 1 allow_grid + 1 tou = 5
-    assert len(calls) == 5
-
-
-@pytest.mark.asyncio
-async def test_charge_does_not_write_discharge_entities():
-    controller, hass = make_controller()
-
-    fixed_now = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
-        await controller.async_charge_from_grid(1.0)
-
-    calls = _calls_for(hass)
-    written_entities = {d["entity_id"] for _, _, d in calls}
-    assert SOLIS_ENTITY_IDS["solis_discharge_current"] not in written_entities
-
-
-# ---------------------------------------------------------------------------
-# Discharge tests
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_discharge_issues_correct_service_calls():
-    controller, hass = make_controller()
-
-    fixed_now = datetime(2026, 4, 26, 14, 33, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
-        await controller.async_discharge_to_grid(2.5)
-
-    calls = _calls_for(hass)
-
-    expected_amps = 2500 / 48.0
-    actual_amps = _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_current"])
-    assert actual_amps is not None
-    assert abs(actual_amps - expected_amps) < 0.01
-
-    # 2 discharge slot-time writes
-    for key in ("solis_discharge_start_time_1", "solis_discharge_end_time_1"):
-        assert _entity_value(calls, SOLIS_ENTITY_IDS[key]) is not None
-
-    # start: hour=14, minute rounded to 30
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_start_time_1"]) == "14:30:00"
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_end_time_1"]) == "15:00:00"
-
-    # TOU mode switched on
-    turn_on_entities = [d["entity_id"] for _, svc, d in calls if svc == "turn_on"]
-    assert SOLIS_ENTITY_IDS["solis_tou_mode_switch"] in turn_on_entities
-
-    # no allow-grid-charge for discharge
-    assert SOLIS_ENTITY_IDS["solis_allow_grid_charge_switch"] not in turn_on_entities
-
-    # total: 1 discharge_current + 2 time slots + 1 tou = 4
-    assert len(calls) == 4
-
-
-# ---------------------------------------------------------------------------
-# Idle tests
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_idle_issues_correct_service_calls():
-    controller, hass = make_controller()
-    await controller.async_idle()
-
-    calls = _calls_for(hass)
-
-    # TOU turned off
-    turn_off_entities = [d["entity_id"] for _, svc, d in calls if svc == "turn_off"]
-    assert SOLIS_ENTITY_IDS["solis_tou_mode_switch"] in turn_off_entities
-
-    # self-use turned on
-    turn_on_entities = [d["entity_id"] for _, svc, d in calls if svc == "turn_on"]
-    assert SOLIS_ENTITY_IDS["solis_self_use_mode_switch"] in turn_on_entities
-
-    # both currents zeroed
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_current"]) == 0
-    assert _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_current"]) == 0
-
-    # total: 1 tou_off + 1 self_use_on + 2 zero currents = 4
-    assert len(calls) == 4
-
-
-# ---------------------------------------------------------------------------
-# Clamping tests
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_charge_power_above_max_is_clamped():
-    # max_charge = 3.0 kW at 48 V → max amps = 3000/48 = 62.5 A
-    cfg = make_battery_config(nominal_voltage_v=48.0, max_charge_kw=3.0)
-    controller, hass = make_controller(cfg)
-
-    fixed_now = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
-        await controller.async_charge_from_grid(10.0)  # 10 kW >> 3 kW cap
-
-    calls = _calls_for(hass)
-    actual_amps = _entity_value(calls, SOLIS_ENTITY_IDS["solis_charge_current"])
-    max_amps = 3000 / 48.0
-    assert actual_amps <= max_amps + 1e-9
-    assert abs(actual_amps - max_amps) < 0.01
-
-
-@pytest.mark.asyncio
-async def test_discharge_power_above_max_is_clamped():
-    cfg = make_battery_config(nominal_voltage_v=48.0, max_discharge_kw=2.0)
-    controller, hass = make_controller(cfg)
-
-    fixed_now = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
-        await controller.async_discharge_to_grid(8.0)
-
-    calls = _calls_for(hass)
-    actual_amps = _entity_value(calls, SOLIS_ENTITY_IDS["solis_discharge_current"])
-    max_amps = 2000 / 48.0
-    assert actual_amps <= max_amps + 1e-9
-    assert abs(actual_amps - max_amps) < 0.01
-
-
-# ---------------------------------------------------------------------------
-# Voltage scaling tests
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_different_voltages_produce_different_amps_for_same_kw():
-    cfg_lv = make_battery_config(nominal_voltage_v=48.0, max_charge_kw=20.0)
-    cfg_hv = make_battery_config(nominal_voltage_v=400.0, max_charge_kw=20.0)
-
-    ctrl_lv, hass_lv = make_controller(cfg_lv)
-    ctrl_hv, hass_hv = make_controller(cfg_hv)
-
-    fixed_now = datetime(2026, 4, 26, 10, 0, 0, tzinfo=timezone.utc)
-    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
-        await ctrl_lv.async_charge_from_grid(2.5)
-    with patch("custom_components.sun_sale.outbound.inverter.dt_util.now", return_value=fixed_now):
-        await ctrl_hv.async_charge_from_grid(2.5)
-
-    amps_lv = _entity_value(_calls_for(hass_lv), SOLIS_ENTITY_IDS["solis_charge_current"])
-    amps_hv = _entity_value(_calls_for(hass_hv), SOLIS_ENTITY_IDS["solis_charge_current"])
-
-    # 48 V bus → more amps than 400 V bus for same kW
-    assert abs(amps_lv - 2500 / 48.0) < 0.01
-    assert abs(amps_hv - 2500 / 400.0) < 0.01
-    assert amps_lv > amps_hv
-
-
-# ---------------------------------------------------------------------------
-# Non-Solis platforms are unaffected
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_huawei_dispatch_unchanged():
-    """Huawei Solar path must still write signed watts, not amps."""
-    hass = MagicMock()
-    hass.services.async_call = AsyncMock()
-    cfg = make_battery_config()
+def make_controller(
+    state_map: dict[str, _State] | None = None,
+    battery_config: BatteryConfig | None = None,
+    platform: InverterPlatform = InverterPlatform.SOLIS,
+    entity_ids: dict[str, str] | None = None,
+) -> tuple[InverterController, _Hass]:
+    hass = _Hass(state_map)
     controller = InverterController(
         hass,
-        InverterPlatform.HUAWEI_SOLAR,
-        {"charge_control": "number.huawei_charge_control"},
-        cfg,
+        platform,
+        entity_ids or SOLIS_ENTITY_IDS,
+        battery_config or make_battery_config(),
     )
-    await controller.async_charge_from_grid(3.0)
+    return controller, hass
 
-    calls = _calls_for(hass)
-    assert len(calls) == 1
-    domain, svc, data = calls[0]
-    assert domain == "number" and svc == "set_value"
-    assert abs(data["value"] - 3000.0) < 0.01  # watts, not amps
+
+def _calls(hass: _Hass) -> list[tuple[str, str, dict]]:
+    """Return service call args as (domain, service, data) tuples."""
+    return [(c.args[0], c.args[1], c.args[2]) for c in hass.services.async_call.call_args_list]
+
+
+def _switches_toggled(hass: _Hass) -> dict[str, str]:
+    """Return ``{entity_id: 'turn_on'|'turn_off'}`` for each switch call."""
+    result: dict[str, str] = {}
+    for dom, svc, data in _calls(hass):
+        if dom == "switch":
+            result[data["entity_id"]] = svc
+    return result
+
+
+def _numbers_written(hass: _Hass) -> dict[str, float]:
+    """Return ``{entity_id: value}`` for each number.set_value call."""
+    result: dict[str, float] = {}
+    for dom, svc, data in _calls(hass):
+        if dom == "number" and svc == "set_value":
+            result[data["entity_id"]] = data["value"]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# apply_mode — Solis register-level state machine
+# ---------------------------------------------------------------------------
+
+
+def _specs():
+    """Default spec table for the test fixtures."""
+    return build_specs(make_battery_config(), export_max_w=10_000, inverter_max_power_w=10_000)
 
 
 @pytest.mark.asyncio
-async def test_generic_dispatch_unchanged():
-    hass = MagicMock()
-    hass.services.async_call = AsyncMock()
-    cfg = make_battery_config()
-    controller = InverterController(
-        hass,
-        InverterPlatform.GENERIC,
-        {"charge_control": "number.generic_control"},
-        cfg,
+async def test_apply_mode_gulp_starts_from_self_use_1():
+    # Inverter currently at 43110=1 (SelfUse). Apply GULP (target 33 = SelfUse|GridCharge).
+    # Only bit 5 (allow_grid_charge) needs to flip on.
+    hass_state = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State("1"),
+    }
+    controller, hass = make_controller(state_map=hass_state)
+    await controller.apply_mode(StorageMode.GULP, _specs()[StorageMode.GULP])
+
+    toggled = _switches_toggled(hass)
+    assert toggled.get(SOLIS_ENTITY_IDS["allow_grid_charge_switch"]) == "turn_on"
+    # bits 0 (self_use), 1 (tou), 6 (feed_in) all already match (current=1, target=33)
+    assert SOLIS_ENTITY_IDS["self_use_switch"] not in toggled
+    assert SOLIS_ENTITY_IDS["tou_mode_switch"] not in toggled
+    assert SOLIS_ENTITY_IDS["feed_in_priority_switch"] not in toggled
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_dump_clears_self_use_and_sets_feed_in():
+    # Current 43110=1 (SelfUse). Apply DUMP (target 64 = FeedIn) — bits 0 off, bit 6 on.
+    hass_state = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State("1"),
+    }
+    controller, hass = make_controller(state_map=hass_state)
+    await controller.apply_mode(StorageMode.DUMP, _specs()[StorageMode.DUMP])
+
+    toggled = _switches_toggled(hass)
+    assert toggled.get(SOLIS_ENTITY_IDS["self_use_switch"]) == "turn_off"
+    assert toggled.get(SOLIS_ENTITY_IDS["feed_in_priority_switch"]) == "turn_on"
+    # bit 5 (grid charge) already off; bit 1 (TOU) already off
+    assert SOLIS_ENTITY_IDS["allow_grid_charge_switch"] not in toggled
+    assert SOLIS_ENTITY_IDS["tou_mode_switch"] not in toggled
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_idempotent_when_readback_matches_target():
+    # Inverter already in GULP state — all bits match and all numbers match target.
+    spec = _specs()[StorageMode.GULP]
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State(str(spec.reg_43110_value)),
+        SOLIS_ENTITY_IDS["battery_max_charge_current"]: _State(str(spec.charge_a)),
+        SOLIS_ENTITY_IDS["battery_max_discharge_current"]: _State(str(spec.discharge_a)),
+        SOLIS_ENTITY_IDS["backflow_power"]: _State(str(spec.export_limit_w)),
+        SOLIS_ENTITY_IDS["rc_setpoint"]: _State(str(spec.rc_setpoint_w)),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.apply_mode(StorageMode.GULP, spec)
+    # No service calls — everything already at the target value.
+    assert _calls(hass) == []
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_writes_numbers_only_when_outside_tolerance():
+    spec = _specs()[StorageMode.STORE]
+    # Readback says 43110 already at target. Currents differ; export limit matches.
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State(str(spec.reg_43110_value)),
+        SOLIS_ENTITY_IDS["battery_max_charge_current"]: _State("0"),       # differs from target
+        SOLIS_ENTITY_IDS["battery_max_discharge_current"]: _State(str(spec.discharge_a)),
+        SOLIS_ENTITY_IDS["backflow_power"]: _State(str(spec.export_limit_w)),
+        SOLIS_ENTITY_IDS["rc_setpoint"]: _State(str(spec.rc_setpoint_w)),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.apply_mode(StorageMode.STORE, spec)
+
+    writes = _numbers_written(hass)
+    # Only the charge current should be rewritten — the rest were within tolerance.
+    assert SOLIS_ENTITY_IDS["battery_max_charge_current"] in writes
+    assert SOLIS_ENTITY_IDS["battery_max_discharge_current"] not in writes
+    assert SOLIS_ENTITY_IDS["backflow_power"] not in writes
+    assert SOLIS_ENTITY_IDS["rc_setpoint"] not in writes
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_skips_export_limit_when_spec_is_none():
+    # AUTO leaves the hardware default in place → export_limit_w is None.
+    spec = _specs()[StorageMode.AUTO]
+    assert spec.export_limit_w is None
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State("1"),
+        SOLIS_ENTITY_IDS["backflow_power"]: _State("12345"),  # arbitrary
+        SOLIS_ENTITY_IDS["rc_setpoint"]: _State("0"),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.apply_mode(StorageMode.AUTO, spec)
+
+    writes = _numbers_written(hass)
+    assert SOLIS_ENTITY_IDS["backflow_power"] not in writes
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_no_op_on_non_solis_platforms():
+    controller, hass = make_controller(
+        platform=InverterPlatform.HUAWEI_SOLAR,
+        entity_ids={"battery_soc": "sensor.x"},
     )
-    await controller.async_discharge_to_grid(2.0)
+    await controller.apply_mode(StorageMode.GULP, _specs()[StorageMode.GULP])
+    assert _calls(hass) == []
 
-    calls = _calls_for(hass)
-    assert len(calls) == 1
-    domain, svc, data = calls[0]
-    assert domain == "number" and svc == "set_value"
-    assert abs(data["value"] - (-2.0)) < 0.01  # signed kW, negative = discharge
+
+@pytest.mark.asyncio
+async def test_apply_mode_skips_role_with_empty_entity_id():
+    # Remove the allow_grid_charge_switch role entirely.
+    entity_ids = {k: v for k, v in SOLIS_ENTITY_IDS.items() if k != "allow_grid_charge_switch"}
+    state_map = {
+        entity_ids["storage_control_readback"]: _State("1"),
+    }
+    controller, hass = make_controller(state_map=state_map, entity_ids=entity_ids)
+    # GULP needs bit 5 → on. With the switch missing, the call should be silently skipped.
+    await controller.apply_mode(StorageMode.GULP, _specs()[StorageMode.GULP])
+    toggled = _switches_toggled(hass)
+    assert "switch.solis_allow_grid_to_charge_the_battery" not in toggled
 
 
 # ---------------------------------------------------------------------------
-# Power-unit normalisation
+# Telemetry / readback helpers used by the InverterModeTranslator
 # ---------------------------------------------------------------------------
+
+
+def test_get_storage_control_word_returns_int():
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State("33"),
+    }
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_storage_control_word() == 33
+
+
+def test_get_storage_control_word_none_when_absent():
+    controller, _ = make_controller()
+    assert controller.get_storage_control_word() is None
+
+
+def test_get_storage_control_word_none_when_unavailable():
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State("unavailable"),
+    }
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_storage_control_word() is None
+
+
+def test_get_charge_current_returns_float():
+    state_map = {
+        SOLIS_ENTITY_IDS["battery_max_charge_current"]: _State("50.5"),
+    }
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_charge_current_a() == pytest.approx(50.5)
+
+
+def test_get_rc_setpoint_returns_int():
+    state_map = {
+        SOLIS_ENTITY_IDS["rc_setpoint"]: _State("-3000"),
+    }
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_rc_setpoint_w() == -3000
+
+
+def test_get_battery_soc_normalises_percent():
+    state_map = {SOLIS_ENTITY_IDS["battery_soc"]: _State("62.0")}
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_battery_soc() == pytest.approx(0.62)
+
+
+def test_get_battery_soc_passes_through_fraction():
+    state_map = {SOLIS_ENTITY_IDS["battery_soc"]: _State("0.62")}
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_battery_soc() == pytest.approx(0.62)
+
+
+def test_get_battery_soc_fallback_when_unavailable():
+    controller, _ = make_controller()
+    assert controller.get_battery_soc() == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Power-unit normalisation (unchanged)
+# ---------------------------------------------------------------------------
+
 
 def test_normalize_power_to_kw_handles_known_units():
     assert normalize_power_to_kw(3920.0, "W") == pytest.approx(3.92)
@@ -322,56 +316,25 @@ def test_normalize_power_to_kw_handles_known_units():
     assert normalize_power_to_kw(3920.0, "garbage") == pytest.approx(3920.0)
 
 
-def _state(value: str, unit: str | None) -> MagicMock:
-    s = MagicMock()
-    s.state = value
-    s.attributes = {"unit_of_measurement": unit} if unit is not None else {}
-    return s
-
-
 def test_get_grid_power_normalises_watts_to_kw():
-    hass = MagicMock()
-    hass.states.get = lambda eid: _state("3920", "W") if eid == "sensor.grid" else None
-    controller = InverterController(
-        hass,
-        InverterPlatform.GENERIC,
-        {"grid_power": "sensor.grid"},
-        make_battery_config(),
-    )
+    state_map = {SOLIS_ENTITY_IDS["grid_power"]: _State("3920", "W")}
+    controller, _ = make_controller(state_map=state_map)
     assert controller.get_grid_power() == pytest.approx(3.92)
 
 
 def test_get_battery_power_passes_through_kw():
-    hass = MagicMock()
-    hass.states.get = lambda eid: _state("-1.579", "kW") if eid == "sensor.batt" else None
-    controller = InverterController(
-        hass,
-        InverterPlatform.GENERIC,
-        {"battery_power": "sensor.batt"},
-        make_battery_config(),
-    )
+    state_map = {SOLIS_ENTITY_IDS["battery_power"]: _State("-1.579", "kW")}
+    controller, _ = make_controller(state_map=state_map)
     assert controller.get_battery_power() == pytest.approx(-1.579)
 
 
 def test_get_grid_power_returns_fallback_when_unavailable():
-    hass = MagicMock()
-    hass.states.get = lambda eid: _state("unavailable", "W")
-    controller = InverterController(
-        hass,
-        InverterPlatform.GENERIC,
-        {"grid_power": "sensor.grid"},
-        make_battery_config(),
-    )
+    state_map = {SOLIS_ENTITY_IDS["grid_power"]: _State("unavailable", "W")}
+    controller, _ = make_controller(state_map=state_map)
     assert controller.get_grid_power() == 0.0
 
 
 def test_get_grid_power_assumes_kw_when_unit_missing():
-    hass = MagicMock()
-    hass.states.get = lambda eid: _state("3.92", None)
-    controller = InverterController(
-        hass,
-        InverterPlatform.GENERIC,
-        {"grid_power": "sensor.grid"},
-        make_battery_config(),
-    )
+    state_map = {SOLIS_ENTITY_IDS["grid_power"]: _State("3.92", None)}
+    controller, _ = make_controller(state_map=state_map)
     assert controller.get_grid_power() == pytest.approx(3.92)

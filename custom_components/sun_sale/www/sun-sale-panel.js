@@ -572,6 +572,53 @@
         opacity:     1,
       }));
 
+      // ─── Inverter StorageMode bands (history yesterday→now + plan today→tomorrow).
+      // History entries from inverter_mode_history are {t, mode} change events;
+      // turn them into bands [event.t, next_event.t || now]. Plan slots from
+      // inverter_mode_plan are {t, end_t, mode} and become bands directly.
+      const STORAGE_MODE_FILL = {
+        sell:    'rgba(255, 152, 0, 0.18)',
+        store:   'rgba(33, 150, 243, 0.16)',
+        hoard:   'rgba(3, 169, 244, 0.20)',
+        dump:    'rgba(244, 67, 54, 0.20)',
+        gulp:    'rgba(76, 175, 80, 0.20)',
+        stby:    'rgba(120, 144, 156, 0.16)',
+        auto:    'rgba(189, 189, 189, 0.10)',
+        track:   'rgba(156, 39, 176, 0.18)',
+        unknown: 'rgba(96, 96, 96, 0.18)',
+      };
+      const modeBands = [];
+      {
+        const nowMs = Number(dashAttrs?.now_ts) || Date.now();
+        const histRaw = Array.isArray(dashAttrs?.inverter_mode_history)
+          ? [...dashAttrs.inverter_mode_history].sort((a, b) => a.t - b.t)
+          : [];
+        for (let i = 0; i < histRaw.length; i++) {
+          const ev = histRaw[i];
+          if (!STORAGE_MODE_FILL[ev.mode]) continue;
+          const nextStart = i + 1 < histRaw.length ? histRaw[i + 1].t : nowMs;
+          if (nextStart <= ev.t) continue;
+          modeBands.push({ mode: ev.mode, x: ev.t, x2: nextStart });
+        }
+        const planRaw = Array.isArray(dashAttrs?.inverter_mode_plan)
+          ? dashAttrs.inverter_mode_plan
+          : [];
+        for (const s of planRaw) {
+          if (!STORAGE_MODE_FILL[s.mode]) continue;
+          if (!(s.end_t > s.t)) continue;
+          modeBands.push({ mode: s.mode, x: s.t, x2: s.end_t });
+        }
+      }
+      const modeAnnotations = modeBands.map(b => ({
+        x:           b.x,
+        x2:          b.x2,
+        fillColor:   STORAGE_MODE_FILL[b.mode],
+        borderColor: 'transparent',
+        opacity:     1,
+        // y-range omitted — ApexCharts defaults to spanning the full plot area,
+        // which is exactly what we want for piecewise-constant mode bands.
+      }));
+
       // Series: 0=solar forecast(bar) 1=buy(line) 2=sell(line).
       // Bar is first so price lines render on top of generation bars.
       // All three use {x, y} object format. Mixing tuple-format line data
@@ -790,6 +837,7 @@
               },
             },
             ...profileAnnotations,
+            ...modeAnnotations,
           ],
         },
 

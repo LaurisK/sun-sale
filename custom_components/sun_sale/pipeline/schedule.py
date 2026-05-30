@@ -1,29 +1,34 @@
-"""Schedule stage: greedy pair-match optimizer producing the hourly action schedule.
+"""Schedule stage: greedy pair-match optimizer producing the per-slot mode schedule.
 
 Pure Python — no Home Assistant imports. Takes a PriceSeries and CalculationResult,
-returns an hourly action schedule that maximises profit.
+returns a Schedule whose slots carry a Solis StorageMode (mapped via
+``storage_mode_specs.select_mode`` from the optimizer's internal
+PlannerDecision).
 
 Algorithm: greedy pair-matching.
   1. Enumerate all (buy_hour, sell_hour) pairs where buy < sell and sell_allowed=True.
   2. Rank by net profit per kWh descending.
   3. Greedily assign pairs, tracking per-slot available power and running SoC.
   4. Fill remaining hours with CHARGE_FROM_SOLAR (if solar available) or IDLE.
+  5. Translate each PlannerDecision to a StorageMode via select_mode().
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 
 from .battery import trade_profit_per_kwh
+from .storage_mode_specs import PlannerDecision, select_mode
 from ..contract.models import (
-    Action,
     BatteryConfig,
     BatteryState,
     CalculationResult,
+    ChargingProfile,
     PriceSeries,
     PriceSlot,
     Schedule,
     ScheduleSlot,
     SlotDecision,
+    StorageMode,
 )
 
 
@@ -34,10 +39,14 @@ def optimize_schedule(
     battery_state: BatteryState,
     degradation_cost: float,
     now: datetime,
+    charging_profile: ChargingProfile | None = None,
 ) -> Schedule:
-    """Produce a future action schedule that maximises profit via greedy pair-matching.
+    """Produce a future StorageMode schedule that maximises profit via greedy pair-matching.
 
     Slots flagged sell_allowed=False in calc are excluded from discharge pairs.
+    Per-slot StorageMode is derived from the optimizer's internal PlannerDecision
+    via ``select_mode()``; when a ``charging_profile`` is provided, its per-slot
+    mode is consulted to distinguish HOARD vs STORE for solar slots.
 
     Args:
         price_series: Full 72h price series (only future slots are scheduled).
@@ -46,6 +55,9 @@ def optimize_schedule(
         battery_state: Current SoC and estimated usable capacity.
         degradation_cost: EUR/kWh cycle wear cost (from DegradationNode).
         now: Cycle timestamp; slots at or before now are skipped.
+        charging_profile: Optional today-remaining ChargingProfile from Tier 3;
+            used to refine STORE vs HOARD for CHARGE_FROM_SOLAR slots. When
+            absent (e.g. tomorrow's slots), solar slots default to STORE.
 
     Returns:
         Schedule with one ScheduleSlot per future price slot.
@@ -76,7 +88,7 @@ def optimize_schedule(
     charge_budget = [max_charge] * n
     discharge_budget = [max_discharge] * n
     committed_kwh: list[float] = [0.0] * n
-    actions: list[Action | None] = [None] * n
+    decisions: list[PlannerDecision | None] = [None] * n
     powers: list[float] = [0.0] * n
 
     pairs = _rank_trade_pairs(future_pairs, degradation_cost, efficiency)
@@ -110,20 +122,23 @@ def optimize_schedule(
         charge_budget[buy_idx] -= tradeable
         discharge_budget[sell_idx] -= tradeable * efficiency
 
-        actions[buy_idx] = Action.CHARGE_FROM_GRID
+        decisions[buy_idx] = PlannerDecision.CHARGE_FROM_GRID
         powers[buy_idx] += tradeable
-        actions[sell_idx] = Action.DISCHARGE_TO_GRID
+        decisions[sell_idx] = PlannerDecision.DISCHARGE_TO_GRID
         powers[sell_idx] += tradeable * efficiency
 
     # Fill unassigned slots: solar passthrough or idle
-    for i, (price_slot, decision) in enumerate(future_pairs):
-        if actions[i] is None:
-            solar = decision.expected_solar_kwh
+    for i, (price_slot, slot_decision) in enumerate(future_pairs):
+        if decisions[i] is None:
+            solar = slot_decision.expected_solar_kwh
             if solar > 0:
-                actions[i] = Action.CHARGE_FROM_SOLAR
+                decisions[i] = PlannerDecision.CHARGE_FROM_SOLAR
                 powers[i] = solar
             else:
-                actions[i] = Action.IDLE
+                decisions[i] = PlannerDecision.IDLE
+
+    profile_mode_by_start = {p.start: p.mode for p in charging_profile.slots} \
+        if charging_profile is not None else {}
 
     # Build ScheduleSlot list with running SoC and profit
     slots: list[ScheduleSlot] = []
@@ -131,7 +146,7 @@ def optimize_schedule(
     total_profit = 0.0
 
     for i, (price_slot, _decision) in enumerate(future_pairs):
-        action = actions[i]
+        decision = decisions[i]
         power = powers[i]
         kwh = committed_kwh[i]
 
@@ -140,23 +155,29 @@ def optimize_schedule(
             min(battery_config.max_soc, running_soc + kwh / capacity),
         )
 
-        if action == Action.CHARGE_FROM_GRID:
+        if decision == PlannerDecision.CHARGE_FROM_GRID:
             slot_profit = -(price_slot.buy_eur_kwh * power) - degradation_cost * power
             reason = f"Charge from grid at {price_slot.buy_eur_kwh:.4f} EUR/kWh"
-        elif action == Action.DISCHARGE_TO_GRID:
+        elif decision == PlannerDecision.DISCHARGE_TO_GRID:
             slot_profit = price_slot.sell_eur_kwh * power - degradation_cost * power
             reason = f"Sell to grid at {price_slot.sell_eur_kwh:.4f} EUR/kWh"
-        elif action == Action.CHARGE_FROM_SOLAR:
+        elif decision == PlannerDecision.CHARGE_FROM_SOLAR:
             slot_profit = 0.0
             reason = f"Solar self-use: {power:.2f} kWh"
         else:
             slot_profit = 0.0
             reason = "Idle"
 
+        mode: StorageMode = select_mode(
+            decision,
+            charging_profile_mode=profile_mode_by_start.get(price_slot.start),
+            sell_eur_kwh=price_slot.sell_eur_kwh,
+        )
+
         slots.append(ScheduleSlot(
             start=price_slot.start,
             end=price_slot.end,
-            action=action,
+            mode=mode,
             power_kw=power,
             expected_soc_after=soc_after,
             expected_profit_eur=slot_profit,

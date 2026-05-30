@@ -18,7 +18,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .contract.const import CONF_INVERTER_ENTITY_SOLAR_ENERGY, DOMAIN
 from .orchestration.coordinator import SunSaleCoordinator
 from .contract.models import (
-    Action,
     BaseLoadProfile,
     BatteryRuntimeEstimate,
     CalculationResult,
@@ -27,11 +26,14 @@ from .contract.models import (
     ForecastErrorSeries,
     ForecastQualityStore,
     GenerationSeries,
+    InverterModeHistory,
+    InverterModeReading,
     MonthlyBillResult,
     ObservedGenerationSeries,
     PriceSeries,
     PriceSlot,
     Schedule,
+    StorageMode,
     SunTimes,
 )
 
@@ -151,7 +153,7 @@ class _BaseSensor(CoordinatorEntity, SensorEntity):
 
 
 class CurrentActionSensor(_BaseSensor):
-    """Sensor reporting the battery action scheduled for the current hour."""
+    """Sensor reporting the StorageMode scheduled for the current hour."""
 
     _attr_name = "sunSale Current Action"
     _attr_icon = "mdi:lightning-bolt"
@@ -162,13 +164,13 @@ class CurrentActionSensor(_BaseSensor):
 
     @property
     def native_value(self) -> str:
-        """Return the current schedule slot's action string."""
+        """Return the current schedule slot's StorageMode string."""
         slot = self._current_slot()
-        return slot.action.value if slot else Action.IDLE.value
+        return slot.mode.value if slot else StorageMode.AUTO.value
 
 
 class NextActionSensor(_BaseSensor):
-    """Sensor reporting the next scheduled action that differs from the current one."""
+    """Sensor reporting the next scheduled StorageMode that differs from the current one."""
 
     _attr_name = "sunSale Next Action"
     _attr_icon = "mdi:lightning-bolt-outline"
@@ -179,22 +181,22 @@ class NextActionSensor(_BaseSensor):
 
     @property
     def native_value(self) -> str:
-        """Return the next schedule action that differs from the current slot."""
+        """Return the next schedule mode that differs from the current slot."""
         schedule = self._schedule
         if not schedule or not schedule.slots:
-            return Action.IDLE.value
+            return StorageMode.AUTO.value
         now = datetime.now(timezone.utc)
         current = self._current_slot()
         if current is None:
-            return Action.IDLE.value
+            return StorageMode.AUTO.value
         for slot in schedule.slots:
-            if slot.start > now and slot.action != current.action:
-                return slot.action.value
-        return current.action.value
+            if slot.start > now and slot.mode != current.mode:
+                return slot.mode.value
+        return current.mode.value
 
 
 class NextActionTimeSensor(_BaseSensor):
-    """Sensor reporting the start time of the next action change."""
+    """Sensor reporting the start time of the next StorageMode change."""
 
     _attr_name = "sunSale Next Action Time"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
@@ -205,7 +207,7 @@ class NextActionTimeSensor(_BaseSensor):
 
     @property
     def native_value(self) -> datetime | None:
-        """Return the start time of the next action that differs from the current slot."""
+        """Return the start time of the next mode change."""
         schedule = self._schedule
         if not schedule or not schedule.slots:
             return None
@@ -214,7 +216,7 @@ class NextActionTimeSensor(_BaseSensor):
         if current is None:
             return None
         for slot in schedule.slots:
-            if slot.start > now and slot.action != current.action:
+            if slot.start > now and slot.mode != current.mode:
                 return slot.start
         return None
 
@@ -334,12 +336,12 @@ class ScheduleSensor(_BaseSensor):
 
     @property
     def native_value(self) -> str:
-        """Return the current schedule slot's action string."""
+        """Return the current schedule slot's StorageMode string."""
         schedule = self._schedule
         if not schedule or not schedule.slots:
-            return Action.IDLE.value
+            return StorageMode.AUTO.value
         slot = self._current_slot()
-        return slot.action.value if slot else Action.IDLE.value
+        return slot.mode.value if slot else StorageMode.AUTO.value
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -352,7 +354,7 @@ class ScheduleSensor(_BaseSensor):
                 {
                     "start": s.start.isoformat(),
                     "end": s.end.isoformat(),
-                    "action": s.action.value,
+                    "mode": s.mode.value,
                     "power_kw": s.power_kw,
                     "expected_soc_after": round(s.expected_soc_after, 3),
                     "expected_profit_eur": round(s.expected_profit_eur, 4),
@@ -408,11 +410,11 @@ class InverterModeSensor(_BaseSensor):
 
         if cur_slot is None:
             return "self_use_sell" if solar_w > load_w else "self_use"
-        if cur_slot.action == Action.CHARGE_FROM_GRID:
+        if cur_slot.mode == StorageMode.GULP:
             return "charge_from_grid"
-        if cur_slot.action == Action.DISCHARGE_TO_GRID:
+        if cur_slot.mode in (StorageMode.DUMP, StorageMode.SELL):
             return "sell_discharge"
-        if cur_slot.action == Action.CHARGE_FROM_SOLAR:
+        if cur_slot.mode in (StorageMode.STORE, StorageMode.HOARD):
             return "charge_solar"
         return "self_use_sell" if solar_w > load_w else "self_use"
 
@@ -514,6 +516,47 @@ class DashboardSensor(_BaseSensor):
                 "d6":        round(gen.total_d6_kwh, 3),
             }
 
+        schedule_obj: Schedule | None = self.coordinator.data.get("schedule")
+        mode_history: InverterModeHistory | None = self.coordinator.data.get(
+            "inverter_mode_history"
+        )
+        mode_reading: InverterModeReading | None = self.coordinator.data.get(
+            "inverter_mode_reading"
+        )
+        inverter_mode_plan = (
+            [
+                {
+                    "t": int(s.start.timestamp() * 1000),
+                    "end_t": int(s.end.timestamp() * 1000),
+                    "mode": s.mode.value,
+                }
+                for s in schedule_obj.slots
+            ]
+            if schedule_obj is not None
+            else []
+        )
+        inverter_mode_history = (
+            [
+                {"t": int(s.timestamp.timestamp() * 1000), "mode": s.mode.value}
+                for s in mode_history.samples
+            ]
+            if mode_history is not None
+            else []
+        )
+        # Resolve "now" target from the schedule slot covering this instant.
+        target_mode = None
+        if schedule_obj is not None:
+            cur = next(
+                (s for s in schedule_obj.slots if s.start <= now < s.end), None,
+            )
+            if cur is not None:
+                target_mode = cur.mode.value
+        inverter_mode_now = {
+            "observed": mode_reading.mode.value if mode_reading is not None else None,
+            "target": target_mode,
+            "automation_enabled": self.coordinator.automation_enabled,
+        }
+
         return {
             "generated_at": now.isoformat(),
             "now_ts": int(now.timestamp() * 1000),
@@ -531,6 +574,9 @@ class DashboardSensor(_BaseSensor):
             "forecast_daily_kwh": forecast_daily_kwh,
             "actual_yesterday_kwh": round(observed.total_yesterday_kwh, 3) if observed else None,
             "actual_today_kwh": round(observed.total_today_so_far_kwh, 3) if observed else None,
+            "inverter_mode_plan": inverter_mode_plan,
+            "inverter_mode_history": inverter_mode_history,
+            "inverter_mode_now": inverter_mode_now,
         }
 
 

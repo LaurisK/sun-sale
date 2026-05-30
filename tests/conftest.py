@@ -190,7 +190,6 @@ _const_mod.UnitOfEnergy = MagicMock()
 _const_mod.UnitOfEnergy.KILO_WATT_HOUR = "kWh"
 
 from custom_components.sun_sale.contract.models import (
-    Action,
     BatteryConfig,
     BatteryState,
     PriceEntry,

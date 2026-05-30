@@ -7,14 +7,6 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
 
 
-class Action(Enum):
-    """What the system should do in a given hour slot."""
-    IDLE = "idle"
-    CHARGE_FROM_GRID = "charge_from_grid"
-    DISCHARGE_TO_GRID = "discharge_to_grid"
-    CHARGE_FROM_SOLAR = "charge_from_solar"
-
-
 @dataclass(frozen=True)
 class PriceEntry:
     """Nordpool spot price for one time slot."""
@@ -89,10 +81,15 @@ class SolarForecast:
 
 @dataclass(frozen=True)
 class ScheduleSlot:
-    """One hour of the optimized battery schedule."""
+    """One hour of the optimized battery schedule.
+
+    ``mode`` is the Solis StorageMode the inverter should enter for this slot;
+    it is derived by ``pipeline/schedule.py`` from the optimizer's internal
+    PlannerDecision via ``storage_mode_specs.select_mode``.
+    """
     start: datetime
     end: datetime
-    action: Action
+    mode: "StorageMode"          # forward ref — StorageMode is defined later in this file
     power_kw: float              # Energy exchanged in this slot (kWh at 1h resolution)
     expected_soc_after: float    # Predicted battery SoC at end of slot
     expected_profit_eur: float   # Profit (negative = cost) from this action
@@ -757,3 +754,84 @@ class ForecastAccuracyResult:
     """
     error_series: ForecastErrorSeries
     quality: ForecastQualityStore
+
+
+# ---------------------------------------------------------------------------
+# Inverter mode control — Solis storage-mode state machine
+# (target taxonomy defined in docs/solis_control.md §3)
+# ---------------------------------------------------------------------------
+
+
+class StorageMode(Enum):
+    """Named operating states of the Solis hybrid inverter.
+
+    Each value composes a (register 43110 bitmask, export limit, charge current,
+    discharge current, RC setpoint) tuple; see pipeline/storage_mode_specs.py
+    for the concrete StorageModeSpec builders. UNKNOWN is reserved for observed
+    register states that do not map to any planned mode.
+    """
+    SELL    = "sell"     # 43110=64 (FeedIn) — surplus above export cap → charge
+    STORE   = "store"    # 43110=1  (SelfUse) — charge first, capped export of surplus
+    HOARD   = "hoard"    # 43110=1  (SelfUse) — charge only, export prohibited
+    DUMP    = "dump"     # 43110=64 (FeedIn) — uncapped export + force discharge
+    GULP    = "gulp"     # 43110=33 (SelfUse|GridCharge) — force grid charge
+    STBY    = "stby"     # 43110=1  (SelfUse) — no battery flow, no grid exchange
+    AUTO    = "auto"     # 43110=1  (SelfUse) — hardware default, no sunSale override
+    TRACK   = "track"    # real-time VPP setpoint follower (future hook)
+    UNKNOWN = "unknown"  # observed bitmask does not map to any named mode
+
+
+@dataclass(frozen=True)
+class StorageModeSpec:
+    """Concrete register targets for one StorageMode.
+
+    Fields use ``None`` where the inverter's existing value should be left
+    unchanged (e.g. AUTO leaves the export limit and currents at the hardware
+    default).
+    """
+    reg_43110_value: int               # bitmask target for Storage Control word
+    export_limit_w: int | None         # None → leave hardware default
+    charge_a: float | None             # None → leave hardware default
+    discharge_a: float | None          # None → leave hardware default
+    rc_setpoint_w: int                 # signed; + = export, − = charge, 0 = none
+
+
+@dataclass(frozen=True)
+class InverterModeReading:
+    """Primary data: one-cycle snapshot of observed inverter state.
+
+    All hardware-derived fields are nullable so the translator stays resilient
+    to entity-unavailability. ``mode`` is decoded from ``reg_43110_value`` plus
+    ancillary currents via ``pipeline/storage_mode_specs.decode_mode``; it
+    falls back to ``StorageMode.UNKNOWN`` when the register cannot be read or
+    the bitmask is unfamiliar.
+    """
+    timestamp: datetime
+    reg_43110_value: int | None
+    mode: StorageMode
+    charge_a: float | None
+    discharge_a: float | None
+    rc_setpoint_w: int | None
+
+
+@dataclass(frozen=True)
+class InverterModeChange:
+    """One persisted entry in the inverter-mode history.
+
+    Appended only when the decoded mode differs from the previous entry; the
+    timestamp is the moment the change was first observed by the coordinator.
+    """
+    timestamp: datetime
+    mode: StorageMode
+    reg_43110_value: int
+
+
+@dataclass(frozen=True)
+class InverterModeHistory:
+    """Primary data: rolling history of mode-change events.
+
+    Samples cover ``local_midnight(yesterday) → now``; older entries are
+    pruned at each cycle. Strictly mode-change events — no consecutive entries
+    share the same ``mode``.
+    """
+    samples: tuple[InverterModeChange, ...]   # sorted ascending by timestamp

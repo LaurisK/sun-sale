@@ -2,24 +2,24 @@
 from datetime import datetime, timezone, timedelta
 import pytest
 from custom_components.sun_sale.contract.models import (
-    Action, PriceEntry, TariffConfig, BatteryConfig, BatteryState,
-    SolarForecast, ScheduleSlot, Schedule, CapacityObservation,
+    PriceEntry, TariffConfig, BatteryConfig, BatteryState,
+    SolarForecast, ScheduleSlot, Schedule, CapacityObservation, StorageMode,
 )
 
 
 NOW = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
 
 
-def test_action_enum_values():
-    assert Action.IDLE.value == "idle"
-    assert Action.CHARGE_FROM_GRID.value == "charge_from_grid"
-    assert Action.DISCHARGE_TO_GRID.value == "discharge_to_grid"
-    assert Action.CHARGE_FROM_SOLAR.value == "charge_from_solar"
+def test_storage_mode_enum_values():
+    assert StorageMode.AUTO.value == "auto"
+    assert StorageMode.GULP.value == "gulp"
+    assert StorageMode.DUMP.value == "dump"
+    assert StorageMode.STORE.value == "store"
 
 
-def test_action_enum_from_value():
-    assert Action("idle") == Action.IDLE
-    assert Action("charge_from_grid") == Action.CHARGE_FROM_GRID
+def test_storage_mode_enum_from_value():
+    assert StorageMode("auto") == StorageMode.AUTO
+    assert StorageMode("gulp") == StorageMode.GULP
 
 
 def test_price_entry_frozen():
@@ -56,11 +56,11 @@ def test_battery_state_mutable():
 def test_schedule_slot_frozen():
     slot = ScheduleSlot(
         start=NOW, end=NOW + timedelta(hours=1),
-        action=Action.IDLE, power_kw=0.0,
+        mode=StorageMode.AUTO, power_kw=0.0,
         expected_soc_after=0.5, expected_profit_eur=0.0, reason="test",
     )
     with pytest.raises((AttributeError, TypeError)):
-        slot.action = Action.CHARGE_FROM_GRID  # type: ignore[misc]
+        slot.mode = StorageMode.GULP  # type: ignore[misc]
 
 
 def test_capacity_observation_frozen():

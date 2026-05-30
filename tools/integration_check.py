@@ -390,6 +390,80 @@ def _schedule_aligned(snap: Snapshot) -> tuple[bool, str]:
     return True, "all schedule slots aligned"
 
 
+_VALID_STORAGE_MODES = {
+    "sell", "store", "hoard", "dump", "gulp", "stby", "auto", "track", "unknown",
+}
+
+
+@validator("inverter_mode_plan_uses_known_modes", "inverter_mode")
+def _inverter_mode_plan_modes_valid(snap: Snapshot) -> tuple[bool, str]:
+    """Every plan slot's ``mode`` must be a known StorageMode value."""
+    block = snap.outputs.get("inverter_mode")
+    if not block:
+        return True, "no inverter_mode block"
+    plan = block.get("plan") or []
+    if not plan:
+        return True, "no plan slots"
+    unknown = [s["mode"] for s in plan if s.get("mode") not in _VALID_STORAGE_MODES]
+    if unknown:
+        return False, f"{len(unknown)} plan slot(s) with unknown mode: {unknown[:3]}"
+    return True, f"{len(plan)} plan slots, all modes recognised"
+
+
+@validator("inverter_mode_history_strictly_changes", "inverter_mode")
+def _inverter_mode_history_strict(snap: Snapshot) -> tuple[bool, str]:
+    """History entries must be strictly mode-change events (no consecutive duplicates)."""
+    block = snap.outputs.get("inverter_mode")
+    if not block:
+        return True, "no inverter_mode block"
+    history = block.get("history") or []
+    last_mode: str | None = None
+    duplicates = 0
+    for entry in history:
+        mode = entry.get("mode")
+        if mode == last_mode:
+            duplicates += 1
+        last_mode = mode
+    if duplicates:
+        return False, f"{duplicates} consecutive duplicate mode entries in history"
+    return True, f"{len(history)} mode-change events, no duplicates"
+
+
+@validator("inverter_mode_history_chronological", "inverter_mode")
+def _inverter_mode_history_chronological(snap: Snapshot) -> tuple[bool, str]:
+    """History entries must be sorted ascending by timestamp."""
+    block = snap.outputs.get("inverter_mode")
+    if not block:
+        return True, "no inverter_mode block"
+    history = block.get("history") or []
+    if len(history) < 2:
+        return True, f"{len(history)} entries"
+    last_t = datetime.fromisoformat(history[0]["t"])
+    for entry in history[1:]:
+        cur_t = datetime.fromisoformat(entry["t"])
+        if cur_t < last_t:
+            return False, f"entry at {entry['t']} precedes prior {last_t.isoformat()}"
+        last_t = cur_t
+    return True, f"{len(history)} entries chronologically ordered"
+
+
+@validator("inverter_mode_observed_matches_history_tail", "inverter_mode")
+def _inverter_mode_observed_matches_tail(snap: Snapshot) -> tuple[bool, str]:
+    """The current observed mode should match the last history entry's mode."""
+    block = snap.outputs.get("inverter_mode")
+    if not block:
+        return True, "no inverter_mode block"
+    reading = block.get("reading") or {}
+    history = block.get("history") or []
+    observed = reading.get("mode")
+    if observed is None or not history:
+        return True, "no observed reading or empty history"
+    tail = history[-1].get("mode")
+    if observed != tail:
+        return False, f"observed={observed} but history tail={tail}"
+    return True, f"observed mode {observed} matches history tail"
+
+
 @validator("battery_soc_sane", "battery")
 def _battery_soc(snap: Snapshot) -> tuple[bool, str]:
     battery = snap.inputs.get("battery")
@@ -840,7 +914,7 @@ def check_schedule(snap: Snapshot) -> ScheduleCheckResult:
         result.slot_rows.append({
             "start": start_str,
             "end": end_str,
-            "action": s.get("action", ""),
+            "mode": s.get("mode", ""),
             "power_kw": s.get("power_kw") or 0.0,
             "profit_eur": profit,
             "reason": s.get("reason", "") or "",
@@ -3007,7 +3081,7 @@ class CalculationCheckWidget(Static):
 
 
 class ScheduleSlotsTable(Static):
-    """DataTable: Time | Action | Power (kW) | Profit (€) | Reason."""
+    """DataTable: Time | Mode | Power (kW) | Profit (€) | Reason."""
 
     DEFAULT_CSS = """
     ScheduleSlotsTable { height: auto; }
@@ -3018,7 +3092,7 @@ class ScheduleSlotsTable(Static):
         """Initialise with the schedule check result.
 
         Args:
-            sc: Result of check_schedule() containing per-slot action and profit data.
+            sc: Result of check_schedule() containing per-slot mode and profit data.
         """
         super().__init__()
         self._sc = sc
@@ -3030,7 +3104,7 @@ class ScheduleSlotsTable(Static):
     def on_mount(self) -> None:
         """Populate the DataTable with one row per schedule slot, date-separated."""
         table = self.query_one(DataTable)
-        table.add_columns("Time", "Action", "Power (kW)", "Profit (€)", "Reason", "")
+        table.add_columns("Time", "Mode", "Power (kW)", "Profit (€)", "Reason", "")
         dim = "dim"
         prev_date = None
 
@@ -3058,7 +3132,7 @@ class ScheduleSlotsTable(Static):
 
             table.add_row(
                 Text(prefix + time_str, style=time_style),
-                Text(row["action"], style="bold" if is_current else ""),
+                Text(row["mode"], style="bold" if is_current else ""),
                 Text(f"{row['power_kw']:.2f}", style=dim if row["power_kw"] == 0 else ""),
                 Text(f"{profit:+.4f}", style=profit_style),
                 Text(row["reason"][:40] if row["reason"] else "—", style=dim),

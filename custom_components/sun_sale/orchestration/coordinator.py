@@ -41,14 +41,17 @@ from ..contract.const import (
     CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
     CONF_INVERTER_ENTITY_SOLAR_ENERGY,
     CONF_INVERTER_PLATFORM,
+    CONF_INVERTER_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH,
     CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
-    CONF_INVERTER_SOLIS_CHARGE_CURRENT,
-    CONF_INVERTER_SOLIS_CHARGE_END_TIME_1,
-    CONF_INVERTER_SOLIS_CHARGE_START_TIME_1,
-    CONF_INVERTER_SOLIS_DISCHARGE_CURRENT,
-    CONF_INVERTER_SOLIS_DISCHARGE_END_TIME_1,
-    CONF_INVERTER_SOLIS_DISCHARGE_START_TIME_1,
-    CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH,
+    CONF_INVERTER_SOLIS_BACKFLOW_POWER,
+    CONF_INVERTER_SOLIS_BATTERY_MAX_CHARGE_CURRENT,
+    CONF_INVERTER_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT,
+    CONF_INVERTER_SOLIS_FEED_IN_PRIORITY_SWITCH,
+    CONF_INVERTER_SOLIS_GRID_FEED_IN_POWER_LIMIT_SWITCH,
+    CONF_INVERTER_SOLIS_PEAK_MAX_USABLE_GRID_POWER,
+    CONF_INVERTER_SOLIS_RC_SETPOINT,
+    CONF_INVERTER_SOLIS_SELF_USE_SWITCH,
+    CONF_INVERTER_SOLIS_STORAGE_CONTROL_READBACK,
     CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_NORDPOOL_ENTITY,
     CONF_SOLIS_CONFIG_ENTRY_ID,
@@ -64,14 +67,17 @@ from ..contract.const import (
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
     GRID_POWER_HISTORY_RETENTION_DAYS,
     HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS,
+    DEFAULT_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH,
     DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
-    DEFAULT_SOLIS_CHARGE_CURRENT,
-    DEFAULT_SOLIS_CHARGE_END_TIME_1,
-    DEFAULT_SOLIS_CHARGE_START_TIME_1,
-    DEFAULT_SOLIS_DISCHARGE_CURRENT,
-    DEFAULT_SOLIS_DISCHARGE_END_TIME_1,
-    DEFAULT_SOLIS_DISCHARGE_START_TIME_1,
-    DEFAULT_SOLIS_SELF_USE_MODE_SWITCH,
+    DEFAULT_SOLIS_BACKFLOW_POWER,
+    DEFAULT_SOLIS_BATTERY_MAX_CHARGE_CURRENT,
+    DEFAULT_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT,
+    DEFAULT_SOLIS_FEED_IN_PRIORITY_SWITCH,
+    DEFAULT_SOLIS_GRID_FEED_IN_POWER_LIMIT_SWITCH,
+    DEFAULT_SOLIS_PEAK_MAX_USABLE_GRID_POWER,
+    DEFAULT_SOLIS_RC_SETPOINT,
+    DEFAULT_SOLIS_SELF_USE_SWITCH,
+    DEFAULT_SOLIS_STORAGE_CONTROL_READBACK,
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
     DOMAIN,
     CONF_INVERTER_ENTITY_PV_POWER,
@@ -83,6 +89,7 @@ from ..contract.const import (
     STORAGE_KEY_GENERATION,
     STORAGE_KEY_GRID_POWER,
     STORAGE_KEY_HOUSEHOLD_LOAD,
+    STORAGE_KEY_MODE_HISTORY,
     STORAGE_KEY_MONTHLY_BILL,
     STORAGE_KEY_PRICE_HISTORY,
     STORAGE_KEY_PV_POWER,
@@ -91,8 +98,8 @@ from ..contract.const import (
     UPDATE_INTERVAL_MINUTES,
 )
 from ..pipeline.dag_engine import DagEngine, run_translators
-from ..outbound.event_router import EventRouter
 from ..outbound.inverter import InverterController, InverterPlatform, normalize_power_to_kw
+from ..outbound.inverter_control_module import InverterControlModule
 from ..contract.models import (
     BaseLoadProfile,
     BatteryConfig,
@@ -114,6 +121,9 @@ from ..contract.models import (
     GenerationSeries,
     GridPowerHistory,
     GridPowerReading,
+    InverterModeChange,
+    InverterModeHistory,
+    InverterModeReading,
     MonthlyBillResult,
     MonthlyBillState,
     PvPowerHistory,
@@ -131,6 +141,7 @@ from ..contract.models import (
     SolarData,
     SolarEntry,
     Schedule,
+    StorageMode,
     SunSaleConfig,
     SunTimes,
     TariffConfig,
@@ -151,7 +162,6 @@ from ..pipeline.nodes import (
     ScheduleNode,
     PricingNode,
     ProfitabilityNode,
-    make_last_ref,
 )
 from ..pipeline import forecast_accuracy as forecast_accuracy_module
 from ..pipeline import profitability as profitability_module
@@ -162,6 +172,7 @@ from ..inbound.forecast import SolarTranslator
 from ..inbound.generation import GenerationTranslator, PvPowerTranslator
 from ..inbound.household_consumption import HouseholdConsumptionTranslator
 from ..inbound.household_load import HouseholdLoadTranslator
+from ..inbound.inverter_mode import InverterModeTranslator
 from ..inbound.pricing import NordpoolTranslator
 
 _LOGGER = logging.getLogger(__name__)
@@ -380,6 +391,38 @@ def _deserialize_grid_power(d: dict) -> list[GridPowerReading]:
     ]
 
 
+def _serialize_mode_history(history: InverterModeHistory) -> dict:
+    """Serialise the rolling inverter-mode-change history."""
+    return {
+        "samples": [
+            {"ts": s.timestamp.isoformat(), "mode": s.mode.value, "reg": s.reg_43110_value}
+            for s in history.samples
+        ]
+    }
+
+
+def _deserialize_mode_history(d: dict) -> InverterModeHistory:
+    """Deserialise the rolling inverter-mode-change history.
+
+    Unknown mode strings (e.g. from older versions) are coerced to UNKNOWN so
+    the integration starts cleanly after a release that retired a mode value.
+    """
+    samples: list[InverterModeChange] = []
+    for s in d.get("samples", []):
+        try:
+            mode = StorageMode(s["mode"])
+        except ValueError:
+            mode = StorageMode.UNKNOWN
+        samples.append(
+            InverterModeChange(
+                timestamp=datetime.fromisoformat(s["ts"]),
+                mode=mode,
+                reg_43110_value=int(s["reg"]),
+            )
+        )
+    return InverterModeHistory(samples=tuple(samples))
+
+
 def _serialize_monthly_bill(state: MonthlyBillState) -> dict:
     """Serialise the monthly bill state."""
     return {
@@ -513,7 +556,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._capacity_estimator: CapacityEstimator | None = None
         self._engine: DagEngine | None = None
         self._translators: list = []
-        self._event_router: EventRouter | None = None
+        self._control_module: InverterControlModule | None = None
         self._last_battery_reading: BatteryReading | None = None
         self._yesterday_store: PersistentStore[_YesterdayBuckets] | None = None
         self._generation_store: PersistentStore[list[GenerationReading]] | None = None
@@ -524,6 +567,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._grid_power_store: PersistentStore[list[GridPowerReading]] | None = None
         self._grid_power_entity_id: str = ""
         self._monthly_bill_store: PersistentStore[MonthlyBillState] | None = None
+        self._mode_history_store: PersistentStore[InverterModeHistory] | None = None
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
@@ -570,21 +614,36 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             if solis_entry_id:
                 # Auto-detected path: resolve all entity IDs from the entity registry.
                 inverter_entity_ids = resolve_solis_entities(self.hass, solis_entry_id)
+                # Telemetry roles share keys with the manual mapping, so ensure
+                # battery_soc / battery_power / grid_power survive auto-detect
+                # even if the resolver missed one (its defaults still work).
+                inverter_entity_ids.setdefault(
+                    "battery_soc", data.get(CONF_INVERTER_ENTITY_BATTERY_SOC, ""),
+                )
+                inverter_entity_ids.setdefault(
+                    "battery_power", data.get(CONF_INVERTER_ENTITY_BATTERY_POWER, ""),
+                )
+                inverter_entity_ids.setdefault(
+                    "grid_power", data.get(CONF_INVERTER_ENTITY_GRID_POWER, ""),
+                )
             else:
-                # Legacy path: entity IDs stored directly in config entry data.
+                # Manual-mapping fallback: entity IDs stored directly in config entry data.
                 inverter_entity_ids = {
                     "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
                     "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
                     "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
-                    "solis_charge_current": data.get(CONF_INVERTER_SOLIS_CHARGE_CURRENT, DEFAULT_SOLIS_CHARGE_CURRENT),
-                    "solis_discharge_current": data.get(CONF_INVERTER_SOLIS_DISCHARGE_CURRENT, DEFAULT_SOLIS_DISCHARGE_CURRENT),
-                    "solis_charge_start_time_1": data.get(CONF_INVERTER_SOLIS_CHARGE_START_TIME_1, DEFAULT_SOLIS_CHARGE_START_TIME_1),
-                    "solis_charge_end_time_1": data.get(CONF_INVERTER_SOLIS_CHARGE_END_TIME_1, DEFAULT_SOLIS_CHARGE_END_TIME_1),
-                    "solis_discharge_start_time_1": data.get(CONF_INVERTER_SOLIS_DISCHARGE_START_TIME_1, DEFAULT_SOLIS_DISCHARGE_START_TIME_1),
-                    "solis_discharge_end_time_1": data.get(CONF_INVERTER_SOLIS_DISCHARGE_END_TIME_1, DEFAULT_SOLIS_DISCHARGE_END_TIME_1),
-                    "solis_tou_mode_switch": data.get(CONF_INVERTER_SOLIS_TOU_MODE_SWITCH, DEFAULT_SOLIS_TOU_MODE_SWITCH),
-                    "solis_allow_grid_charge_switch": data.get(CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH, DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH),
-                    "solis_self_use_mode_switch": data.get(CONF_INVERTER_SOLIS_SELF_USE_MODE_SWITCH, DEFAULT_SOLIS_SELF_USE_MODE_SWITCH),
+                    "storage_control_readback":      data.get(CONF_INVERTER_SOLIS_STORAGE_CONTROL_READBACK, DEFAULT_SOLIS_STORAGE_CONTROL_READBACK),
+                    "battery_max_charge_current":    data.get(CONF_INVERTER_SOLIS_BATTERY_MAX_CHARGE_CURRENT, DEFAULT_SOLIS_BATTERY_MAX_CHARGE_CURRENT),
+                    "battery_max_discharge_current": data.get(CONF_INVERTER_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT, DEFAULT_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT),
+                    "rc_setpoint":                   data.get(CONF_INVERTER_SOLIS_RC_SETPOINT, DEFAULT_SOLIS_RC_SETPOINT),
+                    "backflow_power":                data.get(CONF_INVERTER_SOLIS_BACKFLOW_POWER, DEFAULT_SOLIS_BACKFLOW_POWER),
+                    "peak_max_usable_grid_power":    data.get(CONF_INVERTER_SOLIS_PEAK_MAX_USABLE_GRID_POWER, DEFAULT_SOLIS_PEAK_MAX_USABLE_GRID_POWER),
+                    "self_use_switch":               data.get(CONF_INVERTER_SOLIS_SELF_USE_SWITCH, DEFAULT_SOLIS_SELF_USE_SWITCH),
+                    "tou_mode_switch":               data.get(CONF_INVERTER_SOLIS_TOU_MODE_SWITCH, DEFAULT_SOLIS_TOU_MODE_SWITCH),
+                    "allow_grid_charge_switch":      data.get(CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH, DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH),
+                    "feed_in_priority_switch":       data.get(CONF_INVERTER_SOLIS_FEED_IN_PRIORITY_SWITCH, DEFAULT_SOLIS_FEED_IN_PRIORITY_SWITCH),
+                    "allow_export_under_self_use_switch": data.get(CONF_INVERTER_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH, DEFAULT_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH),
+                    "grid_feed_in_power_limit_switch": data.get(CONF_INVERTER_SOLIS_GRID_FEED_IN_POWER_LIMIT_SWITCH, DEFAULT_SOLIS_GRID_FEED_IN_POWER_LIMIT_SWITCH),
                 }
         else:
             inverter_entity_ids = {
@@ -626,9 +685,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             HouseholdConsumptionTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY, ""),
             ),
+            InverterModeTranslator(inverter=inverter),
         ]
 
-        inverter_last_ref = make_last_ref()
         nodes = [
             PricingNode(),
             BatteryStateNode(),
@@ -643,11 +702,15 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ForecastAccuracyNode(),
             ProfitabilityNode(),
             LockoutNode(),
-            ScheduleNode(last_inverter_action_ref=inverter_last_ref),
+            ScheduleNode(),
         ]
 
         self._engine = DagEngine(nodes)
-        self._event_router = EventRouter(inverter=inverter)
+        self._control_module = InverterControlModule(
+            inverter=inverter,
+            battery_config=battery_config,
+            local_tz=local_tz,
+        )
 
         self._capacity_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_CAPACITY,
@@ -727,6 +790,13 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             deserialize=_deserialize_yesterday,
         )
         await self._yesterday_store.load()
+
+        self._mode_history_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_MODE_HISTORY,
+            serialize=_serialize_mode_history,
+            deserialize=_deserialize_mode_history,
+        )
+        await self._mode_history_store.load()
 
     async def _async_update_data(self) -> dict:
         """One DAG cycle: translate → capacity update → DAG → event routing."""
@@ -873,12 +943,37 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     peaks = [p for p in peaks if p.day >= cutoff_day]
                     await self._price_history_store.save(peaks)
 
-            if self.automation_enabled and self._event_router is not None:
-                for event in events:
-                    await self._event_router.handle(event)
-                if self._event_router.last_dispatched_action:
-                    self.last_dispatched_action = self._event_router.last_dispatched_action
+            # Drain the event channel — chunk 2 removed the only emitter, but
+            # the DAG still threads the list through nodes that subclass
+            # ControlEvent. Iterate so a future emitter doesn't get silently
+            # dropped.
+            for _ in events:
+                pass
+
+            reading: InverterModeReading | None = primary.get(InverterModeReading)
+            if (
+                self._control_module is not None
+                and reading is not None
+                and self._mode_history_store is not None
+            ):
+                schedule: Schedule | None = secondary.get(Schedule)
+                history_before = (
+                    self._mode_history_store.value or InverterModeHistory(samples=())
+                )
+                updated_history = await self._control_module.tick(
+                    now=now,
+                    schedule=schedule,
+                    reading=reading,
+                    history=history_before,
+                    automation_enabled=self.automation_enabled,
+                )
+                if updated_history.samples != history_before.samples:
+                    await self._mode_history_store.save(updated_history)
+                target = self._control_module.current_target(now, schedule)
+                if self.automation_enabled and target is not None:
+                    self.last_dispatched_action = target.value
                     self.last_dispatched_at = now
+                primary[InverterModeHistory] = updated_history
 
             return self._build_sensor_dict(primary, secondary)
 
@@ -947,6 +1042,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "sun_times": primary.get(SunTimes),
             "monthly_bill": secondary.get(MonthlyBillResult),
             "grid_power_history": primary.get(GridPowerHistory),
+            "inverter_mode_history": primary.get(InverterModeHistory),
+            "inverter_mode_reading": primary.get(InverterModeReading),
         }
 
     def _read_sun_times(self, now: datetime) -> SunTimes:

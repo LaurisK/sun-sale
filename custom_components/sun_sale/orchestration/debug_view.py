@@ -297,7 +297,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     {
                         "start": s.start.isoformat(),
                         "end": s.end.isoformat(),
-                        "action": s.action.value,
+                        "mode": s.mode.value,
                         "power_kw": s.power_kw,
                         "expected_profit_eur": s.expected_profit_eur,
                         "reason": s.reason,
@@ -306,10 +306,70 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 ],
                 "total_expected_profit_eur": schedule.total_expected_profit_eur,
             } if schedule is not None else None,
+            "inverter_mode": _inverter_mode_block(data, coordinator),
         },
         "last_dispatched_action": coordinator.last_dispatched_action,
         "last_dispatched_at": (
             coordinator.last_dispatched_at.isoformat()
             if coordinator.last_dispatched_at is not None else None
         ),
+    }
+
+
+def _inverter_mode_block(data: dict, coordinator: Any) -> dict:
+    """Build the ``outputs.inverter_mode`` JSON block.
+
+    Args:
+        data: Coordinator's per-cycle data dict.
+        coordinator: SunSaleCoordinator instance (for automation flag).
+
+    Returns:
+        Dict with the observed history, the current cycle's reading, the
+        forward plan derived from Schedule, and the automation flag.
+    """
+    history = data.get("inverter_mode_history")
+    reading = data.get("inverter_mode_reading")
+    schedule = data.get("schedule")
+
+    history_block = (
+        [
+            {
+                "t": s.timestamp.isoformat(),
+                "mode": s.mode.value,
+                "reg_43110": s.reg_43110_value,
+            }
+            for s in history.samples
+        ]
+        if history is not None
+        else []
+    )
+    plan_block = (
+        [
+            {
+                "start": s.start.isoformat(),
+                "end": s.end.isoformat(),
+                "mode": s.mode.value,
+            }
+            for s in schedule.slots
+        ]
+        if schedule is not None
+        else []
+    )
+    reading_block = (
+        {
+            "timestamp": reading.timestamp.isoformat(),
+            "mode": reading.mode.value,
+            "reg_43110": reading.reg_43110_value,
+            "charge_a": reading.charge_a,
+            "discharge_a": reading.discharge_a,
+            "rc_setpoint_w": reading.rc_setpoint_w,
+        }
+        if reading is not None
+        else None
+    )
+    return {
+        "history": history_block,
+        "plan": plan_block,
+        "reading": reading_block,
+        "automation_enabled": getattr(coordinator, "automation_enabled", False),
     }

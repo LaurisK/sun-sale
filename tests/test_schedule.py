@@ -3,7 +3,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from custom_components.sun_sale.pipeline.battery import degradation_cost_per_kwh
 from custom_components.sun_sale.pipeline.calculation import calculate
-from custom_components.sun_sale.contract.models import Action, GenerationSeries, GenerationSlot, SolarForecast
+from custom_components.sun_sale.contract.models import (
+    GenerationSeries,
+    GenerationSlot,
+    SolarForecast,
+    StorageMode,
+)
 from custom_components.sun_sale.pipeline.schedule import _simulate_soc, optimize_schedule
 from custom_components.sun_sale.inbound.pricing import build_price_series
 from tests.conftest import (
@@ -49,16 +54,17 @@ def test_empty_tariffs_returns_empty_schedule():
 
 
 def test_single_price_results_in_idle():
+    # IDLE at positive sell → AUTO (default-tariff sell on spot 0.10 is positive).
     result = run([make_price(0, 0.10)])
     assert len(result.slots) == 1
-    assert result.slots[0].action == Action.IDLE
+    assert result.slots[0].mode == StorageMode.AUTO
 
 
 def test_all_same_price_no_trade():
     prices = [make_price(h, 0.10) for h in range(24)]
     result = run(prices)
-    # Flat prices → no spread → all idle
-    assert all(s.action == Action.IDLE for s in result.slots)
+    # Flat prices → no spread → all idle (AUTO since sell is positive).
+    assert all(s.mode == StorageMode.AUTO for s in result.slots)
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +76,8 @@ def test_obvious_buy_low_sell_high():
     result = run(prices)
     slot_0 = next(s for s in result.slots if s.start.hour == 0)
     slot_12 = next(s for s in result.slots if s.start.hour == 12)
-    assert slot_0.action == Action.CHARGE_FROM_GRID
-    assert slot_12.action == Action.DISCHARGE_TO_GRID
+    assert slot_0.mode == StorageMode.GULP
+    assert slot_12.mode == StorageMode.DUMP
 
 
 def test_spread_below_degradation_stays_idle():
@@ -79,14 +85,14 @@ def test_spread_below_degradation_stays_idle():
     # Spread of 0.02 EUR → not profitable after degradation + efficiency loss
     prices = [make_price(h, 0.10 if h < 12 else 0.12) for h in range(24)]
     result = run(prices)
-    assert all(s.action == Action.IDLE for s in result.slots)
+    assert all(s.mode == StorageMode.AUTO for s in result.slots)
 
 
 def test_positive_profit_produces_trades():
     prices = [make_price(0, 0.01)] + [make_price(h, 0.10) for h in range(1, 23)] + [make_price(23, 0.50)]
     result = run(prices)
-    charge_slots = [s for s in result.slots if s.action == Action.CHARGE_FROM_GRID]
-    discharge_slots = [s for s in result.slots if s.action == Action.DISCHARGE_TO_GRID]
+    charge_slots = [s for s in result.slots if s.mode == StorageMode.GULP]
+    discharge_slots = [s for s in result.slots if s.mode == StorageMode.DUMP]
     assert len(charge_slots) >= 1
     assert len(discharge_slots) >= 1
 
@@ -95,8 +101,8 @@ def test_charge_before_discharge():
     """Chronological constraint: buy hour must precede sell hour."""
     prices = [make_price(0, 0.01)] + [make_price(h, 0.50) for h in range(1, 4)] + [make_price(h, 0.10) for h in range(4, 24)]
     result = run(prices)
-    charge_slots = [s for s in result.slots if s.action == Action.CHARGE_FROM_GRID]
-    discharge_slots = [s for s in result.slots if s.action == Action.DISCHARGE_TO_GRID]
+    charge_slots = [s for s in result.slots if s.mode == StorageMode.GULP]
+    discharge_slots = [s for s in result.slots if s.mode == StorageMode.DUMP]
     if charge_slots and discharge_slots:
         assert min(s.start for s in charge_slots) < min(s.start for s in discharge_slots)
 
@@ -109,14 +115,14 @@ def test_respects_max_soc_no_charge_when_full():
     bc = default_battery_config()
     prices = [make_price(0, 0.01)] + [make_price(h, 0.50) for h in range(1, 4)]
     result = run(prices, soc=bc.max_soc, battery_config=bc)
-    assert all(s.action != Action.CHARGE_FROM_GRID for s in result.slots)
+    assert all(s.mode != StorageMode.GULP for s in result.slots)
 
 
 def test_respects_min_soc_no_discharge_when_empty():
     bc = default_battery_config()
     prices = [make_price(0, 0.50)] + [make_price(h, 0.01) for h in range(1, 4)]
     result = run(prices, soc=bc.min_soc, battery_config=bc)
-    assert all(s.action != Action.DISCHARGE_TO_GRID for s in result.slots)
+    assert all(s.mode != StorageMode.DUMP for s in result.slots)
 
 
 def test_soc_stays_within_bounds_throughout():
@@ -134,9 +140,9 @@ def test_power_does_not_exceed_max():
     prices = [make_price(0, 0.01)] + [make_price(h, 0.10) for h in range(1, 23)] + [make_price(23, 0.50)]
     result = run(prices, battery_config=bc)
     for slot in result.slots:
-        if slot.action == Action.CHARGE_FROM_GRID:
+        if slot.mode == StorageMode.GULP:
             assert slot.power_kw <= bc.max_charge_power_kw + 1e-6
-        elif slot.action == Action.DISCHARGE_TO_GRID:
+        elif slot.mode == StorageMode.DUMP:
             assert slot.power_kw <= bc.max_discharge_power_kw + 1e-6
 
 
@@ -144,18 +150,19 @@ def test_power_does_not_exceed_max():
 # Solar
 # ---------------------------------------------------------------------------
 
-def test_solar_slot_gets_charge_from_solar_action():
+def test_solar_slot_gets_store_mode():
+    # CHARGE_FROM_SOLAR with no ChargingProfile defaults to STORE.
     prices = [make_price(h, 0.10) for h in range(4)]
     solar = [make_solar(2, 2.0)]
     result = run(prices, solar=solar)
     solar_slot = next(s for s in result.slots if s.start.hour == 2)
-    assert solar_slot.action == Action.CHARGE_FROM_SOLAR
+    assert solar_slot.mode == StorageMode.STORE
 
 
-def test_no_solar_no_charge_from_solar():
+def test_no_solar_no_store_mode():
     prices = [make_price(h, 0.10) for h in range(4)]
     result = run(prices, solar=[])
-    assert all(s.action != Action.CHARGE_FROM_SOLAR for s in result.slots)
+    assert all(s.mode != StorageMode.STORE for s in result.slots)
 
 
 # ---------------------------------------------------------------------------
@@ -229,11 +236,23 @@ def _run_with_negative_sell_window(locked_hours: list[int]) -> "Schedule":
 def test_no_discharge_inside_lockout_window():
     locked = list(range(10, 14))
     result = _run_with_negative_sell_window(locked)
-    discharge_slots = [s for s in result.slots if s.action == Action.DISCHARGE_TO_GRID]
+    discharge_slots = [s for s in result.slots if s.mode == StorageMode.DUMP]
     for slot in discharge_slots:
         assert slot.start.hour not in locked, (
-            f"DISCHARGE_TO_GRID at hour {slot.start.hour} is inside a locked-out window"
+            f"DUMP at hour {slot.start.hour} is inside a locked-out window"
         )
+
+
+def test_idle_slots_map_to_stby_when_sell_is_negative():
+    # Inside the locked-out window an IDLE decision should resolve to STBY,
+    # not AUTO, because exporting at sell < 0 would cost money.
+    locked = [12]
+    result = _run_with_negative_sell_window(locked)
+    locked_slot = next(s for s in result.slots if s.start.hour == 12)
+    # The optimizer leaves hour 12 unpaired; sell is negative → STBY.
+    assert locked_slot.mode in (StorageMode.STBY, StorageMode.GULP), (
+        f"Locked hour expected STBY/GULP, got {locked_slot.mode}"
+    )
 
 
 def test_discharge_allowed_outside_lockout_window():
@@ -267,10 +286,56 @@ def test_discharge_allowed_outside_lockout_window():
     calc = calculate(ps, gen, state, NOW)
     result = optimize_schedule(ps, calc, bc, state, deg, NOW)
 
-    discharge_slots = [s for s in result.slots if s.action == Action.DISCHARGE_TO_GRID]
+    discharge_slots = [s for s in result.slots if s.mode == StorageMode.DUMP]
     assert any(s.start.hour != 12 for s in discharge_slots), (
-        "Expected at least one DISCHARGE_TO_GRID slot outside the locked hour"
+        "Expected at least one DUMP slot outside the locked hour"
     )
     assert all(s.start.hour != 12 for s in discharge_slots), (
-        "No DISCHARGE_TO_GRID slot should be at the locked hour 12"
+        "No DUMP slot should be at the locked hour 12"
     )
+
+
+# ---------------------------------------------------------------------------
+# ChargingProfile-driven STORE/HOARD distinction
+# ---------------------------------------------------------------------------
+
+def test_charge_from_solar_with_no_export_profile_becomes_hoard():
+    from custom_components.sun_sale.contract.models import (
+        ChargeMode,
+        ChargingProfile,
+        ChargingProfileSlot,
+    )
+
+    prices = [make_price(h, 0.10) for h in range(4)]
+    solar = [make_solar(2, 2.0)]
+    bc = default_battery_config()
+    tc = default_tariff_config()
+    state = default_battery_state(0.50)
+    state.estimated_capacity_kwh = bc.nominal_capacity_kwh
+    deg = degradation_cost_per_kwh(bc, state)
+    ps = build_price_series(prices, tc, now=NOW)
+    gen = _make_gen_series(solar)
+    calc = calculate(ps, gen, state, NOW)
+
+    solar_start = solar[0].start
+    profile = ChargingProfile(
+        slots=(
+            ChargingProfileSlot(
+                start=solar_start,
+                end=solar_start + timedelta(hours=1),
+                mode=ChargeMode.NO_EXPORT,
+                expected_kwh=2.0,
+                sell_eur_kwh=-0.01,
+            ),
+        ),
+        free_capacity_kwh=5.0,
+        today_remaining_generation_kwh=2.0,
+        solar_exceeds_capacity=False,
+        allocated_solar_kwh=2.0,
+        total_no_export_kwh=2.0,
+        computed_at=NOW,
+    )
+
+    result = optimize_schedule(ps, calc, bc, state, deg, NOW, charging_profile=profile)
+    solar_slot = next(s for s in result.slots if s.start.hour == 2)
+    assert solar_slot.mode == StorageMode.HOARD

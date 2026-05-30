@@ -1,21 +1,19 @@
 """Control events emitted by DAG nodes — consumed by output adapters (Layer 3b).
 
 No Home Assistant imports. Events are pure data.
+
+Note: The original ``InverterActionEvent`` was removed when the inverter
+control surface migrated from per-cycle TOU rewrites to a register-level
+state machine (see ``docs/solis_control.md``). ``ControlEvent`` is retained
+as the empty base type of the DAG event channel — every DagNode's
+``_compute`` signature returns ``list[ControlEvent]``. Future event types
+(e.g. external VPP triggers) can subclass it without further plumbing.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .models import Action
-
 
 @dataclass(frozen=True)
 class ControlEvent:
-    """Base class for all hardware control events."""
-
-
-@dataclass(frozen=True)
-class InverterActionEvent(ControlEvent):
-    """Emitted by ScheduleNode when the current-slot action changes."""
-    action: Action
-    power_kw: float
+    """Base class for hardware control events emitted by DAG nodes."""

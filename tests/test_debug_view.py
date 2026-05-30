@@ -8,7 +8,6 @@ import pytest
 
 from custom_components.sun_sale.orchestration.debug_view import SunSaleDebugView, _coordinator_to_dict
 from custom_components.sun_sale.contract.models import (
-    Action,
     BatteryState,
     CalculationResult,
     GenerationSeries,
@@ -17,6 +16,7 @@ from custom_components.sun_sale.contract.models import (
     Schedule,
     ScheduleSlot,
     SlotDecision,
+    StorageMode,
     TariffConfig,
 )
 from custom_components.sun_sale.inbound.pricing import build_price_series
@@ -30,12 +30,12 @@ NOW = BASE_DT
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_slot(hour_offset: int = 0, action: Action = Action.IDLE) -> ScheduleSlot:
+def make_slot(hour_offset: int = 0, mode: StorageMode = StorageMode.AUTO) -> ScheduleSlot:
     start = BASE + timedelta(hours=hour_offset)
     return ScheduleSlot(
         start=start,
         end=start + timedelta(hours=1),
-        action=action,
+        mode=mode,
         power_kw=0.0,
         expected_soc_after=0.5,
         expected_profit_eur=0.0,
@@ -91,7 +91,7 @@ def make_coordinator(
     coord.tariff_config = tariff_cfg
 
     schedule = Schedule(
-        slots=[make_slot(0, Action.CHARGE_FROM_GRID), make_slot(1, Action.DISCHARGE_TO_GRID)],
+        slots=[make_slot(0, StorageMode.GULP), make_slot(1, StorageMode.DUMP)],
         total_expected_profit_eur=0.42,
         degradation_cost_per_kwh=0.02,
         computed_at=BASE,
@@ -150,10 +150,10 @@ def test_schedule_slots_serialised():
     assert len(schedule["slots"]) == 2
 
     slot = schedule["slots"][0]
-    for key in ("start", "end", "action", "power_kw", "expected_profit_eur", "reason"):
+    for key in ("start", "end", "mode", "power_kw", "expected_profit_eur", "reason"):
         assert key in slot, f"missing slot key: {key}"
 
-    assert slot["action"] == "charge_from_grid"
+    assert slot["mode"] == "gulp"
     assert isinstance(slot["start"], str)
 
 

@@ -30,10 +30,7 @@ from .tier3 import (
     ForecastAccuracyNode,
     LockoutNode,
 )
-from .tier4 import (
-    ScheduleNode,
-    make_last_ref,
-)
+from .tier4 import ScheduleNode
 
 __all__ = [
     "BaseLoadProfileNode",
@@ -50,5 +47,4 @@ __all__ = [
     "PricingNode",
     "ProfitabilityNode",
     "ScheduleNode",
-    "make_last_ref",
 ]

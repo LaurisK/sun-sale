@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 from custom_components.sun_sale.contract.models import (
-    Action,
     Schedule,
     ScheduleSlot,
+    StorageMode,
     TariffResult,
 )
 from custom_components.sun_sale.inbound.pricing import build_price_series
@@ -25,12 +25,12 @@ from tests.conftest import default_tariff_config, make_price
 BASE = datetime(2024, 1, 15, 0, 0, tzinfo=timezone.utc)
 
 
-def make_slot(hour: int, action: Action = Action.IDLE, profit: float = 0.0) -> ScheduleSlot:
+def make_slot(hour: int, mode: StorageMode = StorageMode.AUTO, profit: float = 0.0) -> ScheduleSlot:
     start = BASE.replace(hour=hour)
     return ScheduleSlot(
         start=start,
         end=start + timedelta(hours=1),
-        action=action,
+        mode=mode,
         power_kw=3.0,
         expected_soc_after=0.5,
         expected_profit_eur=profit,
@@ -82,19 +82,19 @@ def make_entry(entry_id: str = "entry1") -> MagicMock:
 
 def test_current_action_idle_when_no_data():
     sensor = CurrentActionSensor(make_coord(None), make_entry())
-    assert sensor.native_value == Action.IDLE.value
+    assert sensor.native_value == StorageMode.AUTO.value
 
 
 def test_current_action_idle_when_empty_schedule():
     schedule = make_schedule([])
     sensor = CurrentActionSensor(make_coord({"schedule": schedule}), make_entry())
-    assert sensor.native_value == Action.IDLE.value
+    assert sensor.native_value == StorageMode.AUTO.value
 
 
-def test_current_action_returns_first_slot_action_as_fallback():
-    slots = [make_slot(0, Action.CHARGE_FROM_GRID), make_slot(1, Action.DISCHARGE_TO_GRID)]
+def test_current_action_returns_first_slot_mode_as_fallback():
+    slots = [make_slot(0, StorageMode.GULP), make_slot(1, StorageMode.DUMP)]
     sensor = CurrentActionSensor(make_coord({"schedule": make_schedule(slots)}), make_entry())
-    assert sensor.native_value == Action.CHARGE_FROM_GRID.value
+    assert sensor.native_value == StorageMode.GULP.value
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +103,13 @@ def test_current_action_returns_first_slot_action_as_fallback():
 
 def test_next_action_idle_when_no_data():
     sensor = NextActionSensor(make_coord(None), make_entry())
-    assert sensor.native_value == Action.IDLE.value
+    assert sensor.native_value == StorageMode.AUTO.value
 
 
 def test_next_action_returns_current_when_no_change():
-    slots = [make_slot(0, Action.IDLE), make_slot(1, Action.IDLE)]
+    slots = [make_slot(0, StorageMode.AUTO), make_slot(1, StorageMode.AUTO)]
     sensor = NextActionSensor(make_coord({"schedule": make_schedule(slots)}), make_entry())
-    assert sensor.native_value == Action.IDLE.value
+    assert sensor.native_value == StorageMode.AUTO.value
 
 
 # ---------------------------------------------------------------------------
@@ -126,10 +126,10 @@ def test_expected_profit_sums_today_slots():
     start1 = datetime(today.year, today.month, today.day, 10, tzinfo=timezone.utc)
     start2 = datetime(today.year, today.month, today.day, 11, tzinfo=timezone.utc)
     slot1 = ScheduleSlot(start=start1, end=start1 + timedelta(hours=1),
-                         action=Action.IDLE, power_kw=0, expected_soc_after=0.5,
+                         mode=StorageMode.AUTO, power_kw=0, expected_soc_after=0.5,
                          expected_profit_eur=0.10, reason="")
     slot2 = ScheduleSlot(start=start2, end=start2 + timedelta(hours=1),
-                         action=Action.IDLE, power_kw=0, expected_soc_after=0.5,
+                         mode=StorageMode.AUTO, power_kw=0, expected_soc_after=0.5,
                          expected_profit_eur=0.20, reason="")
     schedule = make_schedule([slot1, slot2])
     sensor = ExpectedProfitSensor(make_coord({"schedule": schedule}), make_entry())

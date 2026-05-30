@@ -1,16 +1,36 @@
 """Inverter control abstraction.
 
-Translates generic battery commands (charge, discharge, idle) into
-platform-specific Home Assistant service calls.
+This module owns all platform-specific HA service calls that touch the
+inverter, plus the read-side helpers used by translators to capture the
+inverter's current state.
+
+For Solis (the only fully-supported platform at the moment), the controller
+exposes a single primitive — ``apply_mode(mode, spec)`` — that drives the
+inverter into the target ``StorageMode`` by writing the bit switches that
+compose register 43110 plus the number entities for export limit, charge /
+discharge currents, and the Remote-Control active-power setpoint.
+
+Every write is idempotent: the current readback is consulted first, and
+the underlying HA service is only invoked when the value differs from the
+target. This eliminates flash wear from no-op rewrites and keeps Modbus
+traffic to a minimum.
+
+Other platforms (Huawei, SolarEdge, GoodWe, generic) still produce the
+state-read telemetry needed by the rest of the pipeline; their
+``apply_mode`` is a logged no-op pending platform-specific implementations.
 """
 from __future__ import annotations
 
 from enum import Enum
+from typing import Iterable
 
 from homeassistant.core import HomeAssistant
-from homeassistant.util import dt as dt_util
 
-from ..contract.models import BatteryConfig
+from ..contract.models import (
+    BatteryConfig,
+    StorageMode,
+    StorageModeSpec,
+)
 
 
 class InverterPlatform(Enum):
@@ -26,6 +46,17 @@ _POWER_UNIT_SCALERS: dict[str, float] = {
     "mW": 1.0 / 1_000_000.0,
     "kW": 1.0,
     "MW": 1000.0,
+}
+
+# Tolerance (amps / watts) below which a number write is treated as a no-op.
+_NUMBER_WRITE_EPSILON = 0.5
+
+# Register 43110 bit map — see ``docs/solis_control.md`` §2.
+_REG_43110_BIT_ROLES: dict[int, str] = {
+    0: "self_use_switch",
+    1: "tou_mode_switch",
+    5: "allow_grid_charge_switch",
+    6: "feed_in_priority_switch",
 }
 
 
@@ -49,25 +80,34 @@ def normalize_power_to_kw(value: float, unit: str) -> float:
 
 
 class InverterController:
-    """Translates generic battery commands into platform-specific HA service calls.
+    """Platform-aware reader / writer for the configured inverter.
 
-    entity_ids keys for non-Solis platforms:
-      - "battery_soc":      sensor reporting SoC (0–100 % or 0.0–1.0)
-      - "battery_power":    sensor reporting battery power (kW, positive=charging)
-      - "grid_power":       sensor reporting grid power (kW, positive=importing)
-      - "charge_control":   number/switch entity used to command the inverter
+    For Solis the role-keyed ``entity_ids`` dict is populated by
+    ``inbound/solis_entity_resolver.py`` or by the manual-mapping form
+    in ``config_flow.py``. The required role keys are:
 
-    entity_ids keys for Solis (solis_modbus):
-      - "battery_soc", "battery_power", "grid_power" as above
-      - "solis_charge_current"          number entity for charge amps
-      - "solis_discharge_current"       number entity for discharge amps
-      - "solis_charge_start_time_1"     time entity, slot-1 charge start (HH:MM:SS)
-      - "solis_charge_end_time_1"       time entity, slot-1 charge end (HH:MM:SS)
-      - "solis_discharge_start_time_1"  time entity, slot-1 discharge start (HH:MM:SS)
-      - "solis_discharge_end_time_1"    time entity, slot-1 discharge end (HH:MM:SS)
-      - "solis_tou_mode_switch"         switch entity for TOU mode
-      - "solis_allow_grid_charge_switch" switch entity to allow grid charging
-      - "solis_self_use_mode_switch"    switch entity for self-use / idle mode
+      Telemetry (always required):
+        ``battery_soc``, ``battery_power``, ``grid_power``
+
+      Storage Control word (register 43110):
+        ``storage_control_readback`` (sensor)
+        ``self_use_switch``          (bit 0)
+        ``tou_mode_switch``          (bit 1)
+        ``allow_grid_charge_switch`` (bit 5)
+        ``feed_in_priority_switch``  (bit 6)
+
+      Number entities:
+        ``battery_max_charge_current``     (charge amps)
+        ``battery_max_discharge_current``  (discharge amps)
+        ``rc_setpoint``                    (RC active-power setpoint, W)
+        ``backflow_power``                 (export cap, W)
+
+      Other switches:
+        ``grid_feed_in_power_limit_switch``     (export-limit enable)
+        ``allow_export_under_self_use_switch``  (master export gate)
+
+    Missing entity IDs degrade gracefully — the write is logged as a warning
+    and skipped, never raised.
     """
 
     def __init__(
@@ -83,8 +123,7 @@ class InverterController:
             hass: Home Assistant instance for service calls and state reads.
             platform: Inverter platform enum determining the dispatch path.
             entity_ids: Platform-specific entity-ID map (see class docstring).
-            battery_config: Battery parameters for current/voltage calculations
-                (required for Solis; optional for other platforms).
+            battery_config: Battery parameters used to bound currents.
         """
         self._hass = hass
         self._platform = platform
@@ -92,23 +131,7 @@ class InverterController:
         self._battery_config = battery_config
 
     # ------------------------------------------------------------------ #
-    # Commands                                                             #
-    # ------------------------------------------------------------------ #
-
-    async def async_charge_from_grid(self, power_kw: float) -> None:
-        """Command inverter to charge battery from the grid at given power."""
-        await self._async_dispatch("charge", power_kw)
-
-    async def async_discharge_to_grid(self, power_kw: float) -> None:
-        """Command inverter to discharge battery to the grid."""
-        await self._async_dispatch("discharge", power_kw)
-
-    async def async_idle(self) -> None:
-        """Stop charge/discharge — let solar self-consume."""
-        await self._async_dispatch("idle", 0.0)
-
-    # ------------------------------------------------------------------ #
-    # State reads                                                          #
+    # State reads — telemetry (any platform)                              #
     # ------------------------------------------------------------------ #
 
     def get_battery_soc(self) -> float:
@@ -116,24 +139,160 @@ class InverterController:
         return self._read_float("battery_soc", fallback=0.5, normalize_pct=True)
 
     def get_battery_power(self) -> float:
-        """Return battery power in kW (positive = charging). 0.0 when unavailable.
-
-        Auto-converts the source sensor from W/MW to kW using its
-        ``unit_of_measurement`` attribute.
-        """
+        """Return battery power in kW (positive = charging). 0.0 when unavailable."""
         return self._read_power_kw("battery_power", fallback=0.0)
 
     def get_grid_power(self) -> float:
-        """Return grid power in kW (positive = importing). 0.0 when unavailable.
-
-        Auto-converts the source sensor from W/MW to kW using its
-        ``unit_of_measurement`` attribute.
-        """
+        """Return grid power in kW (positive = importing). 0.0 when unavailable."""
         return self._read_power_kw("grid_power", fallback=0.0)
+
+    # ------------------------------------------------------------------ #
+    # State reads — Solis state machine (consumed by InverterModeTranslator) #
+    # ------------------------------------------------------------------ #
+
+    def get_storage_control_word(self) -> int | None:
+        """Return the current value of register 43110.
+
+        Returns:
+            Integer bitmask, or ``None`` when the readback sensor is
+            absent / unavailable. The translator decodes this to a
+            ``StorageMode`` via ``storage_mode_specs.decode_mode``.
+        """
+        raw = self._read_optional_float("storage_control_readback")
+        return int(raw) if raw is not None else None
+
+    def get_charge_current_a(self) -> float | None:
+        """Return the configured battery max charge current in amps."""
+        return self._read_optional_float("battery_max_charge_current")
+
+    def get_discharge_current_a(self) -> float | None:
+        """Return the configured battery max discharge current in amps."""
+        return self._read_optional_float("battery_max_discharge_current")
+
+    def get_rc_setpoint_w(self) -> int | None:
+        """Return the Remote-Control AC active-power setpoint in watts."""
+        raw = self._read_optional_float("rc_setpoint")
+        return int(raw) if raw is not None else None
+
+    def get_backflow_power_w(self) -> int | None:
+        """Return the currently configured export (backflow) limit in watts."""
+        raw = self._read_optional_float("backflow_power")
+        return int(raw) if raw is not None else None
+
+    # ------------------------------------------------------------------ #
+    # Write side — apply_mode(StorageMode)                                 #
+    # ------------------------------------------------------------------ #
+
+    async def apply_mode(
+        self,
+        mode: StorageMode,
+        spec: StorageModeSpec,
+    ) -> None:
+        """Drive the inverter to the target StorageMode via the minimum set of writes.
+
+        Each write step (bit switches, export limit, currents, RC setpoint)
+        consults its current readback first and skips the write when the
+        readback already matches the target. This makes consecutive calls
+        with the same mode free of side effects.
+
+        On non-Solis platforms this is currently a no-op pending a
+        platform-specific implementation; the call is logged so observability
+        is not lost.
+
+        Args:
+            mode: Target StorageMode (used for logging only — the concrete
+                register targets live in ``spec``).
+            spec: Concrete register targets for the requested mode.
+        """
+        if self._platform != InverterPlatform.SOLIS:
+            import logging
+            logging.getLogger(__name__).debug(
+                "apply_mode(%s) — platform %s has no register-level implementation",
+                mode.value, self._platform.value,
+            )
+            return
+
+        await self._apply_43110_bits(spec.reg_43110_value)
+        if spec.charge_a is not None:
+            await self._set_number(
+                "battery_max_charge_current",
+                spec.charge_a,
+                tolerance_a=_NUMBER_WRITE_EPSILON,
+            )
+        if spec.discharge_a is not None:
+            await self._set_number(
+                "battery_max_discharge_current",
+                spec.discharge_a,
+                tolerance_a=_NUMBER_WRITE_EPSILON,
+            )
+        if spec.export_limit_w is not None:
+            await self._set_number(
+                "backflow_power",
+                float(spec.export_limit_w),
+                tolerance_a=_NUMBER_WRITE_EPSILON,
+            )
+        # RC setpoint always written — 0 W is the explicit "no override" value.
+        await self._set_number(
+            "rc_setpoint",
+            float(spec.rc_setpoint_w),
+            tolerance_a=_NUMBER_WRITE_EPSILON,
+        )
 
     # ------------------------------------------------------------------ #
     # Internals                                                            #
     # ------------------------------------------------------------------ #
+
+    async def _apply_43110_bits(self, target_value: int) -> None:
+        """Toggle only the bit switches whose desired state differs from the readback.
+
+        Reads the current value of register 43110 via the ``storage_control_readback``
+        sensor; for each known bit (0/1/5/6) compares the target's bit to the
+        observed bit and turns the corresponding switch on / off when they differ.
+        Bits whose role switch is not mapped in ``entity_ids`` are silently skipped.
+
+        Args:
+            target_value: Desired bitmask value for register 43110.
+        """
+        current = self.get_storage_control_word()
+        for bit, role in _REG_43110_BIT_ROLES.items():
+            target_bit = (target_value >> bit) & 1
+            current_bit = ((current >> bit) & 1) if current is not None else None
+            if current_bit == target_bit:
+                continue
+            entity_id = self._entity_ids.get(role, "")
+            if not entity_id:
+                continue
+            service = "turn_on" if target_bit else "turn_off"
+            await self._hass.services.async_call(
+                "switch", service,
+                {"entity_id": entity_id},
+                blocking=True,
+            )
+
+    async def _set_number(
+        self,
+        role: str,
+        target_value: float,
+        tolerance_a: float,
+    ) -> None:
+        """Write a number entity only when its readback differs by more than tolerance.
+
+        Args:
+            role: Entity-ID map key (e.g. ``battery_max_charge_current``).
+            target_value: Desired value to set.
+            tolerance_a: Absolute tolerance under which the write is skipped.
+        """
+        entity_id = self._entity_ids.get(role, "")
+        if not entity_id:
+            return
+        current = self._read_optional_float(role)
+        if current is not None and abs(current - target_value) <= tolerance_a:
+            return
+        await self._hass.services.async_call(
+            "number", "set_value",
+            {"entity_id": entity_id, "value": target_value},
+            blocking=True,
+        )
 
     def _read_float(
         self, key: str, fallback: float, normalize_pct: bool = False
@@ -148,17 +307,34 @@ class InverterController:
         Returns:
             Float sensor value, or fallback.
         """
+        value = self._read_optional_float(key, normalize_pct=normalize_pct)
+        return value if value is not None else fallback
+
+    def _read_optional_float(
+        self, key: str, normalize_pct: bool = False
+    ) -> float | None:
+        """Read a numeric HA state; return ``None`` when absent or unparseable.
+
+        Args:
+            key: Entity-ID map key.
+            normalize_pct: When True, divide values > 1.0 by 100.
+
+        Returns:
+            Parsed float, or ``None``.
+        """
         entity_id = self._entity_ids.get(key, "")
+        if not entity_id:
+            return None
         state = self._hass.states.get(entity_id)
         if state is None or state.state in ("unavailable", "unknown", ""):
-            return fallback
+            return None
         try:
             value = float(state.state)
-            if normalize_pct and value > 1.0:
-                return value / 100.0
-            return value
-        except ValueError:
-            return fallback
+        except (TypeError, ValueError):
+            return None
+        if normalize_pct and value > 1.0:
+            return value / 100.0
+        return value
 
     def _read_power_kw(self, key: str, fallback: float) -> float:
         """Read a HA power sensor and normalise to kW.
@@ -185,128 +361,3 @@ class InverterController:
             return fallback
         unit = str(state.attributes.get("unit_of_measurement") or "").strip()
         return normalize_power_to_kw(value, unit)
-
-    async def _async_dispatch(self, mode: str, power_kw: float) -> None:
-        """Route a charge/discharge/idle command to the platform-specific handler.
-
-        Args:
-            mode: One of "charge", "discharge", or "idle".
-            power_kw: Requested power in kW (ignored for "idle").
-        """
-        if self._platform == InverterPlatform.HUAWEI_SOLAR:
-            # Huawei Solar: positive W = charge, negative W = discharge, 0 = idle
-            if mode == "charge":
-                watt_value = power_kw * 1000.0
-            elif mode == "discharge":
-                watt_value = -(power_kw * 1000.0)
-            else:
-                watt_value = 0.0
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids.get("charge_control", ""), "value": watt_value},
-                blocking=True,
-            )
-        elif self._platform == InverterPlatform.SOLIS:
-            await self._async_dispatch_solis(mode, power_kw)
-        else:
-            # Generic path: SOLAREDGE, GOODWE, GENERIC
-            # positive kW = charge, negative = discharge, 0 = idle
-            if mode == "charge":
-                value = power_kw
-            elif mode == "discharge":
-                value = -power_kw
-            else:
-                value = 0.0
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids.get("charge_control", ""), "value": value},
-                blocking=True,
-            )
-
-    async def _async_dispatch_solis(self, mode: str, power_kw: float) -> None:
-        """Dispatch to Solis inverter via TOU slot 1."""
-        cfg = self._battery_config
-        nominal_v = cfg.nominal_voltage_v if cfg is not None else 48.0
-
-        now = dt_util.now()  # HA-local time — inverter clock matches local timezone
-        start_minute = (now.minute // 5) * 5
-        start_time = f"{now.hour:02d}:{start_minute:02d}:00"
-        end_hour = (now.hour + 1) % 24
-        end_time = f"{end_hour:02d}:00:00"
-
-        if mode == "charge":
-            max_amps = ((cfg.max_charge_power_kw * 1000) / nominal_v) if cfg is not None else float("inf")
-            amps = min(max(power_kw * 1000 / nominal_v, 0.0), max_amps)
-
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_charge_current"], "value": amps},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "time", "set_value",
-                {"entity_id": self._entity_ids["solis_charge_start_time_1"], "time": start_time},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "time", "set_value",
-                {"entity_id": self._entity_ids["solis_charge_end_time_1"], "time": end_time},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "switch", "turn_on",
-                {"entity_id": self._entity_ids["solis_allow_grid_charge_switch"]},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "switch", "turn_on",
-                {"entity_id": self._entity_ids["solis_tou_mode_switch"]},
-                blocking=True,
-            )
-
-        elif mode == "discharge":
-            max_amps = ((cfg.max_discharge_power_kw * 1000) / nominal_v) if cfg is not None else float("inf")
-            amps = min(max(power_kw * 1000 / nominal_v, 0.0), max_amps)
-
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_discharge_current"], "value": amps},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "time", "set_value",
-                {"entity_id": self._entity_ids["solis_discharge_start_time_1"], "time": start_time},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "time", "set_value",
-                {"entity_id": self._entity_ids["solis_discharge_end_time_1"], "time": end_time},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "switch", "turn_on",
-                {"entity_id": self._entity_ids["solis_tou_mode_switch"]},
-                blocking=True,
-            )
-
-        else:  # idle
-            await self._hass.services.async_call(
-                "switch", "turn_off",
-                {"entity_id": self._entity_ids["solis_tou_mode_switch"]},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "switch", "turn_on",
-                {"entity_id": self._entity_ids["solis_self_use_mode_switch"]},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_charge_current"], "value": 0},
-                blocking=True,
-            )
-            await self._hass.services.async_call(
-                "number", "set_value",
-                {"entity_id": self._entity_ids["solis_discharge_current"], "value": 0},
-                blocking=True,
-            )
