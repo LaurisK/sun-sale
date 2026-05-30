@@ -910,7 +910,7 @@ class MonthlyBillSensor(_BaseSensor):
 
     _attr_name = "sunSale Monthly Bill"
     _attr_native_unit_of_measurement = "EUR"
-    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_state_class = SensorStateClass.TOTAL
     _attr_icon = "mdi:currency-eur"
 
     def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
@@ -928,6 +928,16 @@ class MonthlyBillSensor(_BaseSensor):
         if result is None:
             return None
         return round(result.total_month_eur, 4)
+
+    @property
+    def last_reset(self) -> datetime:
+        """Return the start of the current calendar month in UTC.
+
+        Returns:
+            Timezone-aware datetime for midnight on the 1st of the current month.
+        """
+        now = datetime.now(timezone.utc)
+        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
