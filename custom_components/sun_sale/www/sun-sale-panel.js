@@ -48,8 +48,9 @@
   const BUY_PRICE_ENTITY  = 'sensor.sunsale_current_buy_price';
   const SELL_PRICE_ENTITY = 'sensor.sunsale_current_sell_price';
   const PRICING_ENTITY    = 'sensor.sunsale_pricing';
-  const DASHBOARD_ENTITY  = 'sensor.sunsale_dashboard';
-  const APEXCHARTS_CDN    = 'https://cdn.jsdelivr.net/npm/apexcharts@3.54.0/dist/apexcharts.min.js';
+  const DASHBOARD_ENTITY      = 'sensor.sunsale_dashboard';
+  const MONTHLY_BILL_ENTITY   = 'sensor.sunsale_monthly_bill';
+  const APEXCHARTS_CDN        = 'https://cdn.jsdelivr.net/npm/apexcharts@3.54.0/dist/apexcharts.min.js';
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,7 @@
       super();
       this._hass        = null;
       this._chart       = null;
+      this._billChart   = null;
       this._g1Chart     = null;
       this._g2Chart     = null;
       this._g3Chart     = null;
@@ -100,6 +102,7 @@
 
     disconnectedCallback() {
       if (this._chart)     { this._chart.destroy();     this._chart     = null; }
+      if (this._billChart) { this._billChart.destroy();  this._billChart = null; }
       if (this._g1Chart)   { this._g1Chart.destroy();    this._g1Chart   = null; }
       if (this._g2Chart)   { this._g2Chart.destroy();    this._g2Chart   = null; }
       if (this._g3Chart)   { this._g3Chart.destroy();    this._g3Chart   = null; }
@@ -234,6 +237,28 @@
             margin: 0 0 4px;
           }
           .accuracy-chart { width: 100%; }
+          .bill-title {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--secondary-text-color, #888);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin: 16px 0 4px;
+          }
+          .bill-summary {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 6px 8px;
+            margin: 0 0 8px;
+            font-size: 0.85rem;
+            color: var(--primary-text-color, #fff);
+          }
+          .bill-summary .bill-label { color: var(--secondary-text-color, #888); }
+          .bill-summary .bill-value { font-weight: 600; }
+          .bill-summary .bill-value.revenue { color: #66bb6a; }
+          .bill-summary .bill-sep { color: var(--secondary-text-color, #444); }
+          .bill-chart { width: 100%; }
         </style>
         <div id="card">
           <h2>☀ Sun Sale</h2>
@@ -243,6 +268,7 @@
           <div id="generation"></div>
           <div id="status">Loading…</div>
           <div id="chart"></div>
+          <div id="bill"></div>
           <div id="accuracy"></div>
         </div>
       `;
@@ -885,8 +911,174 @@
       this._chart = new ApexCharts(el, options);
       this._chart.render().then(() => drawErrorOverlay(this._chart));
 
+      this._renderBillChart();
+
       const dashAttrsForQuality = this._hass.states[DASHBOARD_ENTITY]?.attributes;
       this._renderAccuracySection(dashAttrsForQuality?.forecast_quality ?? null);
+    }
+
+    // ── Net Billing Chart ──────────────────────────────────────────────────────
+
+    _renderBillChart() {
+      const container = this.shadowRoot.querySelector('#bill');
+      if (!container) return;
+
+      const billAttrs = this._hass.states[MONTHLY_BILL_ENTITY]?.attributes;
+      if (!billAttrs || !Array.isArray(billAttrs.slots) || !billAttrs.slots.length) {
+        container.innerHTML = '<div class="bill-title">Net Billing</div>'
+          + '<div class="bill-summary" style="color:#666">No billing data yet.</div>';
+        return;
+      }
+
+      if (this._billChart) { this._billChart.destroy(); this._billChart = null; }
+
+      const {
+        carry_eur, yday_to_now_eur, total_month_eur, month_str,
+        previous_month_str, previous_month_eur, slots,
+      } = billAttrs;
+
+      const COST_COLOR    = '#ef5350';
+      const REVENUE_COLOR = '#66bb6a';
+      const CUMUL_COLOR   = '#ffb300';
+
+      const barData = slots.map(s => {
+        const x = new Date(s.start).getTime();
+        const y = s.net_cost_eur;
+        const fillColor = y < 0 ? REVENUE_COLOR : COST_COLOR;
+        return { x, y, fillColor, strokeColor: fillColor };
+      });
+
+      let running = carry_eur;
+      const cumulData = slots.map(s => {
+        running += s.net_cost_eur;
+        return { x: new Date(s.start).getTime(), y: running };
+      });
+
+      const fmt2 = v => (v >= 0 ? '+' : '') + v.toFixed(2) + ' €';
+      const prevHtml = (previous_month_str)
+        ? `<span class="bill-sep">·</span>`
+          + `<span class="bill-label">Prev ${previous_month_str}:</span>`
+          + `<span class="bill-value">${fmt2(previous_month_eur)}</span>`
+        : '';
+
+      container.innerHTML = `
+        <div class="bill-title">Net Billing — ${month_str}</div>
+        <div class="bill-summary">
+          <span class="bill-label">Carry:</span>
+          <span class="bill-value">${fmt2(carry_eur)}</span>
+          <span class="bill-sep">·</span>
+          <span class="bill-label">Live:</span>
+          <span class="bill-value">${fmt2(yday_to_now_eur)}</span>
+          <span class="bill-sep">·</span>
+          <span class="bill-label">Total:</span>
+          <span class="bill-value ${total_month_eur < 0 ? 'revenue' : ''}">${fmt2(total_month_eur)}</span>
+          ${prevHtml}
+        </div>
+        <div id="bill-chart" class="bill-chart"></div>
+      `;
+
+      const options = {
+        series: [
+          { name: 'Net cost / slot', type: 'bar',  data: barData   },
+          { name: 'Running total',   type: 'line', data: cumulData },
+        ],
+        chart: {
+          type:       'line',
+          height:     250,
+          background: 'transparent',
+          toolbar:    { show: false },
+          animations: { enabled: false },
+          fontFamily: 'inherit',
+        },
+        theme: { mode: 'dark' },
+        plotOptions: {
+          bar: { horizontal: false, columnWidth: '100%' },
+        },
+        stroke: {
+          show:      true,
+          curve:     ['smooth', 'smooth'],
+          width:     [0,        2       ],
+        },
+        colors: [COST_COLOR, CUMUL_COLOR],
+        fill: {
+          type:    ['solid', 'solid'],
+          opacity: [1,       1      ],
+        },
+        xaxis: {
+          type: 'datetime',
+          labels: {
+            datetimeUTC: false,
+            format:      'dd MMM HH:mm',
+            style:  { colors: '#aaa', fontSize: '10px' },
+            rotate: -30,
+          },
+          axisBorder: { show: false },
+          axisTicks:  { show: false },
+        },
+        yaxis: [
+          {
+            seriesName: 'Net cost / slot',
+            title: {
+              text:  'EUR / slot',
+              style: { color: '#aaa', fontSize: '11px' },
+            },
+            forceNiceScale:  true,
+            decimalsInFloat: 4,
+            labels: {
+              style:     { colors: '#aaa', fontSize: '10px' },
+              formatter: v => (v != null ? v.toFixed(4) : ''),
+            },
+          },
+          {
+            seriesName: 'Running total',
+            opposite:   true,
+            title: {
+              text:  'EUR total',
+              style: { color: CUMUL_COLOR, fontSize: '11px' },
+            },
+            forceNiceScale:  true,
+            decimalsInFloat: 2,
+            labels: {
+              style:     { colors: CUMUL_COLOR, fontSize: '10px' },
+              formatter: v => (v != null ? v.toFixed(2) : ''),
+            },
+          },
+        ],
+        annotations: {
+          yaxis: [{
+            y:               0,
+            borderColor:     'rgba(255,255,255,0.20)',
+            strokeDashArray: 3,
+          }],
+        },
+        tooltip: {
+          shared:    true,
+          intersect: false,
+          theme:     'dark',
+          x: { format: 'dd MMM yyyy HH:mm' },
+          y: {
+            formatter: (val) => {
+              if (val == null) return null;
+              return (val >= 0 ? '+' : '') + val.toFixed(4) + ' €';
+            },
+          },
+        },
+        legend: {
+          show:   true,
+          labels: { colors: '#aaa' },
+        },
+        grid: {
+          borderColor: 'rgba(255,255,255,0.07)',
+          xaxis: { lines: { show: true } },
+          yaxis: { lines: { show: true } },
+        },
+        markers:    { size: 0 },
+        dataLabels: { enabled: false },
+      };
+
+      const el = container.querySelector('#bill-chart');
+      this._billChart = new ApexCharts(el, options);
+      this._billChart.render();
     }
 
     // ── Forecast Quality Charts ────────────────────────────────────────────────
