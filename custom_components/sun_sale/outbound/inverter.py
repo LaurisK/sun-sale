@@ -21,6 +21,33 @@ class InverterPlatform(Enum):
     GENERIC = "generic"
 
 
+_POWER_UNIT_SCALERS: dict[str, float] = {
+    "W": 1.0 / 1000.0,
+    "mW": 1.0 / 1_000_000.0,
+    "kW": 1.0,
+    "MW": 1000.0,
+}
+
+
+def normalize_power_to_kw(value: float, unit: str) -> float:
+    """Rescale a power value to kW based on its ``unit_of_measurement``.
+
+    Treats an empty or unrecognised unit as kW (the canonical internal
+    unit), so existing configs that already return kW remain unaffected.
+
+    Args:
+        value: Raw sensor value as published by HA.
+        unit: HA ``unit_of_measurement`` attribute (e.g. "W", "kW").
+
+    Returns:
+        Value expressed in kW.
+    """
+    scaler = _POWER_UNIT_SCALERS.get(unit.strip())
+    if scaler is None:
+        return value
+    return value * scaler
+
+
 class InverterController:
     """Translates generic battery commands into platform-specific HA service calls.
 
@@ -89,12 +116,20 @@ class InverterController:
         return self._read_float("battery_soc", fallback=0.5, normalize_pct=True)
 
     def get_battery_power(self) -> float:
-        """Return battery power in kW (positive = charging). 0.0 when unavailable."""
-        return self._read_float("battery_power", fallback=0.0)
+        """Return battery power in kW (positive = charging). 0.0 when unavailable.
+
+        Auto-converts the source sensor from W/MW to kW using its
+        ``unit_of_measurement`` attribute.
+        """
+        return self._read_power_kw("battery_power", fallback=0.0)
 
     def get_grid_power(self) -> float:
-        """Return grid power in kW (positive = importing). 0.0 when unavailable."""
-        return self._read_float("grid_power", fallback=0.0)
+        """Return grid power in kW (positive = importing). 0.0 when unavailable.
+
+        Auto-converts the source sensor from W/MW to kW using its
+        ``unit_of_measurement`` attribute.
+        """
+        return self._read_power_kw("grid_power", fallback=0.0)
 
     # ------------------------------------------------------------------ #
     # Internals                                                            #
@@ -124,6 +159,32 @@ class InverterController:
             return value
         except ValueError:
             return fallback
+
+    def _read_power_kw(self, key: str, fallback: float) -> float:
+        """Read a HA power sensor and normalise to kW.
+
+        Reads the sensor's ``unit_of_measurement`` attribute and rescales:
+        W → /1000, MW → ×1000, kW (or missing/unknown) → as-is. Sensor
+        vendors are inconsistent about whether grid/battery power is
+        published in W or kW, so the caller cannot assume a unit.
+
+        Args:
+            key: Entity-ID map key (e.g. "grid_power", "battery_power").
+            fallback: Value returned when the entity is absent or unparseable.
+
+        Returns:
+            Sensor value normalised to kW, or fallback.
+        """
+        entity_id = self._entity_ids.get(key, "")
+        state = self._hass.states.get(entity_id)
+        if state is None or state.state in ("unavailable", "unknown", ""):
+            return fallback
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            return fallback
+        unit = str(state.attributes.get("unit_of_measurement") or "").strip()
+        return normalize_power_to_kw(value, unit)
 
     async def _async_dispatch(self, mode: str, power_kw: float) -> None:
         """Route a charge/discharge/idle command to the platform-specific handler.

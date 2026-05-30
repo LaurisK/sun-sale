@@ -52,6 +52,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     forecast_quality = data.get("forecast_quality")
     sun_times = data.get("sun_times")
     monthly_bill = data.get("monthly_bill")
+    grid_power_history = data.get("grid_power_history")
 
     cfg = coordinator._config  # noqa: SLF001
     return {
@@ -74,6 +75,13 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "estimated_capacity_kwh": data.get("estimated_capacity"),
             } if battery_state is not None else None,
             "grid_power_kw": data.get("grid_power_kw"),
+            "grid_power_history": {
+                "sample_count": len(grid_power_history.samples),
+                "samples": [
+                    {"timestamp": s.timestamp.isoformat(), "power_kw": round(s.power_kw, 4)}
+                    for s in grid_power_history.samples
+                ],
+            } if grid_power_history is not None else None,
             "tariff_config": (
                 dataclasses.asdict(coordinator.tariff_config)
                 if coordinator.tariff_config is not None else None

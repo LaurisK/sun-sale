@@ -5,7 +5,11 @@ import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from custom_components.sun_sale.outbound.inverter import InverterController, InverterPlatform
+from custom_components.sun_sale.outbound.inverter import (
+    InverterController,
+    InverterPlatform,
+    normalize_power_to_kw,
+)
 from custom_components.sun_sale.contract.models import BatteryConfig
 
 
@@ -304,3 +308,70 @@ async def test_generic_dispatch_unchanged():
     domain, svc, data = calls[0]
     assert domain == "number" and svc == "set_value"
     assert abs(data["value"] - (-2.0)) < 0.01  # signed kW, negative = discharge
+
+
+# ---------------------------------------------------------------------------
+# Power-unit normalisation
+# ---------------------------------------------------------------------------
+
+def test_normalize_power_to_kw_handles_known_units():
+    assert normalize_power_to_kw(3920.0, "W") == pytest.approx(3.92)
+    assert normalize_power_to_kw(3.92, "kW") == pytest.approx(3.92)
+    assert normalize_power_to_kw(0.0039, "MW") == pytest.approx(3.9)
+    assert normalize_power_to_kw(3920.0, "") == pytest.approx(3920.0)
+    assert normalize_power_to_kw(3920.0, "garbage") == pytest.approx(3920.0)
+
+
+def _state(value: str, unit: str | None) -> MagicMock:
+    s = MagicMock()
+    s.state = value
+    s.attributes = {"unit_of_measurement": unit} if unit is not None else {}
+    return s
+
+
+def test_get_grid_power_normalises_watts_to_kw():
+    hass = MagicMock()
+    hass.states.get = lambda eid: _state("3920", "W") if eid == "sensor.grid" else None
+    controller = InverterController(
+        hass,
+        InverterPlatform.GENERIC,
+        {"grid_power": "sensor.grid"},
+        make_battery_config(),
+    )
+    assert controller.get_grid_power() == pytest.approx(3.92)
+
+
+def test_get_battery_power_passes_through_kw():
+    hass = MagicMock()
+    hass.states.get = lambda eid: _state("-1.579", "kW") if eid == "sensor.batt" else None
+    controller = InverterController(
+        hass,
+        InverterPlatform.GENERIC,
+        {"battery_power": "sensor.batt"},
+        make_battery_config(),
+    )
+    assert controller.get_battery_power() == pytest.approx(-1.579)
+
+
+def test_get_grid_power_returns_fallback_when_unavailable():
+    hass = MagicMock()
+    hass.states.get = lambda eid: _state("unavailable", "W")
+    controller = InverterController(
+        hass,
+        InverterPlatform.GENERIC,
+        {"grid_power": "sensor.grid"},
+        make_battery_config(),
+    )
+    assert controller.get_grid_power() == 0.0
+
+
+def test_get_grid_power_assumes_kw_when_unit_missing():
+    hass = MagicMock()
+    hass.states.get = lambda eid: _state("3.92", None)
+    controller = InverterController(
+        hass,
+        InverterPlatform.GENERIC,
+        {"grid_power": "sensor.grid"},
+        make_battery_config(),
+    )
+    assert controller.get_grid_power() == pytest.approx(3.92)

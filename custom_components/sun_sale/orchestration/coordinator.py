@@ -92,7 +92,7 @@ from ..contract.const import (
 )
 from ..pipeline.dag_engine import DagEngine, run_translators
 from ..outbound.event_router import EventRouter
-from ..outbound.inverter import InverterController, InverterPlatform
+from ..outbound.inverter import InverterController, InverterPlatform, normalize_power_to_kw
 from ..contract.models import (
     BaseLoadProfile,
     BatteryConfig,
@@ -406,6 +406,90 @@ def _deserialize_monthly_bill(d: dict) -> MonthlyBillState:
     )
 
 
+async def _backfill_grid_power_from_recorder(
+    hass: HomeAssistant,
+    entity_id: str,
+    existing: list[GridPowerReading],
+    start: datetime,
+    end: datetime,
+) -> list[GridPowerReading]:
+    """Return existing samples merged with grid-power state changes from HA's recorder.
+
+    Used on coordinator setup so the monthly bill's yday→now slots have data
+    even on the first run after the integration is installed/upgraded. The
+    recorder is queried via an executor job (the underlying call is sync).
+    Recorder state values are normalised to kW via the entity's
+    ``unit_of_measurement`` attribute, matching the live read path.
+
+    Args:
+        hass: Home Assistant instance.
+        entity_id: Grid power sensor entity ID; empty disables backfill.
+        existing: Samples already loaded from the persistent store.
+        start: Earliest UTC timestamp to backfill.
+        end: Latest UTC timestamp to backfill.
+
+    Returns:
+        Combined, time-sorted list of GridPowerReading samples deduplicated
+        by timestamp. Returns ``existing`` unchanged if the recorder is
+        unavailable or the entity_id is empty.
+    """
+    if not entity_id:
+        return existing
+
+    try:
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.history import (
+            state_changes_during_period,
+        )
+    except ImportError:
+        return existing
+
+    try:
+        instance = get_instance(hass)
+        states_dict = await instance.async_add_executor_job(
+            state_changes_during_period,
+            hass,
+            start,
+            end,
+            entity_id,
+        )
+    except Exception:    # pragma: no cover — recorder may be unavailable
+        _LOGGER.warning(
+            "Grid power recorder backfill failed for %s", entity_id, exc_info=True,
+        )
+        return existing
+
+    states = states_dict.get(entity_id, []) if states_dict else []
+    backfilled: list[GridPowerReading] = []
+    for s in states:
+        raw = getattr(s, "state", None)
+        if raw in (None, "unavailable", "unknown", ""):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        unit = str((getattr(s, "attributes", {}) or {}).get("unit_of_measurement") or "").strip()
+        kw = normalize_power_to_kw(value, unit)
+        ts = getattr(s, "last_updated", None) or getattr(s, "last_changed", None)
+        if ts is None:
+            continue
+        backfilled.append(GridPowerReading(power_kw=kw, timestamp=ts))
+
+    if not backfilled:
+        return existing
+
+    seen: set[datetime] = set()
+    merged: list[GridPowerReading] = []
+    for sample in (*existing, *backfilled):
+        if sample.timestamp in seen:
+            continue
+        seen.add(sample.timestamp)
+        merged.append(sample)
+    merged.sort(key=lambda x: x.timestamp)
+    return merged
+
+
 class SunSaleCoordinator(DataUpdateCoordinator):
     """Thin orchestrator: translators → capacity update → DAG → event routing."""
 
@@ -438,6 +522,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._price_history_store: PersistentStore[list[DailyPeak]] | None = None
         self._forecast_quality_store: PersistentStore[ForecastQualityStore] | None = None
         self._grid_power_store: PersistentStore[list[GridPowerReading]] | None = None
+        self._grid_power_entity_id: str = ""
         self._monthly_bill_store: PersistentStore[MonthlyBillState] | None = None
         self.automation_enabled: bool = False
         self.last_dispatched_action: str | None = None
@@ -509,6 +594,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 "charge_control": data[CONF_INVERTER_ENTITY_CHARGE_CONTROL],
             }
         inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
+        self._grid_power_entity_id = inverter_entity_ids.get("grid_power", "")
 
         local_tz = self._resolve_local_tz()
         self._sun_sale_config = SunSaleConfig(
@@ -614,6 +700,19 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             deserialize=_deserialize_grid_power,
         )
         await self._grid_power_store.load()
+
+        backfill_now = datetime.now(timezone.utc)
+        backfill_start = backfill_now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
+        existing_samples = list(self._grid_power_store.value or [])
+        merged_samples = await _backfill_grid_power_from_recorder(
+            self.hass,
+            self._grid_power_entity_id,
+            existing_samples,
+            backfill_start,
+            backfill_now,
+        )
+        if len(merged_samples) != len(existing_samples):
+            await self._grid_power_store.save(merged_samples)
 
         self._monthly_bill_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_MONTHLY_BILL,
@@ -847,6 +946,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "forecast_quality": _acc.quality if _acc else None,
             "sun_times": primary.get(SunTimes),
             "monthly_bill": secondary.get(MonthlyBillResult),
+            "grid_power_history": primary.get(GridPowerHistory),
         }
 
     def _read_sun_times(self, now: datetime) -> SunTimes:

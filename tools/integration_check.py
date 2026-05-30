@@ -2491,26 +2491,39 @@ class MonthlyBillCheckResult:
     previous_month_str: str = ""
     previous_month_eur: float = 0.0
     pricing_mismatch_count: int = 0
+    energy_mismatch_count: int = 0
+    grid_history_sample_count: int = 0
+    grid_history_first_sample: str = ""
+    grid_history_last_sample: str = ""
     mismatches: list[str] = field(default_factory=list)
+    slot_rows: list[dict] = field(default_factory=list)
     overall_ok: bool = True
 
 
 def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
-    """Validate monthly bill totals, per-slot cost formulas, and pricing alignment.
+    """Validate monthly bill totals, per-slot cost formulas, pricing, and energy alignment.
 
-    Cross-checks:
+    Cross-checks (every BillSlot is verified, including zero-power slots):
       * carry + yday_to_now == total_month_eur
       * sum(slot.net_cost_eur) == yday_to_now_eur
       * per-slot net_cost_eur == imported_kwh*buy − exported_kwh*sell
         (no floor on sell — negative prices honoured)
-      * each bill slot's buy/sell prices match the overlapping `pipeline.pricing`
-        slot, verifying the upstream PriceSeries was applied faithfully.
+      * per-slot imported_kwh / exported_kwh reconstructed from the upstream
+        ``inputs.grid_power_history`` samples within [slot.start, slot.end).
+      * each bill slot's buy/sell prices match the overlapping
+        ``pipeline.pricing`` slot, verifying PriceSeries was applied faithfully.
+
+    Builds a dense ``slot_rows`` list — one entry per BillSlot — so widgets can
+    render every slot (including those with zero imported/exported) without
+    hiding gaps in the GridPowerHistory.
 
     Args:
-        snap: Coordinator snapshot containing pipeline.monthly_bill and pipeline.pricing.
+        snap: Coordinator snapshot containing pipeline.monthly_bill, pipeline.pricing,
+            and inputs.grid_power_history.
 
     Returns:
-        MonthlyBillCheckResult with aggregation cross-checks and overall pass/fail.
+        MonthlyBillCheckResult with aggregation cross-checks, dense per-slot
+        rows, and overall pass/fail.
     """
     result = MonthlyBillCheckResult()
 
@@ -2538,20 +2551,6 @@ def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
         result.mismatches.append("yday_sum_mismatch")
         result.overall_ok = False
 
-    slot_formula_errors = 0
-    for s in slots:
-        imp = s.get("imported_kwh", 0.0)
-        exp = s.get("exported_kwh", 0.0)
-        buy = s.get("buy_eur_kwh", 0.0)
-        sell = s.get("sell_eur_kwh", 0.0)
-        expected = imp * buy - exp * sell
-        actual = s.get("net_cost_eur", 0.0)
-        if abs(expected - actual) > 1e-4:
-            slot_formula_errors += 1
-    if slot_formula_errors:
-        result.mismatches.append(f"{slot_formula_errors}_slot_formula_mismatch")
-        result.overall_ok = False
-
     pricing = snap.pipeline.get("pricing") or {}
     pricing_slots = pricing.get("slots") or []
     parsed_pricing: list[tuple[datetime, float, float]] = []
@@ -2566,32 +2565,178 @@ def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
             continue
     parsed_pricing.sort(key=lambda x: x[0])
 
-    pricing_mismatches = 0
-    for s in slots:
+    history = snap.inputs.get("grid_power_history") or {}
+    raw_samples = history.get("samples") or []
+    parsed_samples: list[tuple[datetime, float]] = []
+    for s in raw_samples:
         try:
-            bs = datetime.fromisoformat(s.get("start", ""))
+            parsed_samples.append((
+                datetime.fromisoformat(s.get("timestamp", "")),
+                float(s.get("power_kw", 0.0)),
+            ))
         except (ValueError, TypeError):
             continue
-        match = None
+    parsed_samples.sort(key=lambda x: x[0])
+    result.grid_history_sample_count = len(parsed_samples)
+    if parsed_samples:
+        result.grid_history_first_sample = parsed_samples[0][0].isoformat()
+        result.grid_history_last_sample = parsed_samples[-1][0].isoformat()
+
+    slot_formula_errors = 0
+    pricing_mismatches = 0
+    energy_mismatches = 0
+
+    for s in slots:
+        try:
+            bs_start = datetime.fromisoformat(s.get("start", ""))
+            bs_end = datetime.fromisoformat(s.get("end", ""))
+        except (ValueError, TypeError):
+            continue
+
+        imp = s.get("imported_kwh", 0.0)
+        exp = s.get("exported_kwh", 0.0)
+        buy = s.get("buy_eur_kwh", 0.0)
+        sell = s.get("sell_eur_kwh", 0.0)
+        actual_cost = s.get("net_cost_eur", 0.0)
+        expected_cost = imp * buy - exp * sell
+        cost_ok = abs(expected_cost - actual_cost) <= 1e-4
+        if not cost_ok:
+            slot_formula_errors += 1
+
+        match_pricing = None
         for i, (ps_start, _, _) in enumerate(parsed_pricing):
             next_start = parsed_pricing[i + 1][0] if i + 1 < len(parsed_pricing) else None
-            if ps_start <= bs and (next_start is None or bs < next_start):
-                match = parsed_pricing[i]
+            if ps_start <= bs_start and (next_start is None or bs_start < next_start):
+                match_pricing = parsed_pricing[i]
                 break
-        if match is None:
-            continue
-        _, buy, sell = match
-        if (
-            abs(buy - s.get("buy_eur_kwh", 0.0)) > 1e-4
-            or abs(sell - s.get("sell_eur_kwh", 0.0)) > 1e-4
-        ):
-            pricing_mismatches += 1
+        pricing_ok = True
+        if match_pricing is not None:
+            _, exp_buy, exp_sell = match_pricing
+            if abs(exp_buy - buy) > 1e-4 or abs(exp_sell - sell) > 1e-4:
+                pricing_mismatches += 1
+                pricing_ok = False
+
+        samples_in_slot = [
+            kw for (ts, kw) in parsed_samples if bs_start <= ts < bs_end
+        ]
+        sample_count = len(samples_in_slot)
+        duration_h = (bs_end - bs_start).total_seconds() / 3600.0
+        if samples_in_slot:
+            avg_kw = sum(samples_in_slot) / sample_count
+            net_kwh = avg_kw * duration_h
+            exp_imp = max(0.0, net_kwh)
+            exp_exp = max(0.0, -net_kwh)
+        else:
+            exp_imp = 0.0
+            exp_exp = 0.0
+        energy_ok = abs(exp_imp - imp) <= 1e-3 and abs(exp_exp - exp) <= 1e-3
+        if not energy_ok:
+            energy_mismatches += 1
+
+        result.slot_rows.append({
+            "start": s.get("start", ""),
+            "end": s.get("end", ""),
+            "imported_kwh": imp,
+            "exported_kwh": exp,
+            "expected_imported_kwh": exp_imp,
+            "expected_exported_kwh": exp_exp,
+            "buy_eur_kwh": buy,
+            "sell_eur_kwh": sell,
+            "net_cost_eur": actual_cost,
+            "expected_net_cost_eur": expected_cost,
+            "sample_count": sample_count,
+            "cost_ok": cost_ok,
+            "pricing_ok": pricing_ok,
+            "energy_ok": energy_ok,
+        })
+
+    if slot_formula_errors:
+        result.mismatches.append(f"{slot_formula_errors}_slot_formula_mismatch")
+        result.overall_ok = False
     result.pricing_mismatch_count = pricing_mismatches
     if pricing_mismatches:
         result.mismatches.append(f"{pricing_mismatches}_pricing_mismatch")
         result.overall_ok = False
+    result.energy_mismatch_count = energy_mismatches
+    if energy_mismatches:
+        result.mismatches.append(f"{energy_mismatches}_energy_mismatch")
+        result.overall_ok = False
 
     return result
+
+
+class MonthlyBillSlotsTable(Static):
+    """DataTable: Time | Imp kWh | Exp kWh | Buy € | Sell € | Net € | Samples | ✓/✗.
+
+    Renders every slot — including those with zero imported/exported — so
+    gaps in the source GridPowerHistory are visible to the reviewer instead
+    of being silently dropped from the breakdown.
+    """
+
+    DEFAULT_CSS = """
+    MonthlyBillSlotsTable { height: auto; }
+    MonthlyBillSlotsTable DataTable { height: 22; }
+    """
+
+    def __init__(self, mb: MonthlyBillCheckResult) -> None:
+        """Initialise with the monthly bill check result.
+
+        Args:
+            mb: Result of check_monthly_bill() containing the dense slot_rows.
+        """
+        super().__init__()
+        self._mb = mb
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the DataTable with one row per BillSlot, date-separated."""
+        table = self.query_one(DataTable)
+        table.add_columns(
+            "Time", "Imp kWh", "Exp kWh", "Buy €", "Sell €", "Net €", "Samp", "",
+        )
+        dim = "dim"
+        prev_date = None
+
+        for row in self._mb.slot_rows:
+            try:
+                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
+                time_str = dt.strftime("%H:%M")
+                cur_date = dt.date()
+            except (ValueError, AttributeError):
+                time_str = row["start"]
+                cur_date = None
+
+            if cur_date is not None and cur_date != prev_date:
+                if prev_date is not None:
+                    table.add_row(*[Text("─", style=dim)] * 8)
+                table.add_row(Text(str(cur_date), style="bold"), *[""] * 7)
+                prev_date = cur_date
+
+            imp = row["imported_kwh"]
+            exp = row["exported_kwh"]
+            buy = row["buy_eur_kwh"]
+            sell = row["sell_eur_kwh"]
+            net = row["net_cost_eur"]
+            samples = row["sample_count"]
+            ok = row["cost_ok"] and row["pricing_ok"] and row["energy_ok"]
+
+            zero_imp_exp = imp == 0.0 and exp == 0.0
+            base_style = dim if zero_imp_exp else ""
+            samples_style = "red" if samples == 0 else dim
+
+            table.add_row(
+                Text(time_str, style="cyan"),
+                Text(f"{imp:.4f}", style=base_style),
+                Text(f"{exp:.4f}", style=base_style),
+                Text(f"{buy:.4f}", style=dim),
+                Text(f"{sell:.4f}", style=dim),
+                Text(f"{net:.4f}", style=base_style),
+                Text(str(samples), style=samples_style),
+                Text("✓" if ok else "✗", style="green" if ok else "red"),
+            )
 
 
 class MonthlyBillCheckWidget(Static):
@@ -2609,7 +2754,7 @@ class MonthlyBillCheckWidget(Static):
         self._mb = mb
 
     def compose(self) -> ComposeResult:
-        """Render bill summary and mismatch status as a collapsible static block."""
+        """Render bill summary, slot table, and mismatch status."""
         mb = self._mb
 
         if mb.skipped:
@@ -2631,6 +2776,10 @@ class MonthlyBillCheckWidget(Static):
                 f"{mb.previous_month_str}: {mb.previous_month_eur:.4f} EUR"
                 if mb.previous_month_str else "—"
             )
+            grid_window = (
+                f"{mb.grid_history_first_sample} → {mb.grid_history_last_sample}"
+                if mb.grid_history_sample_count else "—"
+            )
             yield Static(
                 f"  Month: {mb.month_str}\n"
                 f"  Carry (month start → yday start): {mb.carry_eur:.4f} EUR\n"
@@ -2638,10 +2787,14 @@ class MonthlyBillCheckWidget(Static):
                 f"  Total month bill: {mb.total_month_eur:.4f} EUR\n"
                 f"  Previous month: {prev}\n"
                 f"  Slots: {mb.slot_count}\n"
+                f"  Grid power samples: {mb.grid_history_sample_count}  ({grid_window})\n"
                 f"  Pricing mismatches: {mb.pricing_mismatch_count}\n"
+                f"  Energy reconstruction mismatches: {mb.energy_mismatch_count}\n"
                 f"  Mismatches: {mismatches_str}",
                 markup=True,
             )
+            with Collapsible(title="Slots", collapsed=False):
+                yield MonthlyBillSlotsTable(mb)
 
 
 # Categories handled by deep-check widgets; excluded from the plain validator display.
