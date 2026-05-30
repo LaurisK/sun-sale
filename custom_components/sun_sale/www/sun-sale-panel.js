@@ -653,19 +653,24 @@
         }
       };
 
-      // Price y-axis: tightly bounded to actual buy/sell price range.
+      // Price y-axis: actual prices fill the top half of the chart.
+      // Extending the axis min down by one full natural range achieves this:
+      // the tight lower bound (pMin-pPad) maps to the 50% mark, so prices
+      // sit above the generation bars which are pinned to the bottom half.
       const allPriceVals = [...buyData, ...sellData].map(([, v]) => v).filter(isFinite);
       const pMin = allPriceVals.length ? Math.min(...allPriceVals) : 0;
       const pMax = allPriceVals.length ? Math.max(...allPriceVals) : 0.2;
       const pPad = Math.max((pMax - pMin) * 0.05, 0.005);
-      const priceYMin = pMin - pPad;
       const priceYMax = pMax + pPad;
+      const priceYMinTight = pMin - pPad;
+      const priceYMin = priceYMinTight - (priceYMax - priceYMinTight);
 
-      // Generation y-axis: max = current max * 1.1, rounded up to nearest 100 Wh.
+      // Generation y-axis: bars fill the bottom half of the chart.
+      // Doubling the axis max means the actual peak maps to the 50% mark.
       const maxForecastKwh = forecastBars.length
         ? Math.max(...forecastBars.map(b => b.y))
         : 1.0;
-      const genYMaxKwh = Math.ceil(maxForecastKwh * 1000 * 1.1 / 100) * 100 / 1000;
+      const genYMaxKwh = Math.ceil(maxForecastKwh * 1000 * 1.1 / 100) * 100 / 1000 * 2;
 
       const options = {
         series,
