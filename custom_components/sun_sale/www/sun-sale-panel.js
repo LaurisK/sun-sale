@@ -670,6 +670,33 @@
       const ERR_NEG   = '#ef5350';   // observed < forecast
       const ERR_PEND  = '#9e9e9e';   // observation pending (-1 sentinel)
       const PEND_PX   = 4;           // pending-marker strip height
+      // Helpers used by the unified tooltip below.
+      const findSteplineAt = (data, x) => {
+        // Binary-search a sorted [[t, v], ...] series and return the last
+        // [t, v] whose t <= x (stepline semantics). Null if x precedes data.
+        if (!data.length || x < data[0][0]) return null;
+        let lo = 0, hi = data.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >>> 1;
+          if (data[mid][0] <= x) lo = mid;
+          else hi = mid - 1;
+        }
+        return data[lo];
+      };
+      const STORAGE_MODE_LABEL = {
+        sell: 'Sell', store: 'Store', hoard: 'Hoard', dump: 'Dump',
+        gulp: 'Gulp', stby: 'Standby', auto: 'Auto', track: 'Track', unknown: 'Unknown',
+      };
+      const STORAGE_MODE_DOT = {
+        sell: '#ff9800', store: '#2196f3', hoard: '#03a9f4', dump: '#f44336',
+        gulp: '#4caf50', stby: '#7890a0', auto: '#bdbdbd', track: '#9c27b0', unknown: '#606060',
+      };
+      const PROFILE_MODE_LABEL = {
+        solar_charge: 'battery',
+        sell:         'sell',
+        no_export:    'curtail',
+      };
+
       const drawErrorOverlay = (chartContext) => {
         try {
           const w = chartContext?.w;
@@ -760,6 +787,13 @@
           fontFamily: 'inherit',
           events: {
             beforeResetZoom: () => ({ xaxis: { min: windowStart, max: windowEnd } }),
+            // Re-paint the forecast-error overlay after ApexCharts rebuilds
+            // the SVG plot area (zoom, pan, reset). Deferred via rAF so the
+            // chart's own layout has settled before we read w.globals.
+            // (Wiring this into `mounted`/`updated` collapses the bar series —
+            // see drawErrorOverlay docstring above.)
+            zoomed:   function (ctx) { requestAnimationFrame(() => drawErrorOverlay(ctx)); },
+            scrolled: function (ctx) { requestAnimationFrame(() => drawErrorOverlay(ctx)); },
           },
         },
 
@@ -875,29 +909,114 @@
           ],
         },
 
+        // Custom tooltip — ApexCharts' built-in shared tooltip drops series
+        // whose x-array doesn't align with the hovered series, which is the
+        // norm here (sparse stepline prices vs dense 15-min bars). This
+        // walks every series and looks up the value at the hovered timestamp,
+        // so all data + status overlays at that time are surfaced together.
         tooltip: {
           shared:    true,
           intersect: false,
           theme:     'dark',
-          x: { format: 'dd MMM yyyy HH:mm' },
-          y: {
-            formatter: (val, { seriesIndex, dataPointIndex, w }) => {
-              if (val == null) return null;
-              if (seriesIndex === 3) return (val >= 0 ? '+' : '') + val.toFixed(2) + ' € (net total)';
-              if (seriesIndex > 0) return val.toFixed(4) + ' €/kWh';
+          custom: ({ seriesIndex, dataPointIndex, w }) => {
+            // Resolve the hovered timestamp from whatever series ApexCharts
+            // reported as the trigger. seriesX is per-series; fall back to
+            // the configured data point's .x when the series has none.
+            let hoveredX = null;
+            const sx = w.globals.seriesX?.[seriesIndex];
+            if (sx && sx[dataPointIndex] != null) {
+              hoveredX = sx[dataPointIndex];
+            } else {
+              const pt = w.config.series[seriesIndex]?.data?.[dataPointIndex];
+              if (pt && pt.x != null) hoveredX = pt.x;
+            }
+            if (hoveredX == null) return '';
 
-              // Forecast bar (seriesIndex === 0) — annotate with charging-profile disposition.
-              const pt    = w.config.series[seriesIndex].data[dataPointIndex];
-              const slotT = pt?.x;
-              const prof  = slotT != null ? profileSlots.get(slotT) : null;
-              let line = val.toFixed(3) + ' kWh forecast';
+            const slotT = Math.floor(hoveredX / SLOT_MS) * SLOT_MS;
+            const date  = new Date(hoveredX);
+            const timeStr = date.toLocaleString([], {
+              day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+            });
+
+            const lines = [];
+            const dot = c => `<span style="display:inline-block;width:9px;color:${c}">●</span>`;
+            const sq  = c => `<span style="display:inline-block;width:9px;color:${c}">▮</span>`;
+
+            // Buy price (stepline — value persists between updates).
+            const buyPt = findSteplineAt(buyData, hoveredX);
+            if (buyPt) {
+              lines.push(`<div>${dot('#ffb300')} Buy price: <strong>${buyPt[1].toFixed(4)}</strong> €/kWh</div>`);
+            }
+
+            // Sell price (stepline).
+            const sellPt = findSteplineAt(sellData, hoveredX);
+            if (sellPt) {
+              lines.push(`<div>${dot('#ff7043')} Sell price: <strong>${sellPt[1].toFixed(4)}</strong> €/kWh</div>`);
+            }
+
+            // Solar forecast bar at this 15-min slot + charging-profile disposition.
+            const fBar = forecastBars.find(b => b.x === slotT);
+            if (fBar) {
+              const prof = profileSlots.get(slotT);
+              let line = `<div>${dot(fBar.fillColor)} Solar forecast: <strong>${fBar.y.toFixed(3)}</strong> kWh`;
               if (prof) {
-                if (prof.mode === 'solar_charge')      line += ' → charge battery';
-                else if (prof.mode === 'sell')         line += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
-                else if (prof.mode === 'no_export')    line += ' → curtail (sell ≤ 0)';
+                if (prof.mode === 'sell') {
+                  line += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
+                } else if (PROFILE_MODE_LABEL[prof.mode]) {
+                  line += ` → ${PROFILE_MODE_LABEL[prof.mode]}`;
+                }
               }
-              return line;
-            },
+              line += '</div>';
+              lines.push(line);
+            }
+
+            // Forecast-vs-observed error (drawn as overlay rects on chart).
+            const errSlot = errorSlots.find(e => e.x === slotT);
+            if (errSlot) {
+              if (errSlot.pending) {
+                lines.push(`<div style="padding-left:14px;font-size:11px;color:#9e9e9e">↳ Forecast error: pending observation</div>`);
+              } else {
+                const sign  = errSlot.errorKwh >= 0 ? '+' : '';
+                const color = errSlot.errorKwh > 0 ? '#66bb6a' : '#ef5350';
+                lines.push(`<div style="padding-left:14px;font-size:11px;color:${color}">↳ Forecast error: ${sign}${errSlot.errorKwh.toFixed(3)} kWh</div>`);
+              }
+            }
+
+            // Net billing running total at this slot (past only).
+            const billPt = billingData.find(p => p.x === slotT);
+            if (billPt) {
+              const sign = billPt.y >= 0 ? '+' : '';
+              lines.push(`<div>${dot('#66bb6a')} Net total: <strong>${sign}${billPt.y.toFixed(2)}</strong> €</div>`);
+            }
+
+            // Inverter storage-mode band covering this instant (history or plan).
+            const modeAt = modeBands.find(b => hoveredX >= b.x && hoveredX < b.x2);
+            if (modeAt) {
+              const dotColor = STORAGE_MODE_DOT[modeAt.mode] || '#9e9e9e';
+              const label    = STORAGE_MODE_LABEL[modeAt.mode] || modeAt.mode;
+              lines.push(`<div>${sq(dotColor)} Inverter mode: <strong>${label}</strong></div>`);
+            }
+
+            if (!lines.length) return '';
+
+            return `
+              <div style="
+                padding: 8px 12px;
+                background: #1f1f1f;
+                border: 1px solid #555;
+                border-radius: 4px;
+                font-size: 12px;
+                color: #e0e0e0;
+                line-height: 1.55;
+                min-width: 240px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+              ">
+                <div style="font-size:11px;color:#aaa;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #444;">
+                  ${timeStr}
+                </div>
+                ${lines.join('')}
+              </div>
+            `;
           },
         },
 
