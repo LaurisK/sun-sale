@@ -79,7 +79,6 @@
       super();
       this._hass        = null;
       this._chart       = null;
-      this._billChart   = null;
       this._g1Chart     = null;
       this._g2Chart     = null;
       this._g3Chart     = null;
@@ -102,7 +101,6 @@
 
     disconnectedCallback() {
       if (this._chart)     { this._chart.destroy();     this._chart     = null; }
-      if (this._billChart) { this._billChart.destroy();  this._billChart = null; }
       if (this._g1Chart)   { this._g1Chart.destroy();    this._g1Chart   = null; }
       if (this._g2Chart)   { this._g2Chart.destroy();    this._g2Chart   = null; }
       if (this._g3Chart)   { this._g3Chart.destroy();    this._g3Chart   = null; }
@@ -258,7 +256,6 @@
           .bill-summary .bill-value { font-weight: 600; }
           .bill-summary .bill-value.revenue { color: #66bb6a; }
           .bill-summary .bill-sep { color: var(--secondary-text-color, #444); }
-          .bill-chart { width: 100%; }
         </style>
         <div id="card">
           <h2>☀ Sun Sale</h2>
@@ -645,16 +642,18 @@
         // which is exactly what we want for piecewise-constant mode bands.
       }));
 
-      // Series: 0=solar forecast(bar) 1=buy(line) 2=sell(line).
+      // Series: 0=solar forecast(bar) 1=buy(line) 2=sell(line) 3=net billing(line).
       // Bar is first so price lines render on top of generation bars.
-      // All three use {x, y} object format. Mixing tuple-format line data
+      // All series use {x, y} object format. Mixing tuple-format line data
       // with object-format bar data on a datetime xaxis causes ApexCharts
       // to create the bar <g> group but emit zero <rect>s (bars invisible).
       const toXY = pts => pts.map(([x, y]) => ({ x, y }));
+      const billingData = this._buildBillingSeries(windowStart, now);
       const series = [
         { name: 'Solar forecast', type: 'bar',  data: forecastBars   },
         { name: 'Buy price',      type: 'line', data: toXY(buyData)  },
         { name: 'Sell price',     type: 'line', data: toXY(sellData) },
+        { name: 'Net billing',    type: 'line', data: billingData     },
       ];
 
       // Forecast-accuracy overlay drawn straight into the SVG plot area.
@@ -775,17 +774,17 @@
 
         stroke: {
           show:      true,
-          curve:     ['smooth',   'stepline', 'stepline'],
-          width:     [0,          2,          2         ],
-          dashArray: [0,          0,          0         ],
+          curve:     ['smooth',   'stepline', 'stepline', 'smooth'],
+          width:     [0,          2,          2,          2       ],
+          dashArray: [0,          0,          0,          4       ],
         },
 
-        // 0:forecast (per-point fillColor; fallback) 1:amber buy 2:coral sell
-        colors: [GREY_BAR, '#ffb300', '#ff7043'],
+        // 0:forecast (per-point fillColor; fallback) 1:amber buy 2:coral sell 3:green billing
+        colors: [GREY_BAR, '#ffb300', '#ff7043', '#66bb6a'],
 
         fill: {
-          type:    ['solid', 'solid', 'solid'],
-          opacity: [1,       1,       1      ],
+          type:    ['solid', 'solid', 'solid', 'solid'],
+          opacity: [1,       1,       1,       1      ],
         },
 
         xaxis: {
@@ -838,6 +837,15 @@
               formatter: v => (v != null ? v.toFixed(3) : ''),
             },
           },
+          {
+            seriesName: 'Net billing',
+            opposite:   true,
+            show:       false,
+            decimalsInFloat: 2,
+            labels: {
+              formatter: v => (v != null ? v.toFixed(2) : ''),
+            },
+          },
         ],
 
         annotations: {
@@ -875,6 +883,7 @@
           y: {
             formatter: (val, { seriesIndex, dataPointIndex, w }) => {
               if (val == null) return null;
+              if (seriesIndex === 3) return (val >= 0 ? '+' : '') + val.toFixed(2) + ' € (net total)';
               if (seriesIndex > 0) return val.toFixed(4) + ' €/kWh';
 
               // Forecast bar (seriesIndex === 0) — annotate with charging-profile disposition.
@@ -911,15 +920,37 @@
       this._chart = new ApexCharts(el, options);
       this._chart.render().then(() => drawErrorOverlay(this._chart));
 
-      this._renderBillChart();
+      this._renderBillSummary();
 
       const dashAttrsForQuality = this._hass.states[DASHBOARD_ENTITY]?.attributes;
       this._renderAccuracySection(dashAttrsForQuality?.forecast_quality ?? null);
     }
 
-    // ── Net Billing Chart ──────────────────────────────────────────────────────
+    // ── Net Billing ────────────────────────────────────────────────────────────
 
-    _renderBillChart() {
+    // Build running-total {x, y} points for the main chart from windowStart to nowMs.
+    _buildBillingSeries(windowStart, nowMs) {
+      const billAttrs = this._hass.states[MONTHLY_BILL_ENTITY]?.attributes;
+      if (!billAttrs || !Array.isArray(billAttrs.slots) || !billAttrs.slots.length) return [];
+
+      const { carry_eur = 0, slots } = billAttrs;
+      const sorted = [...slots].sort((a, b) =>
+        new Date(a.start).getTime() - new Date(b.start).getTime()
+      );
+
+      let running = carry_eur;
+      const data = [];
+      for (const s of sorted) {
+        const t = new Date(s.start).getTime();
+        running += s.net_cost_eur ?? 0;
+        if (t >= windowStart && t <= nowMs) {
+          data.push({ x: t, y: running });
+        }
+      }
+      return data;
+    }
+
+    _renderBillSummary() {
       const container = this.shadowRoot.querySelector('#bill');
       if (!container) return;
 
@@ -930,29 +961,10 @@
         return;
       }
 
-      if (this._billChart) { this._billChart.destroy(); this._billChart = null; }
-
       const {
         carry_eur, yday_to_now_eur, total_month_eur, month_str,
-        previous_month_str, previous_month_eur, slots,
+        previous_month_str, previous_month_eur,
       } = billAttrs;
-
-      const COST_COLOR    = '#ef5350';
-      const REVENUE_COLOR = '#66bb6a';
-      const CUMUL_COLOR   = '#ffb300';
-
-      const barData = slots.map(s => {
-        const x = new Date(s.start).getTime();
-        const y = s.net_cost_eur;
-        const fillColor = y < 0 ? REVENUE_COLOR : COST_COLOR;
-        return { x, y, fillColor, strokeColor: fillColor };
-      });
-
-      let running = carry_eur;
-      const cumulData = slots.map(s => {
-        running += s.net_cost_eur;
-        return { x: new Date(s.start).getTime(), y: running };
-      });
 
       const fmt2 = v => (v >= 0 ? '+' : '') + v.toFixed(2) + ' €';
       const prevHtml = (previous_month_str)
@@ -974,111 +986,7 @@
           <span class="bill-value ${total_month_eur < 0 ? 'revenue' : ''}">${fmt2(total_month_eur)}</span>
           ${prevHtml}
         </div>
-        <div id="bill-chart" class="bill-chart"></div>
       `;
-
-      const options = {
-        series: [
-          { name: 'Net cost / slot', type: 'bar',  data: barData   },
-          { name: 'Running total',   type: 'line', data: cumulData },
-        ],
-        chart: {
-          type:       'line',
-          height:     250,
-          background: 'transparent',
-          toolbar:    { show: false },
-          animations: { enabled: false },
-          fontFamily: 'inherit',
-        },
-        theme: { mode: 'dark' },
-        plotOptions: {
-          bar: { horizontal: false, columnWidth: '100%' },
-        },
-        stroke: {
-          show:      true,
-          curve:     ['smooth', 'smooth'],
-          width:     [0,        2       ],
-        },
-        colors: [COST_COLOR, CUMUL_COLOR],
-        fill: {
-          type:    ['solid', 'solid'],
-          opacity: [1,       1      ],
-        },
-        xaxis: {
-          type: 'datetime',
-          labels: {
-            datetimeUTC: false,
-            format:      'dd MMM HH:mm',
-            style:  { colors: '#aaa', fontSize: '10px' },
-            rotate: -30,
-          },
-          axisBorder: { show: false },
-          axisTicks:  { show: false },
-        },
-        yaxis: [
-          {
-            seriesName: 'Net cost / slot',
-            title: {
-              text:  'EUR / slot',
-              style: { color: '#aaa', fontSize: '11px' },
-            },
-            forceNiceScale:  true,
-            decimalsInFloat: 4,
-            labels: {
-              style:     { colors: '#aaa', fontSize: '10px' },
-              formatter: v => (v != null ? v.toFixed(4) : ''),
-            },
-          },
-          {
-            seriesName: 'Running total',
-            opposite:   true,
-            title: {
-              text:  'EUR total',
-              style: { color: CUMUL_COLOR, fontSize: '11px' },
-            },
-            forceNiceScale:  true,
-            decimalsInFloat: 2,
-            labels: {
-              style:     { colors: CUMUL_COLOR, fontSize: '10px' },
-              formatter: v => (v != null ? v.toFixed(2) : ''),
-            },
-          },
-        ],
-        annotations: {
-          yaxis: [{
-            y:               0,
-            borderColor:     'rgba(255,255,255,0.20)',
-            strokeDashArray: 3,
-          }],
-        },
-        tooltip: {
-          shared:    true,
-          intersect: false,
-          theme:     'dark',
-          x: { format: 'dd MMM yyyy HH:mm' },
-          y: {
-            formatter: (val) => {
-              if (val == null) return null;
-              return (val >= 0 ? '+' : '') + val.toFixed(4) + ' €';
-            },
-          },
-        },
-        legend: {
-          show:   true,
-          labels: { colors: '#aaa' },
-        },
-        grid: {
-          borderColor: 'rgba(255,255,255,0.07)',
-          xaxis: { lines: { show: true } },
-          yaxis: { lines: { show: true } },
-        },
-        markers:    { size: 0 },
-        dataLabels: { enabled: false },
-      };
-
-      const el = container.querySelector('#bill-chart');
-      this._billChart = new ApexCharts(el, options);
-      this._billChart.render();
     }
 
     // ── Forecast Quality Charts ────────────────────────────────────────────────
