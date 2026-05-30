@@ -1,5 +1,6 @@
 """Tests for forecast.py — pure Python, no HA mocking needed."""
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from custom_components.sun_sale.inbound.forecast import build_generation_series
 from custom_components.sun_sale.contract.models import PriceSeries, SolarData, SolarEntry
@@ -300,3 +301,60 @@ def test_tomorrow_entity_today_infix():
 
 def test_tomorrow_entity_no_today():
     assert _tomorrow_entity("sensor.energy_production") == ""
+
+
+# ---------------------------------------------------------------------------
+# local_tz: post-midnight UTC+3 boundary
+# ---------------------------------------------------------------------------
+
+
+def test_local_tz_post_midnight_buckets_by_local_date():
+    """After local midnight the UTC date is still the previous day.
+
+    Without local_tz, slots for the new local day fall on UTC 'today' only for
+    the nighttime hours (near-zero solar), making total_today_kwh ≈ 0 and the
+    13 daytime kWh appear as 'tomorrow'.  With local_tz all slots for the new
+    local day correctly bucket to 'today'.
+    """
+    from custom_components.sun_sale.inbound.forecast import _compute_totals
+    # Use a fixed UTC+3 offset to avoid DST complications in the test.
+    tz_plus3 = timezone(timedelta(hours=3))
+
+    # Scenario: UTC 21:43 Jan 15 = local 00:43 Jan 16 (new local day just started)
+    now_utc = datetime(2024, 1, 15, 21, 43, 0, tzinfo=timezone.utc)
+
+    slot_dur = timedelta(hours=1)
+
+    # 13 daytime slots for UTC Jan 16 (= local Jan 16, daytime), 1 kWh each
+    daytime_slots = tuple(
+        SolarEntry(
+            start=datetime(2024, 1, 16, h, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 16, h, 0, 0, tzinfo=timezone.utc) + slot_dur,
+            expected_kwh=1.0,
+            source="open_meteo",
+        )
+        for h in range(5, 18)  # UTC 05-17 = local 08-20
+    )
+    # 3 nighttime slots for UTC Jan 15 21-23 (= local Jan 16 00-02), 0 kWh each
+    night_slots = tuple(
+        SolarEntry(
+            start=datetime(2024, 1, 15, h, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 15, h, 0, 0, tzinfo=timezone.utc) + slot_dur,
+            expected_kwh=0.0,
+            source="open_meteo",
+        )
+        for h in range(21, 24)  # UTC 21-23 = local 00-02
+    )
+    all_slots = night_slots + daytime_slots
+
+    # UTC bucketing: UTC today = Jan 15; nighttime slots (UTC Jan 15) go to today (0 kWh);
+    # daytime slots (UTC Jan 16) go to tomorrow (13 kWh)
+    totals_utc = _compute_totals(all_slots, now_utc)
+    assert abs(totals_utc["today"] - 0.0) < 1e-4
+    assert abs(totals_utc["tomorrow"] - 13.0) < 1e-4
+
+    # Local bucketing: local today = Jan 16; both nighttime and daytime slots are
+    # local Jan 16, so all 13 daytime kWh go to "today"
+    totals_local = _compute_totals(all_slots, now_utc, local_tz=tz_plus3)
+    assert abs(totals_local["today"] - 13.0) < 1e-4
+    assert abs(totals_local["tomorrow"] - 0.0) < 1e-4

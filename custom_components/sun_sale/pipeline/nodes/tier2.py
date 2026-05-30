@@ -42,7 +42,9 @@ class GenerationNode(DagNode):
         """Resample SolarData onto the PriceSeries grid to produce GenerationSeries."""
         solar = ctx.require(SolarData)
         price_series = ctx.require(PriceSeries)
-        gen = forecast_module.build_generation_series(solar, price_series.slots, now=ctx.now)
+        gen = forecast_module.build_generation_series(
+            solar, price_series.slots, now=ctx.now, local_tz=ctx.config.local_tz
+        )
         return gen, []
 
 

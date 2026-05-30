@@ -26,6 +26,7 @@ def build_generation_series(
     solar: SolarData,
     price_slots: tuple,
     now: datetime | None = None,
+    local_tz: Any = None,
 ) -> GenerationSeries:
     """Resample SolarData onto the price grid and return a complete GenerationSeries.
 
@@ -33,6 +34,10 @@ def build_generation_series(
         solar: Unified solar forecast from SolarTranslator.
         price_slots: Price-grid slots defining the target time resolution.
         now: Cycle timestamp for today_remaining calculation; defaults to UTC now.
+        local_tz: HA-configured local timezone used for date-boundary bucketing.
+            When provided, "today/tomorrow/etc." labels align to local midnight
+            rather than UTC midnight, avoiding a mismatch window after local midnight
+            for UTC-offset installations.
 
     Returns:
         GenerationSeries with one GenerationSlot per price slot and daily totals.
@@ -40,7 +45,7 @@ def build_generation_series(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    ext = _compute_extended_day_totals(solar.entries, now)
+    ext = _compute_extended_day_totals(solar.entries, now, local_tz)
 
     if not solar.entries or not price_slots:
         return GenerationSeries(
@@ -53,7 +58,7 @@ def build_generation_series(
         )
 
     resampled = _resample_to_grid(solar.entries, price_slots)
-    totals = _compute_totals(resampled, now)
+    totals = _compute_totals(resampled, now, local_tz)
 
     return GenerationSeries(
         slots=resampled,
@@ -116,34 +121,46 @@ def _resample_to_grid(
     return tuple(out)
 
 
-def _compute_extended_day_totals(entries: list[SolarEntry], now: datetime) -> dict[int, float]:
+def _compute_extended_day_totals(
+    entries: list[SolarEntry], now: datetime, local_tz: Any = None
+) -> dict[int, float]:
     """Sum raw solar entries into daily kWh totals for days d2..d6 (outside the price grid).
 
     Args:
         entries: All SolarEntry objects (any date).
         now: Reference time used to determine today's date.
+        local_tz: HA-configured local timezone; when provided, dates are compared
+            in local time so "today" aligns with local midnight.
 
     Returns:
         Dict {2: kwh, 3: kwh, 4: kwh, 5: kwh, 6: kwh} for days 2–6 ahead of today.
     """
-    today = now.date()
+    today = now.astimezone(local_tz).date() if local_tz else now.date()
+
+    def _entry_date(e: SolarEntry):
+        return e.start.astimezone(local_tz).date() if local_tz else e.start.date()
+
     return {
-        n: round(sum(e.expected_kwh for e in entries if e.start.date() == today + timedelta(days=n)), 4)
+        n: round(sum(e.expected_kwh for e in entries if _entry_date(e) == today + timedelta(days=n)), 4)
         for n in range(2, 7)
     }
 
 
-def _compute_totals(slots: tuple[GenerationSlot, ...], now: datetime) -> dict[str, float]:
+def _compute_totals(
+    slots: tuple[GenerationSlot, ...], now: datetime, local_tz: Any = None
+) -> dict[str, float]:
     """Bucket resampled generation slots into yesterday/today/tomorrow totals.
 
     Args:
         slots: Price-grid-aligned GenerationSlots.
-        now: Reference time used to determine today's date.
+        now: Reference UTC timestamp; used as-is for today_remaining comparison.
+        local_tz: HA-configured local timezone; when provided, date boundaries use
+            local midnight so labels align with entity day labels.
 
     Returns:
         Dict with keys "yesterday", "today", "tomorrow", "today_remaining" in kWh.
     """
-    today = now.date()
+    today = now.astimezone(local_tz).date() if local_tz else now.date()
     yesterday = today - timedelta(days=1)
     tomorrow = today + timedelta(days=1)
 
@@ -152,7 +169,7 @@ def _compute_totals(slots: tuple[GenerationSlot, ...], now: datetime) -> dict[st
     tomo_sum = 0.0
     today_remaining = 0.0
     for s in slots:
-        d = s.start.date()
+        d = s.start.astimezone(local_tz).date() if local_tz else s.start.date()
         if d == yesterday:
             yest_sum += s.expected_kwh
         elif d == today:
