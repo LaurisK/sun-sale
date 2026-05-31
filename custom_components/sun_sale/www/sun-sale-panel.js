@@ -648,18 +648,23 @@
         // which is exactly what we want for piecewise-constant mode bands.
       }));
 
-      // Series: 0=solar forecast(bar) 1=buy(line) 2=sell(line) 3=net billing(line).
+      // Series: 0=solar forecast(bar) 1=buy(line) 2=sell(line) 3=net billing(line)
+      //         4=grid import(line) 5=grid export(line).
       // Bar is first so price lines render on top of generation bars.
       // All series use {x, y} object format. Mixing tuple-format line data
       // with object-format bar data on a datetime xaxis causes ApexCharts
       // to create the bar <g> group but emit zero <rect>s (bars invisible).
       const toXY = pts => pts.map(([x, y]) => ({ x, y }));
       const billingData = this._buildBillingSeries(windowStart, now);
+      const { imported: importData, exported: exportData } =
+        this._buildImportExportSeries(windowStart, now);
       const series = [
         { name: 'Solar forecast', type: 'bar',  data: forecastBars   },
         { name: 'Buy price',      type: 'line', data: toXY(buyData)  },
         { name: 'Sell price',     type: 'line', data: toXY(sellData) },
-        { name: 'Net billing',    type: 'line', data: billingData     },
+        { name: 'Net billing',    type: 'line', data: billingData    },
+        { name: 'Grid import',    type: 'line', data: importData     },
+        { name: 'Grid export',    type: 'line', data: exportData     },
       ];
 
       // Forecast-accuracy overlay drawn straight into the SVG plot area.
@@ -812,17 +817,18 @@
 
         stroke: {
           show:      true,
-          curve:     ['smooth',   'stepline', 'stepline', 'smooth'],
-          width:     [0,          2,          2,          2       ],
-          dashArray: [0,          0,          0,          4       ],
+          curve:     ['smooth',   'stepline', 'stepline', 'smooth', 'smooth', 'smooth'],
+          width:     [0,          2,          2,          2,        2,        2       ],
+          dashArray: [0,          0,          0,          4,        4,        4       ],
         },
 
-        // 0:forecast (per-point fillColor; fallback) 1:amber buy 2:coral sell 3:green billing
-        colors: [GREY_BAR, '#ffb300', '#ff7043', '#66bb6a'],
+        // 0:forecast (per-point fillColor; fallback) 1:amber buy 2:coral sell
+        // 3:green billing 4:red grid-import 5:blue grid-export
+        colors: [GREY_BAR, '#ffb300', '#ff7043', '#66bb6a', '#ef5350', '#42a5f5'],
 
         fill: {
-          type:    ['solid', 'solid', 'solid', 'solid'],
-          opacity: [1,       1,       1,       1      ],
+          type:    ['solid', 'solid', 'solid', 'solid', 'solid', 'solid'],
+          opacity: [1,       1,       1,       1,       1,       1      ],
         },
 
         xaxis: {
@@ -877,6 +883,15 @@
           },
           {
             seriesName: 'Net billing',
+            opposite:   true,
+            show:       false,
+            decimalsInFloat: 2,
+            labels: {
+              formatter: v => (v != null ? v.toFixed(2) : ''),
+            },
+          },
+          {
+            seriesName: ['Grid import', 'Grid export'],
             opposite:   true,
             show:       false,
             decimalsInFloat: 2,
@@ -1031,6 +1046,14 @@
           const sign = billPt.y >= 0 ? '+' : '';
           lines.push(`<div>${dot('#66bb6a')} Net total: <strong>${sign}${billPt.y.toFixed(2)}</strong> €</div>`);
         }
+        const impPt = importData.find(p => p.x === slotT);
+        if (impPt) {
+          lines.push(`<div>${dot('#ef5350')} Import total: <strong>${impPt.y.toFixed(2)}</strong> kWh</div>`);
+        }
+        const expPt = exportData.find(p => p.x === slotT);
+        if (expPt) {
+          lines.push(`<div>${dot('#42a5f5')} Export total: <strong>${expPt.y.toFixed(2)}</strong> kWh</div>`);
+        }
         const modeAt = modeBands.find(b => hoveredX >= b.x && hoveredX < b.x2);
         if (modeAt) {
           const dotColor = STORAGE_MODE_DOT[modeAt.mode] || '#9e9e9e';
@@ -1169,6 +1192,34 @@
         }
       }
       return data;
+    }
+
+    // Build running-total {x, y} points for gross import + export kWh from
+    // monthly_bill slots. Same shape as _buildBillingSeries — the slots run
+    // from yesterday-or-month-start through now, so the cumulative line
+    // resets to 0 at the start of that window each cycle.
+    _buildImportExportSeries(windowStart, nowMs) {
+      const billAttrs = this._hass.states[MONTHLY_BILL_ENTITY]?.attributes;
+      if (!billAttrs || !Array.isArray(billAttrs.slots) || !billAttrs.slots.length) {
+        return { imported: [], exported: [] };
+      }
+
+      const sorted = [...billAttrs.slots].sort((a, b) =>
+        new Date(a.start).getTime() - new Date(b.start).getTime()
+      );
+
+      let runImp = 0, runExp = 0;
+      const imported = [], exported = [];
+      for (const s of sorted) {
+        const t = new Date(s.start).getTime();
+        runImp += s.imported_kwh ?? 0;
+        runExp += s.exported_kwh ?? 0;
+        if (t >= windowStart && t <= nowMs) {
+          imported.push({ x: t, y: runImp });
+          exported.push({ x: t, y: runExp });
+        }
+      }
+      return { imported, exported };
     }
 
     _renderBillSummary() {
