@@ -1006,6 +1006,7 @@
         const slotT = Math.floor(hoveredX / SLOT_MS) * SLOT_MS;
         const timeStr = new Date(hoveredX).toLocaleString([], {
           day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+          hour12: false,
         });
 
         const lines = [];
@@ -1394,10 +1395,10 @@
       if (this._g3Chart) { this._g3Chart.destroy(); this._g3Chart = null; }
 
       const sunriseStr = quality.sunrise_utc
-        ? new Date(quality.sunrise_utc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+        ? new Date(quality.sunrise_utc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12: false})
         : '—';
       const sunsetStr = quality.sunset_utc
-        ? new Date(quality.sunset_utc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+        ? new Date(quality.sunset_utc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12: false})
         : '—';
 
       container.innerHTML = `
