@@ -25,9 +25,7 @@
  *   at the top of the forecast bar (y = forecast_kwh):
  *     +error (observed > forecast)  → green segment grows UP
  *     -error (observed < forecast)  → red segment grows DOWN
- *   ApexCharts 3.x has no native expression for this in a mixed line+bar
- *   chart (stacked/rangeBar/range-y all fail), so we paint the rects as raw
- *   SVG into `.apexcharts-graphical` from chart events.
+ *   Rendered as an ECharts custom series so it survives zoom/pan natively.
  *
  * Overlays:
  *   Translucent bands  ChargingProfile mode windows (today's remaining slots):
@@ -50,7 +48,7 @@
   const PRICING_ENTITY    = 'sensor.sunsale_pricing';
   const DASHBOARD_ENTITY      = 'sensor.sunsale_dashboard';
   const MONTHLY_BILL_ENTITY   = 'sensor.sunsale_monthly_bill';
-  const APEXCHARTS_CDN        = 'https://cdn.jsdelivr.net/npm/apexcharts@3.54.0/dist/apexcharts.min.js';
+  const ECHARTS_CDN           = 'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js';
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -61,13 +59,13 @@
     return d.getTime();
   }
 
-  function loadApexCharts() {
-    if (window.ApexCharts) return Promise.resolve();
+  function loadECharts() {
+    if (window.echarts) return Promise.resolve();
     return new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = APEXCHARTS_CDN;
+      s.src = ECHARTS_CDN;
       s.onload = resolve;
-      s.onerror = () => reject(new Error('Could not load ApexCharts from CDN'));
+      s.onerror = () => reject(new Error('Could not load ECharts from CDN'));
       document.head.appendChild(s);
     });
   }
@@ -77,15 +75,13 @@
   class SunSalePanel extends HTMLElement {
     constructor() {
       super();
-      this._hass        = null;
-      this._chart       = null;
-      this._g1Chart     = null;
-      this._g2Chart     = null;
-      this._g3Chart     = null;
-      this._overlayObserver = null;
-      this._overlayTimer    = null;
-      this._overlayInterval = null;
-      this._initialized = false;
+      this._hass         = null;
+      this._chart        = null;
+      this._g1Chart      = null;
+      this._g2Chart      = null;
+      this._g3Chart      = null;
+      this._resizeObs    = null;
+      this._initialized  = false;
       this.attachShadow({ mode: 'open' });
     }
 
@@ -103,13 +99,11 @@
     }
 
     disconnectedCallback() {
-      if (this._overlayObserver) { this._overlayObserver.disconnect(); this._overlayObserver = null; }
-      if (this._overlayTimer != null)    { clearTimeout(this._overlayTimer);     this._overlayTimer    = null; }
-      if (this._overlayInterval != null) { clearInterval(this._overlayInterval); this._overlayInterval = null; }
-      if (this._chart)     { this._chart.destroy();     this._chart     = null; }
-      if (this._g1Chart)   { this._g1Chart.destroy();    this._g1Chart   = null; }
-      if (this._g2Chart)   { this._g2Chart.destroy();    this._g2Chart   = null; }
-      if (this._g3Chart)   { this._g3Chart.destroy();    this._g3Chart   = null; }
+      if (this._resizeObs) { this._resizeObs.disconnect(); this._resizeObs = null; }
+      if (this._chart)   { this._chart.dispose();   this._chart   = null; }
+      if (this._g1Chart) { this._g1Chart.dispose(); this._g1Chart = null; }
+      if (this._g2Chart) { this._g2Chart.dispose(); this._g2Chart = null; }
+      if (this._g3Chart) { this._g3Chart.dispose(); this._g3Chart = null; }
     }
 
     // ── Boot ──────────────────────────────────────────────────────────────────
@@ -117,9 +111,9 @@
     async _boot() {
       this._buildShell();
       try {
-        await loadApexCharts();
+        await loadECharts();
       } catch (e) {
-        this._setStatus('⚠ ' + e.message + ' — check network or install ApexCharts via HACS.');
+        this._setStatus('⚠ ' + e.message + ' — check network or install ECharts via HACS.');
         return;
       }
       await this._render();
@@ -562,13 +556,13 @@
         if (fKwh != null && fKwh > 0.001) {
           const prof  = profileSlots.get(t);
           const color = (prof && MODE_COLORS[prof.mode]) || GREY_BAR;
-          forecastBars.push({ x: t, y: fKwh, fillColor: color, strokeColor: color });
+          forecastBars.push({ x: t, y: fKwh, color });
         }
         t += SLOT_MS;
       }
 
       this._clearStatus();
-      if (this._chart) { this._chart.destroy(); this._chart = null; }
+      if (this._chart) { this._chart.dispose(); this._chart = null; }
 
       // Translucent bands grouping contiguous ChargingProfile-mode slots.
       // Legend lives in the pill row above the chart — no inline label here.
@@ -593,13 +587,6 @@
         }
         if (run) profileBands.push(run);
       }
-      const profileAnnotations = profileBands.map(b => ({
-        x:           b.x,
-        x2:          b.x2,
-        fillColor:   MODE_BAND_FILL[b.mode],
-        borderColor: 'transparent',
-        opacity:     1,
-      }));
 
       // ─── Inverter StorageMode bands (history yesterday→now + plan today→tomorrow).
       // History entries from inverter_mode_history are {t, mode} change events;
@@ -638,62 +625,19 @@
           modeBands.push({ mode: s.mode, x: s.t, x2: s.end_t });
         }
       }
-      const modeAnnotations = modeBands.map(b => ({
-        x:           b.x,
-        x2:          b.x2,
-        fillColor:   STORAGE_MODE_FILL[b.mode],
-        borderColor: 'transparent',
-        opacity:     1,
-        // y-range omitted — ApexCharts defaults to spanning the full plot area,
-        // which is exactly what we want for piecewise-constant mode bands.
-      }));
 
-      // Series: 0=solar forecast(bar) 1=buy(line) 2=sell(line) 3=net billing(line)
-      //         4=grid import(line) 5=grid export(line).
-      // Bar is first so price lines render on top of generation bars.
-      // All series use {x, y} object format. Mixing tuple-format line data
-      // with object-format bar data on a datetime xaxis causes ApexCharts
-      // to create the bar <g> group but emit zero <rect>s (bars invisible).
-      const toXY = pts => pts.map(([x, y]) => ({ x, y }));
-      const billingData = this._buildBillingSeries(windowStart, now);
-      const { imported: importData, exported: exportData } =
-        this._buildImportExportSeries(windowStart, now);
-      const series = [
-        { name: 'Solar forecast', type: 'bar',  data: forecastBars   },
-        { name: 'Buy price',      type: 'line', data: toXY(buyData)  },
-        { name: 'Sell price',     type: 'line', data: toXY(sellData) },
-        { name: 'Net billing',    type: 'line', data: billingData    },
-        { name: 'Grid import',    type: 'line', data: importData     },
-        { name: 'Grid export',    type: 'line', data: exportData     },
+      // markArea data: one entry per band, colour carried on the start-point itemStyle.
+      const allBandAreas = [
+        ...profileBands.map(b => [
+          { xAxis: b.x, itemStyle: { color: MODE_BAND_FILL[b.mode] } },
+          { xAxis: b.x2 },
+        ]),
+        ...modeBands.map(b => [
+          { xAxis: b.x, itemStyle: { color: STORAGE_MODE_FILL[b.mode] } },
+          { xAxis: b.x2 },
+        ]),
       ];
 
-      // Forecast-accuracy overlay drawn straight into the SVG plot area.
-      // For each slot with a non-zero error: a rect anchored at the top of
-      // the forecast bar (y = forecast_kwh), extending UP by +error (green
-      // for under-forecast) or DOWN by |error| (red for over-forecast).
-      // ApexCharts can't express this via stacked / rangeBar / range-y in
-      // a mixed line+bar chart, so we paint custom <rect>s once after
-      // render() resolves. Wiring this into chart.events.mounted/updated
-      // collapses the bar series (cause unknown — likely re-entrant render).
-      const SVG_NS    = 'http://www.w3.org/2000/svg';
-      const OVL_GROUP = 'sunsale-error-overlay';
-      const ERR_POS   = '#66bb6a';   // observed > forecast
-      const ERR_NEG   = '#ef5350';   // observed < forecast
-      const ERR_PEND  = '#9e9e9e';   // observation pending (-1 sentinel)
-      const PEND_PX   = 4;           // pending-marker strip height
-      // Helpers used by the unified tooltip below.
-      const findSteplineAt = (data, x) => {
-        // Binary-search a sorted [[t, v], ...] series and return the last
-        // [t, v] whose t <= x (stepline semantics). Null if x precedes data.
-        if (!data.length || x < data[0][0]) return null;
-        let lo = 0, hi = data.length - 1;
-        while (lo < hi) {
-          const mid = (lo + hi + 1) >>> 1;
-          if (data[mid][0] <= x) lo = mid;
-          else hi = mid - 1;
-        }
-        return data[lo];
-      };
       const STORAGE_MODE_LABEL = {
         sell: 'Sell', store: 'Store', hoard: 'Hoard', dump: 'Dump',
         gulp: 'Gulp', stby: 'Standby', auto: 'Auto', track: 'Track', unknown: 'Unknown',
@@ -708,60 +652,9 @@
         no_export:    'curtail',
       };
 
-      const drawErrorOverlay = (chartContext) => {
-        try {
-          const w = chartContext?.w;
-          if (!w || !errorSlots.length) return;
-          const plotEl = chartContext.el?.querySelector('.apexcharts-graphical');
-          if (!plotEl) return;
-          // Wipe previous paint.
-          plotEl.querySelectorAll('.' + OVL_GROUP).forEach(n => n.remove());
-
-          // Solar-forecast bar is series index 0 → yaxis index 0 (single per-series).
-          const yIdx  = 0;
-          const xMin  = w.globals.minX;
-          const xMax  = w.globals.maxX;
-          const yMin  = w.globals.minYArr?.[yIdx] ?? w.globals.minY;
-          const yMax  = w.globals.maxYArr?.[yIdx] ?? w.globals.maxY;
-          const gw    = w.globals.gridWidth;
-          const gh    = w.globals.gridHeight;
-          if (!(xMax > xMin) || !(yMax > yMin) || !gw || !gh) return;
-          const xPx   = t => ((t - xMin) / (xMax - xMin)) * gw;
-          const yPx   = v => gh - ((v - yMin) / (yMax - yMin)) * gh;
-          // Match the forecast bar width: plotOptions.bar.columnWidth = '100%'.
-          const colW = (SLOT_MS / (xMax - xMin)) * gw;
-
-          const g = document.createElementNS(SVG_NS, 'g');
-          g.setAttribute('class', OVL_GROUP);
-          for (const e of errorSlots) {
-            const cx   = xPx(e.x + SLOT_MS / 2);  // bars are centred on slot midpoint
-            const rect = document.createElementNS(SVG_NS, 'rect');
-            rect.setAttribute('x',     String(cx - colW / 2));
-            rect.setAttribute('width', String(colW));
-            if (e.pending) {
-              // Thin grey strip sitting just above the forecast bar top —
-              // visible regardless of forecast magnitude (zero-forecast slots
-              // get the strip pinned to the x-axis).
-              const yTop = yPx(e.forecastKwh);
-              rect.setAttribute('y',      String(yTop - PEND_PX));
-              rect.setAttribute('height', String(PEND_PX));
-              rect.setAttribute('fill',   ERR_PEND);
-              rect.setAttribute('fill-opacity', '0.7');
-            } else {
-              const yTop = yPx(Math.max(e.forecastKwh, e.forecastKwh + e.errorKwh));
-              const yBot = yPx(Math.min(e.forecastKwh, e.forecastKwh + e.errorKwh));
-              rect.setAttribute('y',      String(yTop));
-              rect.setAttribute('height', String(Math.max(1, yBot - yTop)));
-              rect.setAttribute('fill',   e.errorKwh > 0 ? ERR_POS : ERR_NEG);
-              rect.setAttribute('fill-opacity', '0.85');
-            }
-            g.appendChild(rect);
-          }
-          plotEl.appendChild(g);
-        } catch (err) {
-          console.warn('sunSale: error overlay paint failed', err);
-        }
-      };
+      const billingData = this._buildBillingSeries(windowStart, now);
+      const { imported: importData, exported: exportData } =
+        this._buildImportExportSeries(windowStart, now);
 
       // Price y-axis: actual prices fill the top half of the chart.
       // Extending the axis min down by one full natural range achieves this:
@@ -782,388 +675,371 @@
         : 1.0;
       const genYMaxKwh = Math.ceil(maxForecastKwh * 1000 * 1.1 / 100) * 100 / 1000 * 2;
 
-      const options = {
-        series,
+      // O(1) slot lookups for the tooltip formatter (avoids per-mousemove scans).
+      const forecastBarBySlot = new Map(forecastBars.map(b => [b.x, b]));
+      const errorBySlot       = new Map(errorSlots.map(e => [e.x, e]));
+      const billingBySlot     = new Map(billingData.map(p => [p.x, p]));
+      const importBySlot      = new Map(importData.map(p => [p.x, p]));
+      const exportBySlot      = new Map(exportData.map(p => [p.x, p]));
 
-        chart: {
-          type:       'line',
-          height:     500,
-          background: 'transparent',
-          toolbar: {
-            show:  true,
-            tools: { zoom: true, zoomin: true, zoomout: true, pan: true, reset: true, download: false },
-          },
-          zoom:       { enabled: true, type: 'x' },
-          animations: { enabled: false },
-          fontFamily: 'inherit',
-          events: {
-            beforeResetZoom: () => ({ xaxis: { min: windowStart, max: windowEnd } }),
-            // Re-paint is wired via a MutationObserver set up after first render
-            // (see below) — it survives every internal SVG rebuild ApexCharts
-            // performs (zoom, pan, reset, legend toggle), not just the events
-            // it exposes. Hooking into chart.events.mounted/updated here would
-            // collapse the bar series (re-entrant render).
-          },
-        },
-
-        theme: { mode: 'dark' },
-
-        plotOptions: {
-          bar: {
-            horizontal:  false,
-            columnWidth: '100%',
-          },
-        },
-
-        stroke: {
-          show:      true,
-          curve:     ['smooth',   'stepline', 'stepline', 'smooth', 'smooth', 'smooth'],
-          width:     [0,          2,          2,          2,        2,        2       ],
-          dashArray: [0,          0,          0,          4,        4,        4       ],
-        },
-
-        // 0:forecast (per-point fillColor; fallback) 1:amber buy 2:coral sell
-        // 3:green billing 4:red grid-import 5:blue grid-export
-        colors: [GREY_BAR, '#ffb300', '#ff7043', '#66bb6a', '#ef5350', '#42a5f5'],
-
-        fill: {
-          type:    ['solid', 'solid', 'solid', 'solid', 'solid', 'solid'],
-          opacity: [1,       1,       1,       1,       1,       1      ],
-        },
-
-        xaxis: {
-          type: 'datetime',
-          min:  windowStart,
-          max:  windowEnd,
-          labels: {
-            datetimeUTC: false,
-            format:      'dd MMM HH:mm',
-            style: { colors: '#aaa', fontSize: '10px' },
-            rotate: -30,
-          },
-          axisBorder: { show: false },
-          axisTicks:  { show: false },
-        },
-
-        // Two y-axes: left = EUR/kWh shared by both price lines; right = kWh/slot
-        // for the solar-forecast bar. seriesName-as-array binds multiple series
-        // to one axis. The earlier "duplicate seriesName + show:false" pattern
-        // left 'Sell price' with no axis match — that, combined with mixed
-        // tuple/object series data, was enough to make ApexCharts emit zero
-        // <rect>s for the bar series.
-        yaxis: [
-          {
-            seriesName: ['Buy price', 'Sell price'],
-            title: {
-              text:  'EUR / kWh',
-              style: { color: '#ffb300', fontSize: '11px' },
-            },
-            min:             priceYMin,
-            max:             priceYMax,
-            decimalsInFloat: 3,
-            labels: {
-              style: { colors: '#ffb300', fontSize: '10px' },
-              formatter: v => (v != null ? v.toFixed(3) : ''),
-            },
-          },
-          {
-            seriesName: 'Solar forecast',
-            opposite:   true,
-            title: {
-              text:  'kWh / slot',
-              style: { color: '#cfcfcf', fontSize: '11px' },
-            },
-            min:             0,
-            max:             genYMaxKwh,
-            decimalsInFloat: 3,
-            labels: {
-              style: { colors: '#cfcfcf', fontSize: '10px' },
-              formatter: v => (v != null ? v.toFixed(3) : ''),
-            },
-          },
-          {
-            seriesName: 'Net billing',
-            opposite:   true,
-            show:       false,
-            decimalsInFloat: 2,
-            labels: {
-              formatter: v => (v != null ? v.toFixed(2) : ''),
-            },
-          },
-          {
-            seriesName: ['Grid import', 'Grid export'],
-            opposite:   true,
-            show:       false,
-            decimalsInFloat: 2,
-            labels: {
-              formatter: v => (v != null ? v.toFixed(2) : ''),
-            },
-          },
-        ],
-
-        annotations: {
-          yaxis: [{
-            y:               0,
-            borderColor:     'rgba(255,255,255,0.20)',
-            strokeDashArray: 3,
-          }],
-          xaxis: [
-            {
-              x:               now,
-              borderColor:     'rgba(255,255,255,0.55)',
-              strokeDashArray: 5,
-              label: {
-                text:     'Now',
-                position: 'top',
-                style: {
-                  color:      '#fff',
-                  background: '#333',
-                  fontSize:   '11px',
-                  padding: { top: 3, bottom: 3, left: 6, right: 6 },
-                },
-              },
-            },
-            ...profileAnnotations,
-            ...modeAnnotations,
-          ],
-        },
-
-        // ApexCharts' built-in tooltip is disabled — its shared mode silently
-        // falls back to single-series when isInitialSeriesSameLen() is false,
-        // and our four series here have wildly different lengths (288 bars vs
-        // sparse stepline prices vs past-only billing). We render our own
-        // tooltip via a mousemove listener wired in after render(); it looks
-        // up every data source at the cursor's x and always shows the full
-        // picture. xaxis.crosshairs above still draws the vertical hairline.
-        tooltip: { enabled: false },
-
-        legend: {
-          show:   true,
-          labels: { colors: '#aaa' },
-        },
-
-        grid: {
-          borderColor: 'rgba(255,255,255,0.07)',
-          xaxis: { lines: { show: true } },
-          yaxis: { lines: { show: true } },
-        },
-
-        markers:    { size: 0 },
-        dataLabels: { enabled: false },
+      // Stepline binary search: prices are sparse, so we interpolate by holding
+      // the last value whose timestamp ≤ x (stepline 'end' semantics).
+      const findSteplineAt = (data, x) => {
+        if (!data.length || x < data[0][0]) return null;
+        let lo = 0, hi = data.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >>> 1;
+          if (data[mid][0] <= x) lo = mid;
+          else hi = mid - 1;
+        }
+        return data[lo];
       };
 
-      const el = this.shadowRoot.querySelector('#chart');
-      // The custom tooltip is absolutely-positioned relative to #chart, so the
-      // chart container must be a positioning context.
-      el.style.position = 'relative';
-      // Drop any tooltip element / listeners from a previous _render(), so a
-      // re-render doesn't stack handlers or orphaned DOM.
-      el.querySelectorAll('.sunsale-tooltip, .sunsale-crosshair').forEach(n => n.remove());
-      if (this._chartMoveHandler)  el.removeEventListener('mousemove',  this._chartMoveHandler);
-      if (this._chartLeaveHandler) el.removeEventListener('mouseleave', this._chartLeaveHandler);
-      this._chart = new ApexCharts(el, options);
+      // Forecast bars rendered as a custom series. Native `type: 'bar'` on a
+      // time axis auto-sizes bar width from data density, leaving gaps when
+      // the visible range zooms in; rendering rects directly via api.coord()
+      // guarantees each rect spans exactly its 15-min slot regardless of zoom.
+      const renderForecastBar = (params, api) => {
+        const bar = forecastBars[params.dataIndex];
+        if (!bar) return;
+        const xLeft  = api.coord([bar.x,           0])[0];
+        const xRight = api.coord([bar.x + SLOT_MS, 0])[0];
+        const yTop   = api.coord([bar.x, bar.y])[1];
+        const yBot   = api.coord([bar.x, 0])[1];
+        return {
+          type: 'rect',
+          shape: {
+            x:      xLeft,
+            y:      yTop,
+            width:  Math.max(1, xRight - xLeft),
+            height: Math.max(1, yBot - yTop),
+          },
+          style: { fill: bar.color },
+        };
+      };
 
-      // Build a single tooltip element we reuse across hovers. Lives in #chart
-      // and uses pointer-events:none so it never steals mouse events from the
-      // chart underneath (which would prevent further mousemove updates).
-      const tooltipEl = document.createElement('div');
-      tooltipEl.className = 'sunsale-tooltip';
-      tooltipEl.style.cssText = [
-        'position:absolute',
-        'pointer-events:none',
-        'z-index:10',
-        'display:none',
-        'padding:8px 12px',
-        'background:#1f1f1f',
-        'border:1px solid #555',
-        'border-radius:4px',
-        'font-size:12px',
-        'color:#e0e0e0',
-        'line-height:1.55',
-        'min-width:240px',
-        'box-shadow:0 4px 12px rgba(0,0,0,0.4)',
-        'transition:transform 60ms linear',
-      ].join(';');
-      el.appendChild(tooltipEl);
-
-      // Vertical hairline tracking the cursor x. Disabling ApexCharts' tooltip
-      // (above) also disables its built-in xaxis.crosshairs, so we draw our own.
-      const crosshairEl = document.createElement('div');
-      crosshairEl.className = 'sunsale-crosshair';
-      crosshairEl.style.cssText = [
-        'position:absolute',
-        'pointer-events:none',
-        'z-index:9',
-        'display:none',
-        'width:1px',
-        'background:rgba(255,255,255,0.35)',
-      ].join(';');
-      el.appendChild(crosshairEl);
+      // Forecast-error overlay as a second custom series. Each rect is anchored
+      // at the top of its forecast bar (y = forecast_kwh) and extends UP by
+      // +error (green: under-forecast) or DOWN by |error| (red: over-forecast).
+      // Pending observations (-1 sentinel) render as a thin grey strip above
+      // the bar top. Width matches the forecast bar exactly (same xLeft/xRight
+      // derivation), so the two custom series stay aligned at every zoom level.
+      const PEND_PX = 4;
+      const renderErrorRect = (params, api) => {
+        const slot = errorSlots[params.dataIndex];
+        if (!slot) return;
+        const xLeft  = api.coord([slot.x,           0])[0];
+        const xRight = api.coord([slot.x + SLOT_MS, 0])[0];
+        const width  = Math.max(1, xRight - xLeft);
+        if (slot.pending) {
+          const yTop = api.coord([slot.x, slot.forecastKwh])[1];
+          return {
+            type: 'rect',
+            shape: { x: xLeft, y: yTop - PEND_PX, width, height: PEND_PX },
+            style: { fill: '#9e9e9e', opacity: 0.7 },
+          };
+        }
+        const yUpper = api.coord([slot.x, Math.max(slot.forecastKwh, slot.forecastKwh + slot.errorKwh)])[1];
+        const yLower = api.coord([slot.x, Math.min(slot.forecastKwh, slot.forecastKwh + slot.errorKwh)])[1];
+        return {
+          type: 'rect',
+          shape: { x: xLeft, y: yUpper, width, height: Math.max(1, yLower - yUpper) },
+          style: { fill: slot.errorKwh > 0 ? '#66bb6a' : '#ef5350', opacity: 0.85 },
+        };
+      };
 
       const dot = c => `<span style="display:inline-block;width:9px;color:${c}">●</span>`;
       const sq  = c => `<span style="display:inline-block;width:9px;color:${c}">▮</span>`;
-      const buildTooltipHTML = (hoveredX) => {
-        const slotT = Math.floor(hoveredX / SLOT_MS) * SLOT_MS;
-        const timeStr = new Date(hoveredX).toLocaleString([], {
-          day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
-          hour12: false,
-        });
 
-        const lines = [];
-        const buyPt = findSteplineAt(buyData, hoveredX);
-        if (buyPt) {
-          lines.push(`<div>${dot('#ffb300')} Buy price: <strong>${buyPt[1].toFixed(4)}</strong> €/kWh</div>`);
-        }
-        const sellPt = findSteplineAt(sellData, hoveredX);
-        if (sellPt) {
-          lines.push(`<div>${dot('#ff7043')} Sell price: <strong>${sellPt[1].toFixed(4)}</strong> €/kWh</div>`);
-        }
-        const fBar = forecastBars.find(b => b.x === slotT);
-        if (fBar) {
-          const prof = profileSlots.get(slotT);
-          let line = `<div>${dot(fBar.fillColor)} Solar forecast: <strong>${fBar.y.toFixed(3)}</strong> kWh`;
-          if (prof) {
-            if (prof.mode === 'sell') {
-              line += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
-            } else if (PROFILE_MODE_LABEL[prof.mode]) {
-              line += ` → ${PROFILE_MODE_LABEL[prof.mode]}`;
+      const series = [
+        {
+          name:       'Solar forecast',
+          type:       'custom',
+          yAxisIndex: 1,
+          renderItem: renderForecastBar,
+          data:       forecastBars.map(b => [b.x + SLOT_MS / 2, b.y]),
+          itemStyle:  { color: GREY_BAR },   // legend swatch fallback
+          z:          2,
+          markArea:   { silent: true, data: allBandAreas },
+          markLine:   {
+            symbol: 'none',
+            silent: true,
+            data: [{
+              xAxis: now,
+              lineStyle: { color: 'rgba(255,255,255,0.55)', type: 'dashed', width: 1 },
+              label: {
+                show: true,
+                position: 'insideEndTop',
+                formatter: 'Now',
+                color: '#fff',
+                backgroundColor: '#333',
+                padding: [3, 6, 3, 6],
+                fontSize: 11,
+              },
+            }],
+          },
+        },
+        {
+          name:       'Buy price',
+          type:       'line',
+          yAxisIndex: 0,
+          step:       'end',
+          showSymbol: false,
+          lineStyle:  { color: '#ffb300', width: 2 },
+          itemStyle:  { color: '#ffb300' },
+          data:       buyData,
+          z:          4,
+        },
+        {
+          name:       'Sell price',
+          type:       'line',
+          yAxisIndex: 0,
+          step:       'end',
+          showSymbol: false,
+          lineStyle:  { color: '#ff7043', width: 2 },
+          itemStyle:  { color: '#ff7043' },
+          data:       sellData,
+          z:          4,
+        },
+        {
+          name:       'Net billing',
+          type:       'line',
+          yAxisIndex: 2,
+          smooth:     true,
+          showSymbol: false,
+          lineStyle:  { color: '#66bb6a', width: 2, type: 'dashed' },
+          itemStyle:  { color: '#66bb6a' },
+          data:       billingData.map(p => [p.x, p.y]),
+          z:          3,
+        },
+        {
+          name:       'Grid import',
+          type:       'line',
+          yAxisIndex: 3,
+          smooth:     true,
+          showSymbol: false,
+          lineStyle:  { color: '#ef5350', width: 2, type: 'dashed' },
+          itemStyle:  { color: '#ef5350' },
+          data:       importData.map(p => [p.x, p.y]),
+          z:          3,
+        },
+        {
+          name:       'Grid export',
+          type:       'line',
+          yAxisIndex: 3,
+          smooth:     true,
+          showSymbol: false,
+          lineStyle:  { color: '#42a5f5', width: 2, type: 'dashed' },
+          itemStyle:  { color: '#42a5f5' },
+          data:       exportData.map(p => [p.x, p.y]),
+          z:          3,
+        },
+        {
+          name:       'Forecast error',
+          type:       'custom',
+          yAxisIndex: 1,
+          renderItem: renderErrorRect,
+          data:       errorSlots.map(e => [e.x, e.forecastKwh]),
+          itemStyle:  { color: '#66bb6a' },
+          tooltip:    { show: false },
+          silent:     true,
+          z:          5,
+        },
+      ];
+
+      const option = {
+        backgroundColor: 'transparent',
+        animation:       false,
+        textStyle:       { fontFamily: 'inherit', color: '#aaa' },
+        grid: {
+          left:   60,
+          right:  60,
+          top:    40,
+          bottom: 70,
+        },
+        legend: {
+          show:        true,
+          textStyle:   { color: '#aaa' },
+          data:        ['Solar forecast', 'Buy price', 'Sell price', 'Net billing', 'Grid import', 'Grid export'],
+          top:         5,
+        },
+        xAxis: {
+          type: 'time',
+          min:  windowStart,
+          max:  windowEnd,
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { show: true, lineStyle: { color: 'rgba(255,255,255,0.07)' } },
+          axisLabel: {
+            color:    '#aaa',
+            fontSize: 10,
+            rotate:   -30,
+            formatter: (val) => {
+              const d = new Date(val);
+              const dd  = String(d.getDate()).padStart(2, '0');
+              const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+              const hh  = String(d.getHours()).padStart(2, '0');
+              const mm  = String(d.getMinutes()).padStart(2, '0');
+              return `${dd} ${mon} ${hh}:${mm}`;
+            },
+          },
+        },
+        // Four y-axes: 0=price (left), 1=forecast kWh (right), 2=billing EUR (hidden),
+        // 3=import/export kWh (hidden). Hidden axes auto-scale per series so cumulative
+        // billing/import/export lines stay readable without sharing the price scale.
+        yAxis: [
+          {
+            type:     'value',
+            name:     'EUR / kWh',
+            nameTextStyle: { color: '#ffb300', fontSize: 11 },
+            position: 'left',
+            min:      priceYMin,
+            max:      priceYMax,
+            axisLine: { show: false },
+            axisTick: { show: false },
+            splitLine: { lineStyle: { color: 'rgba(255,255,255,0.07)' } },
+            axisLabel: {
+              color:    '#ffb300',
+              fontSize: 10,
+              formatter: v => (v != null ? v.toFixed(3) : ''),
+            },
+          },
+          {
+            type:     'value',
+            name:     'kWh / slot',
+            nameTextStyle: { color: '#cfcfcf', fontSize: 11 },
+            position: 'right',
+            min:      0,
+            max:      genYMaxKwh,
+            axisLine: { show: false },
+            axisTick: { show: false },
+            splitLine: { show: false },
+            axisLabel: {
+              color:    '#cfcfcf',
+              fontSize: 10,
+              formatter: v => (v != null ? v.toFixed(3) : ''),
+            },
+          },
+          { type: 'value', position: 'right', show: false },
+          { type: 'value', position: 'right', show: false },
+        ],
+        dataZoom: [
+          { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
+          {
+            type:       'slider',
+            xAxisIndex: 0,
+            filterMode: 'none',
+            bottom:     8,
+            height:     20,
+            startValue: windowStart,
+            endValue:   windowEnd,
+            backgroundColor:      'rgba(255,255,255,0.04)',
+            fillerColor:          'rgba(255,255,255,0.10)',
+            borderColor:          'transparent',
+            handleStyle:          { color: '#888' },
+            moveHandleStyle:      { color: '#888' },
+            textStyle:            { color: '#888' },
+            dataBackground:       { lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 } },
+            selectedDataBackground: { lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 } },
+          },
+        ],
+        toolbox: {
+          right: 20,
+          top:   5,
+          iconStyle: { borderColor: '#aaa' },
+          feature: {
+            dataZoom: { yAxisIndex: 'none' },
+            restore:  {},
+          },
+        },
+        tooltip: {
+          trigger:        'axis',
+          axisPointer:    { type: 'line', lineStyle: { color: 'rgba(255,255,255,0.35)' } },
+          backgroundColor: '#1f1f1f',
+          borderColor:    '#555',
+          textStyle:      { color: '#e0e0e0', fontSize: 12 },
+          padding:        [8, 12],
+          extraCssText:   'min-width:240px; line-height:1.55; box-shadow:0 4px 12px rgba(0,0,0,0.4);',
+          formatter: (params) => {
+            const hoveredX = Array.isArray(params)
+              ? (params[0]?.axisValue)
+              : params.axisValue;
+            if (hoveredX == null) return '';
+            const xMs   = typeof hoveredX === 'number' ? hoveredX : new Date(hoveredX).getTime();
+            const slotT = Math.floor(xMs / SLOT_MS) * SLOT_MS;
+            const timeStr = new Date(xMs).toLocaleString([], {
+              day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+              hour12: false,
+            });
+            const lines = [];
+
+            const buyPt = findSteplineAt(buyData, xMs);
+            if (buyPt) lines.push(`<div>${dot('#ffb300')} Buy price: <strong>${buyPt[1].toFixed(4)}</strong> €/kWh</div>`);
+
+            const sellPt = findSteplineAt(sellData, xMs);
+            if (sellPt) lines.push(`<div>${dot('#ff7043')} Sell price: <strong>${sellPt[1].toFixed(4)}</strong> €/kWh</div>`);
+
+            const fBar = forecastBarBySlot.get(slotT);
+            if (fBar) {
+              const prof = profileSlots.get(slotT);
+              let line = `<div>${dot(fBar.color)} Solar forecast: <strong>${fBar.y.toFixed(3)}</strong> kWh`;
+              if (prof) {
+                if (prof.mode === 'sell') {
+                  line += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
+                } else if (PROFILE_MODE_LABEL[prof.mode]) {
+                  line += ` → ${PROFILE_MODE_LABEL[prof.mode]}`;
+                }
+              }
+              line += '</div>';
+              lines.push(line);
             }
-          }
-          line += '</div>';
-          lines.push(line);
-        }
-        const errSlot = errorSlots.find(e => e.x === slotT);
-        if (errSlot) {
-          if (errSlot.pending) {
-            lines.push(`<div style="padding-left:14px;font-size:11px;color:#9e9e9e">↳ Forecast error: pending observation</div>`);
-          } else {
-            const sign  = errSlot.errorKwh >= 0 ? '+' : '';
-            const color = errSlot.errorKwh > 0 ? '#66bb6a' : '#ef5350';
-            lines.push(`<div style="padding-left:14px;font-size:11px;color:${color}">↳ Forecast error: ${sign}${errSlot.errorKwh.toFixed(3)} kWh</div>`);
-          }
-        }
-        const billPt = billingData.find(p => p.x === slotT);
-        if (billPt) {
-          const sign = billPt.y >= 0 ? '+' : '';
-          lines.push(`<div>${dot('#66bb6a')} Net total: <strong>${sign}${billPt.y.toFixed(2)}</strong> €</div>`);
-        }
-        const impPt = importData.find(p => p.x === slotT);
-        if (impPt) {
-          lines.push(`<div>${dot('#ef5350')} Import total: <strong>${impPt.y.toFixed(2)}</strong> kWh</div>`);
-        }
-        const expPt = exportData.find(p => p.x === slotT);
-        if (expPt) {
-          lines.push(`<div>${dot('#42a5f5')} Export total: <strong>${expPt.y.toFixed(2)}</strong> kWh</div>`);
-        }
-        const modeAt = modeBands.find(b => hoveredX >= b.x && hoveredX < b.x2);
-        if (modeAt) {
-          const dotColor = STORAGE_MODE_DOT[modeAt.mode] || '#9e9e9e';
-          const label    = STORAGE_MODE_LABEL[modeAt.mode] || modeAt.mode;
-          lines.push(`<div>${sq(dotColor)} Inverter mode: <strong>${label}</strong></div>`);
-        }
-        if (!lines.length) return null;
-        return `<div style="font-size:11px;color:#aaa;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #444;">${timeStr}</div>${lines.join('')}`;
+
+            const errSlot = errorBySlot.get(slotT);
+            if (errSlot) {
+              if (errSlot.pending) {
+                lines.push(`<div style="padding-left:14px;font-size:11px;color:#9e9e9e">↳ Forecast error: pending observation</div>`);
+              } else {
+                const sign  = errSlot.errorKwh >= 0 ? '+' : '';
+                const color = errSlot.errorKwh > 0 ? '#66bb6a' : '#ef5350';
+                lines.push(`<div style="padding-left:14px;font-size:11px;color:${color}">↳ Forecast error: ${sign}${errSlot.errorKwh.toFixed(3)} kWh</div>`);
+              }
+            }
+
+            const billPt = billingBySlot.get(slotT);
+            if (billPt) {
+              const sign = billPt.y >= 0 ? '+' : '';
+              lines.push(`<div>${dot('#66bb6a')} Net total: <strong>${sign}${billPt.y.toFixed(2)}</strong> €</div>`);
+            }
+
+            const impPt = importBySlot.get(slotT);
+            if (impPt) lines.push(`<div>${dot('#ef5350')} Import total: <strong>${impPt.y.toFixed(2)}</strong> kWh</div>`);
+
+            const expPt = exportBySlot.get(slotT);
+            if (expPt) lines.push(`<div>${dot('#42a5f5')} Export total: <strong>${expPt.y.toFixed(2)}</strong> kWh</div>`);
+
+            const modeAt = modeBands.find(b => xMs >= b.x && xMs < b.x2);
+            if (modeAt) {
+              const dotColor = STORAGE_MODE_DOT[modeAt.mode] || '#9e9e9e';
+              const label    = STORAGE_MODE_LABEL[modeAt.mode] || modeAt.mode;
+              lines.push(`<div>${sq(dotColor)} Inverter mode: <strong>${label}</strong></div>`);
+            }
+
+            if (!lines.length) return '';
+            return `<div style="font-size:11px;color:#aaa;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #444;">${timeStr}</div>${lines.join('')}`;
+          },
+        },
+        series,
       };
 
-      this._chart.render().then(() => {
-        drawErrorOverlay(this._chart);
+      const el = this.shadowRoot.querySelector('#chart');
+      el.style.height = '500px';
+      this._chart = window.echarts.init(el, null, { renderer: 'canvas' });
+      this._chart.setOption(option);
 
-        // Watch ApexCharts' DOM root — every zoom, pan, reset, legend toggle,
-        // or update wipes children inside it, which removes our hand-painted
-        // error overlay. We observe `this._chart.el` (the container passed to
-        // ApexCharts, which is stable across updates) rather than the inner
-        // SVG groups (which ApexCharts can replace wholesale on update),
-        // so the observer survives every internal re-render.
-        //
-        // Re-paint is debounced with setTimeout: each fresh mutation cancels
-        // the prior timer, so we paint once at the end of a burst. The
-        // `plot.querySelector(OVL_GROUP)` short-circuit prevents the
-        // appendChild → mutation → schedule loop. We deliberately avoid
-        // requestAnimationFrame because rAF is throttled to zero in
-        // background tabs — that previously stuck the painting guard at
-        // `true` and stopped all further re-paints until a manual refresh.
-        if (this._overlayObserver) this._overlayObserver.disconnect();
-        if (this._overlayTimer != null)    { clearTimeout(this._overlayTimer);     this._overlayTimer    = null; }
-        if (this._overlayInterval != null) { clearInterval(this._overlayInterval); this._overlayInterval = null; }
-        if (this._chart.el && errorSlots.length) {
-          const ensureOverlay = () => {
-            const plot = this._chart?.el?.querySelector('.apexcharts-graphical');
-            if (!plot) return;
-            if (plot.querySelector('.' + OVL_GROUP)) return;
-            try { drawErrorOverlay(this._chart); }
-            catch (e) { console.warn('sunSale: overlay re-paint failed', e); }
-          };
-          const schedule = () => {
-            if (this._overlayTimer != null) clearTimeout(this._overlayTimer);
-            this._overlayTimer = setTimeout(() => {
-              this._overlayTimer = null;
-              ensureOverlay();
-            }, 80);
-          };
-          this._overlayObserver = new MutationObserver(() => {
-            const plot = this._chart?.el?.querySelector('.apexcharts-graphical');
-            if (!plot) { schedule(); return; }
-            if (plot.querySelector('.' + OVL_GROUP)) return;
-            schedule();
-          });
-          this._overlayObserver.observe(this._chart.el, { childList: true, subtree: true });
-          // Safety net: if the observer ever misses a re-render (rare but
-          // possible if ApexCharts swaps the watched subtree wholesale before
-          // the observer attaches to the new one), this poll guarantees the
-          // overlay returns within ~400 ms. Cost: a single querySelector each
-          // tick, no work when the overlay is present.
-          this._overlayInterval = setInterval(ensureOverlay, 400);
-        }
-
-        // Manual tooltip. We listen on the chart container (not the plot SVG)
-        // so the listener stays attached across zoom-induced re-renders; the
-        // plot rect is read fresh on every mousemove via getBoundingClientRect.
-        const hideAll = () => {
-          tooltipEl.style.display = 'none';
-          crosshairEl.style.display = 'none';
-        };
-        const onMove = (ev) => {
-          const w = this._chart?.w;
-          const plot = this._chart?.el?.querySelector('.apexcharts-graphical');
-          if (!w || !plot) { hideAll(); return; }
-          const plotRect = plot.getBoundingClientRect();
-          const xInPlot = ev.clientX - plotRect.left;
-          const yInPlot = ev.clientY - plotRect.top;
-          if (xInPlot < 0 || xInPlot > plotRect.width ||
-              yInPlot < 0 || yInPlot > plotRect.height) {
-            hideAll();
-            return;
-          }
-          const xMin = w.globals.minX, xMax = w.globals.maxX;
-          if (!(xMax > xMin)) { hideAll(); return; }
-          const hoveredX = xMin + (xInPlot / plotRect.width) * (xMax - xMin);
-          const html = buildTooltipHTML(hoveredX);
-          const elRect = el.getBoundingClientRect();
-          // Crosshair: thin vertical line spanning the plot area's height,
-          // positioned at the cursor's x within the chart container.
-          crosshairEl.style.left   = (plotRect.left - elRect.left + xInPlot) + 'px';
-          crosshairEl.style.top    = (plotRect.top  - elRect.top)            + 'px';
-          crosshairEl.style.height = plotRect.height + 'px';
-          crosshairEl.style.display = 'block';
-          if (!html) { tooltipEl.style.display = 'none'; return; }
-          tooltipEl.innerHTML = html;
-          tooltipEl.style.display = 'block';
-          // Position relative to #chart. Offset 12px to the right of cursor;
-          // flip to the left when it would overflow the container's right edge.
-          const ttW = tooltipEl.offsetWidth, ttH = tooltipEl.offsetHeight;
-          let left = ev.clientX - elRect.left + 12;
-          let top  = ev.clientY - elRect.top  + 12;
-          if (left + ttW > elRect.width)  left = ev.clientX - elRect.left - ttW - 12;
-          if (top  + ttH > elRect.height) top  = ev.clientY - elRect.top  - ttH - 12;
-          tooltipEl.style.left = Math.max(0, left) + 'px';
-          tooltipEl.style.top  = Math.max(0, top)  + 'px';
-        };
-        const onLeave = () => { hideAll(); };
-        el.addEventListener('mousemove', onMove);
-        el.addEventListener('mouseleave', onLeave);
-        this._chartMoveHandler  = onMove;
-        this._chartLeaveHandler = onLeave;
-      });
+      // Resize on container size changes (HA sidebar toggle, window resize).
+      if (this._resizeObs) this._resizeObs.disconnect();
+      this._resizeObs = new ResizeObserver(() => { this._chart?.resize(); });
+      this._resizeObs.observe(el);
 
       this._renderBillSummary();
 
@@ -1264,116 +1140,138 @@
 
     // ── Forecast Quality Charts ────────────────────────────────────────────────
 
-    _buildQualityChartOptions(title, xLabels, metricsArr) {
+    _buildQualityChartOption(title, xLabels, metricsArr) {
       // metricsArr: [{n, bias_wh, mae_wh, rmse_wh, mape_pct, r2}, ...] aligned with xLabels.
       const get = (key) => metricsArr.map(m => (m && m[key] != null) ? m[key] : null);
 
-      const maeSeries   = get('mae_wh');
-      const rmseSeries  = get('rmse_wh');
-      const biasSeries  = get('bias_wh');
-      const mapeSeries  = get('mape_pct');
-      const r2Series    = get('r2').map(v => v != null ? +(v * 100).toFixed(2) : null);
-      const nSeries     = metricsArr.map(m => m ? m.n : 0);
+      const maeSeries  = get('mae_wh');
+      const rmseSeries = get('rmse_wh');
+      const biasSeries = get('bias_wh');
+      const mapeSeries = get('mape_pct');
+      const r2Series   = get('r2').map(v => v != null ? +(v * 100).toFixed(2) : null);
+
+      const UNIT = ['Wh', 'Wh', 'Wh', '%', '%'];
 
       return {
-        series: [
-          { name: 'MAE (Wh)',   type: 'bar',  data: maeSeries  },
-          { name: 'RMSE (Wh)',  type: 'line', data: rmseSeries },
-          { name: 'Bias (Wh)',  type: 'line', data: biasSeries },
-          { name: 'MAPE (%)',   type: 'line', data: mapeSeries },
-          { name: 'R²×100 (%)', type: 'line', data: r2Series   },
-        ],
-        chart: {
-          type:       'line',
-          height:     300,
-          background: 'transparent',
-          toolbar:    { show: false },
-          animations: { enabled: false },
-          fontFamily: 'inherit',
-        },
-        theme: { mode: 'dark' },
-        plotOptions: {
-          bar: { horizontal: false, columnWidth: '60%' },
-        },
-        stroke: {
-          show:      true,
-          curve:     ['smooth', 'smooth', 'smooth', 'smooth', 'smooth'],
-          width:     [0,        2,        2,        2,        2       ],
-          dashArray: [0,        5,        3,        0,        8       ],
-        },
-        colors: ['#ffb300', '#ff7043', '#42a5f5', '#66bb6a', '#ab47bc'],
-        fill: {
-          type:    ['solid', 'solid', 'solid', 'solid', 'solid'],
-          opacity: [0.8,     1,       1,       1,       1      ],
-        },
-        xaxis: {
-          categories: xLabels,
-          labels: {
-            style:  { colors: '#aaa', fontSize: '10px' },
-            rotate: -30,
-          },
-          axisBorder: { show: false },
-          axisTicks:  { show: false },
-        },
-        yaxis: [
-          {
-            seriesName: ['MAE (Wh)', 'RMSE (Wh)', 'Bias (Wh)'],
-            title: {
-              text:  'Wh',
-              style: { color: '#ffb300', fontSize: '10px' },
-            },
-            forceNiceScale:  true,
-            decimalsInFloat: 1,
-            labels: {
-              style:     { colors: '#ffb300', fontSize: '10px' },
-              formatter: v => (v != null ? v.toFixed(1) : ''),
-            },
-          },
-          {
-            seriesName: ['MAPE (%)', 'R²×100 (%)'],
-            opposite:   true,
-            title: {
-              text:  '%',
-              style: { color: '#66bb6a', fontSize: '10px' },
-            },
-            forceNiceScale:  true,
-            decimalsInFloat: 1,
-            labels: {
-              style:     { colors: '#66bb6a', fontSize: '10px' },
-              formatter: v => (v != null ? v.toFixed(1) : ''),
-            },
-          },
-        ],
-        tooltip: {
-          shared:    true,
-          intersect: false,
-          theme:     'dark',
-          y: {
-            formatter: (val, { seriesIndex }) => {
-              if (val == null) return '—';
-              const units = ['Wh', 'Wh', 'Wh', '%', '%'];
-              const label = ['MAE', 'RMSE', 'Bias', 'MAPE', 'R²×100'][seriesIndex] || '';
-              const n = nSeries[/* dataPointIndex not avail here */0] || '';
-              return `${val.toFixed(1)} ${units[seriesIndex]}`;
-            },
-          },
-        },
-        legend: {
-          show:   true,
-          labels: { colors: '#aaa' },
-        },
-        grid: {
-          borderColor: 'rgba(255,255,255,0.07)',
-          xaxis: { lines: { show: false } },
-          yaxis: { lines: { show: true  } },
-        },
-        markers:    { size: 0 },
-        dataLabels: { enabled: false },
+        backgroundColor: 'transparent',
+        animation:       false,
+        textStyle:       { fontFamily: 'inherit', color: '#aaa' },
         title: {
-          text:  title,
-          style: { color: '#aaa', fontSize: '12px', fontWeight: '600' },
-          margin: 4,
+          text:      title,
+          textStyle: { color: '#aaa', fontSize: 12, fontWeight: 600 },
+          top:       0,
+          left:      'center',
         },
+        grid: { left: 60, right: 60, top: 40, bottom: 40 },
+        legend: {
+          show:      true,
+          textStyle: { color: '#aaa' },
+          bottom:    0,
+        },
+        tooltip: {
+          trigger:         'axis',
+          axisPointer:     { type: 'shadow' },
+          backgroundColor: '#1f1f1f',
+          borderColor:     '#555',
+          textStyle:       { color: '#e0e0e0', fontSize: 12 },
+          padding:         [8, 12],
+          formatter: (params) => {
+            const head = `<div style="font-size:11px;color:#aaa;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid #444;">${params[0]?.axisValueLabel ?? ''}</div>`;
+            const rows = params.map(p => {
+              if (p.value == null) return '';
+              const swatch = `<span style="display:inline-block;width:9px;color:${p.color}">●</span>`;
+              return `<div>${swatch} ${p.seriesName}: <strong>${(+p.value).toFixed(1)}</strong> ${UNIT[p.seriesIndex] || ''}</div>`;
+            }).filter(Boolean).join('');
+            return head + rows;
+          },
+        },
+        xAxis: {
+          type:      'category',
+          data:      xLabels,
+          axisLine:  { show: false },
+          axisTick:  { show: false },
+          axisLabel: { color: '#aaa', fontSize: 10, rotate: -30 },
+        },
+        yAxis: [
+          {
+            type:          'value',
+            name:          'Wh',
+            nameTextStyle: { color: '#ffb300', fontSize: 10 },
+            position:      'left',
+            axisLine:      { show: false },
+            axisTick:      { show: false },
+            splitLine:     { lineStyle: { color: 'rgba(255,255,255,0.07)' } },
+            axisLabel: {
+              color:    '#ffb300',
+              fontSize: 10,
+              formatter: v => (v != null ? v.toFixed(1) : ''),
+            },
+          },
+          {
+            type:          'value',
+            name:          '%',
+            nameTextStyle: { color: '#66bb6a', fontSize: 10 },
+            position:      'right',
+            axisLine:      { show: false },
+            axisTick:      { show: false },
+            splitLine:     { show: false },
+            axisLabel: {
+              color:    '#66bb6a',
+              fontSize: 10,
+              formatter: v => (v != null ? v.toFixed(1) : ''),
+            },
+          },
+        ],
+        series: [
+          {
+            name:       'MAE (Wh)',
+            type:       'bar',
+            yAxisIndex: 0,
+            data:       maeSeries,
+            itemStyle:  { color: '#ffb300', opacity: 0.8 },
+            barWidth:   '60%',
+          },
+          {
+            name:       'RMSE (Wh)',
+            type:       'line',
+            yAxisIndex: 0,
+            smooth:     true,
+            showSymbol: false,
+            data:       rmseSeries,
+            lineStyle:  { color: '#ff7043', width: 2, type: 'dashed' },
+            itemStyle:  { color: '#ff7043' },
+          },
+          {
+            name:       'Bias (Wh)',
+            type:       'line',
+            yAxisIndex: 0,
+            smooth:     true,
+            showSymbol: false,
+            data:       biasSeries,
+            lineStyle:  { color: '#42a5f5', width: 2, type: 'dotted' },
+            itemStyle:  { color: '#42a5f5' },
+          },
+          {
+            name:       'MAPE (%)',
+            type:       'line',
+            yAxisIndex: 1,
+            smooth:     true,
+            showSymbol: false,
+            data:       mapeSeries,
+            lineStyle:  { color: '#66bb6a', width: 2 },
+            itemStyle:  { color: '#66bb6a' },
+          },
+          {
+            name:       'R²×100 (%)',
+            type:       'line',
+            yAxisIndex: 1,
+            smooth:     true,
+            showSymbol: false,
+            data:       r2Series,
+            lineStyle:  { color: '#ab47bc', width: 2, type: 'dashed' },
+            itemStyle:  { color: '#ab47bc' },
+          },
+        ],
       };
     }
 
@@ -1389,10 +1287,10 @@
         return;
       }
 
-      // Destroy previous charts.
-      if (this._g1Chart) { this._g1Chart.destroy(); this._g1Chart = null; }
-      if (this._g2Chart) { this._g2Chart.destroy(); this._g2Chart = null; }
-      if (this._g3Chart) { this._g3Chart.destroy(); this._g3Chart = null; }
+      // Dispose previous charts.
+      if (this._g1Chart) { this._g1Chart.dispose(); this._g1Chart = null; }
+      if (this._g2Chart) { this._g2Chart.dispose(); this._g2Chart = null; }
+      if (this._g3Chart) { this._g3Chart.dispose(); this._g3Chart = null; }
 
       const sunriseStr = quality.sunrise_utc
         ? new Date(quality.sunrise_utc).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', hour12: false})
@@ -1405,9 +1303,9 @@
         <div class="accuracy-title">Forecast Quality</div>
         <div class="accuracy-subtitle">Sunrise ${sunriseStr} · Sunset ${sunsetStr} (local)</div>
         <div class="accuracy-subtitle">EMA α=0.1 running accuracy per bucket</div>
-        <div id="g1-chart" class="accuracy-chart"></div>
-        <div id="g2-chart" class="accuracy-chart"></div>
-        <div id="g3-chart" class="accuracy-chart"></div>
+        <div id="g1-chart" class="accuracy-chart" style="height:300px"></div>
+        <div id="g2-chart" class="accuracy-chart" style="height:300px"></div>
+        <div id="g3-chart" class="accuracy-chart" style="height:300px"></div>
       `;
 
       // Group 1: intensity bins — sorted numerically by Wh.
@@ -1417,12 +1315,11 @@
         const labels = keys.map(k => k + ' Wh');
         const metrics = keys.map(k => g1[String(k)]);
         const el = container.querySelector('#g1-chart');
-        const opts = this._buildQualityChartOptions(
+        this._g1Chart = window.echarts.init(el, null, { renderer: 'canvas' });
+        this._g1Chart.setOption(this._buildQualityChartOption(
           'Group 1 — Accuracy by Predicted Intensity (per forecast-kWh bin)',
           labels, metrics,
-        );
-        this._g1Chart = new ApexCharts(el, opts);
-        this._g1Chart.render();
+        ));
       }
 
       // Group 2: solar-day positional buckets — sorted 1..N.
@@ -1437,12 +1334,11 @@
         });
         const metrics = keys.map(k => g2[String(k)]);
         const el = container.querySelector('#g2-chart');
-        const opts = this._buildQualityChartOptions(
+        this._g2Chart = window.echarts.init(el, null, { renderer: 'canvas' });
+        this._g2Chart.setOption(this._buildQualityChartOption(
           'Group 2 — Accuracy by Solar-Day Position (Dawn → Dusk)',
           labels, metrics,
-        );
-        this._g2Chart = new ApexCharts(el, opts);
-        this._g2Chart.render();
+        ));
       }
 
       // Group 3: horizon buckets d0–d6.
@@ -1452,12 +1348,11 @@
         const labels = keys.map(k => `d${k}`);
         const metrics = keys.map(k => g3[String(k)]);
         const el = container.querySelector('#g3-chart');
-        const opts = this._buildQualityChartOptions(
+        this._g3Chart = window.echarts.init(el, null, { renderer: 'canvas' });
+        this._g3Chart.setOption(this._buildQualityChartOption(
           'Group 3 — Accuracy by Forecast Horizon (d0 = same day, d6 = 6 days ahead)',
           labels, metrics,
-        );
-        this._g3Chart = new ApexCharts(el, opts);
-        this._g3Chart.render();
+        ));
       }
     }
   }
