@@ -82,6 +82,7 @@
       this._g1Chart     = null;
       this._g2Chart     = null;
       this._g3Chart     = null;
+      this._overlayObserver = null;
       this._initialized = false;
       this.attachShadow({ mode: 'open' });
     }
@@ -100,6 +101,7 @@
     }
 
     disconnectedCallback() {
+      if (this._overlayObserver) { this._overlayObserver.disconnect(); this._overlayObserver = null; }
       if (this._chart)     { this._chart.destroy();     this._chart     = null; }
       if (this._g1Chart)   { this._g1Chart.destroy();    this._g1Chart   = null; }
       if (this._g2Chart)   { this._g2Chart.destroy();    this._g2Chart   = null; }
@@ -787,13 +789,11 @@
           fontFamily: 'inherit',
           events: {
             beforeResetZoom: () => ({ xaxis: { min: windowStart, max: windowEnd } }),
-            // Re-paint the forecast-error overlay after ApexCharts rebuilds
-            // the SVG plot area (zoom, pan, reset). Deferred via rAF so the
-            // chart's own layout has settled before we read w.globals.
-            // (Wiring this into `mounted`/`updated` collapses the bar series —
-            // see drawErrorOverlay docstring above.)
-            zoomed:   function (ctx) { requestAnimationFrame(() => drawErrorOverlay(ctx)); },
-            scrolled: function (ctx) { requestAnimationFrame(() => drawErrorOverlay(ctx)); },
+            // Re-paint is wired via a MutationObserver set up after first render
+            // (see below) — it survives every internal SVG rebuild ApexCharts
+            // performs (zoom, pan, reset, legend toggle), not just the events
+            // it exposes. Hooking into chart.events.mounted/updated here would
+            // collapse the bar series (re-entrant render).
           },
         },
 
@@ -909,116 +909,14 @@
           ],
         },
 
-        // Custom tooltip — ApexCharts' built-in shared tooltip drops series
-        // whose x-array doesn't align with the hovered series, which is the
-        // norm here (sparse stepline prices vs dense 15-min bars). This
-        // walks every series and looks up the value at the hovered timestamp,
-        // so all data + status overlays at that time are surfaced together.
-        tooltip: {
-          shared:    true,
-          intersect: false,
-          theme:     'dark',
-          custom: ({ seriesIndex, dataPointIndex, w }) => {
-            // Resolve the hovered timestamp from whatever series ApexCharts
-            // reported as the trigger. seriesX is per-series; fall back to
-            // the configured data point's .x when the series has none.
-            let hoveredX = null;
-            const sx = w.globals.seriesX?.[seriesIndex];
-            if (sx && sx[dataPointIndex] != null) {
-              hoveredX = sx[dataPointIndex];
-            } else {
-              const pt = w.config.series[seriesIndex]?.data?.[dataPointIndex];
-              if (pt && pt.x != null) hoveredX = pt.x;
-            }
-            if (hoveredX == null) return '';
-
-            const slotT = Math.floor(hoveredX / SLOT_MS) * SLOT_MS;
-            const date  = new Date(hoveredX);
-            const timeStr = date.toLocaleString([], {
-              day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
-            });
-
-            const lines = [];
-            const dot = c => `<span style="display:inline-block;width:9px;color:${c}">●</span>`;
-            const sq  = c => `<span style="display:inline-block;width:9px;color:${c}">▮</span>`;
-
-            // Buy price (stepline — value persists between updates).
-            const buyPt = findSteplineAt(buyData, hoveredX);
-            if (buyPt) {
-              lines.push(`<div>${dot('#ffb300')} Buy price: <strong>${buyPt[1].toFixed(4)}</strong> €/kWh</div>`);
-            }
-
-            // Sell price (stepline).
-            const sellPt = findSteplineAt(sellData, hoveredX);
-            if (sellPt) {
-              lines.push(`<div>${dot('#ff7043')} Sell price: <strong>${sellPt[1].toFixed(4)}</strong> €/kWh</div>`);
-            }
-
-            // Solar forecast bar at this 15-min slot + charging-profile disposition.
-            const fBar = forecastBars.find(b => b.x === slotT);
-            if (fBar) {
-              const prof = profileSlots.get(slotT);
-              let line = `<div>${dot(fBar.fillColor)} Solar forecast: <strong>${fBar.y.toFixed(3)}</strong> kWh`;
-              if (prof) {
-                if (prof.mode === 'sell') {
-                  line += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
-                } else if (PROFILE_MODE_LABEL[prof.mode]) {
-                  line += ` → ${PROFILE_MODE_LABEL[prof.mode]}`;
-                }
-              }
-              line += '</div>';
-              lines.push(line);
-            }
-
-            // Forecast-vs-observed error (drawn as overlay rects on chart).
-            const errSlot = errorSlots.find(e => e.x === slotT);
-            if (errSlot) {
-              if (errSlot.pending) {
-                lines.push(`<div style="padding-left:14px;font-size:11px;color:#9e9e9e">↳ Forecast error: pending observation</div>`);
-              } else {
-                const sign  = errSlot.errorKwh >= 0 ? '+' : '';
-                const color = errSlot.errorKwh > 0 ? '#66bb6a' : '#ef5350';
-                lines.push(`<div style="padding-left:14px;font-size:11px;color:${color}">↳ Forecast error: ${sign}${errSlot.errorKwh.toFixed(3)} kWh</div>`);
-              }
-            }
-
-            // Net billing running total at this slot (past only).
-            const billPt = billingData.find(p => p.x === slotT);
-            if (billPt) {
-              const sign = billPt.y >= 0 ? '+' : '';
-              lines.push(`<div>${dot('#66bb6a')} Net total: <strong>${sign}${billPt.y.toFixed(2)}</strong> €</div>`);
-            }
-
-            // Inverter storage-mode band covering this instant (history or plan).
-            const modeAt = modeBands.find(b => hoveredX >= b.x && hoveredX < b.x2);
-            if (modeAt) {
-              const dotColor = STORAGE_MODE_DOT[modeAt.mode] || '#9e9e9e';
-              const label    = STORAGE_MODE_LABEL[modeAt.mode] || modeAt.mode;
-              lines.push(`<div>${sq(dotColor)} Inverter mode: <strong>${label}</strong></div>`);
-            }
-
-            if (!lines.length) return '';
-
-            return `
-              <div style="
-                padding: 8px 12px;
-                background: #1f1f1f;
-                border: 1px solid #555;
-                border-radius: 4px;
-                font-size: 12px;
-                color: #e0e0e0;
-                line-height: 1.55;
-                min-width: 240px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-              ">
-                <div style="font-size:11px;color:#aaa;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #444;">
-                  ${timeStr}
-                </div>
-                ${lines.join('')}
-              </div>
-            `;
-          },
-        },
+        // ApexCharts' built-in tooltip is disabled — its shared mode silently
+        // falls back to single-series when isInitialSeriesSameLen() is false,
+        // and our four series here have wildly different lengths (288 bars vs
+        // sparse stepline prices vs past-only billing). We render our own
+        // tooltip via a mousemove listener wired in after render(); it looks
+        // up every data source at the cursor's x and always shows the full
+        // picture. xaxis.crosshairs above still draws the vertical hairline.
+        tooltip: { enabled: false },
 
         legend: {
           show:   true,
@@ -1036,8 +934,183 @@
       };
 
       const el = this.shadowRoot.querySelector('#chart');
+      // The custom tooltip is absolutely-positioned relative to #chart, so the
+      // chart container must be a positioning context.
+      el.style.position = 'relative';
+      // Drop any tooltip element / listeners from a previous _render(), so a
+      // re-render doesn't stack handlers or orphaned DOM.
+      el.querySelectorAll('.sunsale-tooltip, .sunsale-crosshair').forEach(n => n.remove());
+      if (this._chartMoveHandler)  el.removeEventListener('mousemove',  this._chartMoveHandler);
+      if (this._chartLeaveHandler) el.removeEventListener('mouseleave', this._chartLeaveHandler);
       this._chart = new ApexCharts(el, options);
-      this._chart.render().then(() => drawErrorOverlay(this._chart));
+
+      // Build a single tooltip element we reuse across hovers. Lives in #chart
+      // and uses pointer-events:none so it never steals mouse events from the
+      // chart underneath (which would prevent further mousemove updates).
+      const tooltipEl = document.createElement('div');
+      tooltipEl.className = 'sunsale-tooltip';
+      tooltipEl.style.cssText = [
+        'position:absolute',
+        'pointer-events:none',
+        'z-index:10',
+        'display:none',
+        'padding:8px 12px',
+        'background:#1f1f1f',
+        'border:1px solid #555',
+        'border-radius:4px',
+        'font-size:12px',
+        'color:#e0e0e0',
+        'line-height:1.55',
+        'min-width:240px',
+        'box-shadow:0 4px 12px rgba(0,0,0,0.4)',
+        'transition:transform 60ms linear',
+      ].join(';');
+      el.appendChild(tooltipEl);
+
+      // Vertical hairline tracking the cursor x. Disabling ApexCharts' tooltip
+      // (above) also disables its built-in xaxis.crosshairs, so we draw our own.
+      const crosshairEl = document.createElement('div');
+      crosshairEl.className = 'sunsale-crosshair';
+      crosshairEl.style.cssText = [
+        'position:absolute',
+        'pointer-events:none',
+        'z-index:9',
+        'display:none',
+        'width:1px',
+        'background:rgba(255,255,255,0.35)',
+      ].join(';');
+      el.appendChild(crosshairEl);
+
+      const dot = c => `<span style="display:inline-block;width:9px;color:${c}">●</span>`;
+      const sq  = c => `<span style="display:inline-block;width:9px;color:${c}">▮</span>`;
+      const buildTooltipHTML = (hoveredX) => {
+        const slotT = Math.floor(hoveredX / SLOT_MS) * SLOT_MS;
+        const timeStr = new Date(hoveredX).toLocaleString([], {
+          day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+        });
+
+        const lines = [];
+        const buyPt = findSteplineAt(buyData, hoveredX);
+        if (buyPt) {
+          lines.push(`<div>${dot('#ffb300')} Buy price: <strong>${buyPt[1].toFixed(4)}</strong> €/kWh</div>`);
+        }
+        const sellPt = findSteplineAt(sellData, hoveredX);
+        if (sellPt) {
+          lines.push(`<div>${dot('#ff7043')} Sell price: <strong>${sellPt[1].toFixed(4)}</strong> €/kWh</div>`);
+        }
+        const fBar = forecastBars.find(b => b.x === slotT);
+        if (fBar) {
+          const prof = profileSlots.get(slotT);
+          let line = `<div>${dot(fBar.fillColor)} Solar forecast: <strong>${fBar.y.toFixed(3)}</strong> kWh`;
+          if (prof) {
+            if (prof.mode === 'sell') {
+              line += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
+            } else if (PROFILE_MODE_LABEL[prof.mode]) {
+              line += ` → ${PROFILE_MODE_LABEL[prof.mode]}`;
+            }
+          }
+          line += '</div>';
+          lines.push(line);
+        }
+        const errSlot = errorSlots.find(e => e.x === slotT);
+        if (errSlot) {
+          if (errSlot.pending) {
+            lines.push(`<div style="padding-left:14px;font-size:11px;color:#9e9e9e">↳ Forecast error: pending observation</div>`);
+          } else {
+            const sign  = errSlot.errorKwh >= 0 ? '+' : '';
+            const color = errSlot.errorKwh > 0 ? '#66bb6a' : '#ef5350';
+            lines.push(`<div style="padding-left:14px;font-size:11px;color:${color}">↳ Forecast error: ${sign}${errSlot.errorKwh.toFixed(3)} kWh</div>`);
+          }
+        }
+        const billPt = billingData.find(p => p.x === slotT);
+        if (billPt) {
+          const sign = billPt.y >= 0 ? '+' : '';
+          lines.push(`<div>${dot('#66bb6a')} Net total: <strong>${sign}${billPt.y.toFixed(2)}</strong> €</div>`);
+        }
+        const modeAt = modeBands.find(b => hoveredX >= b.x && hoveredX < b.x2);
+        if (modeAt) {
+          const dotColor = STORAGE_MODE_DOT[modeAt.mode] || '#9e9e9e';
+          const label    = STORAGE_MODE_LABEL[modeAt.mode] || modeAt.mode;
+          lines.push(`<div>${sq(dotColor)} Inverter mode: <strong>${label}</strong></div>`);
+        }
+        if (!lines.length) return null;
+        return `<div style="font-size:11px;color:#aaa;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #444;">${timeStr}</div>${lines.join('')}`;
+      };
+
+      this._chart.render().then(() => {
+        drawErrorOverlay(this._chart);
+
+        // Watch the inner SVG group ApexCharts owns — every zoom, pan, reset,
+        // legend toggle, or update wipes its children, which removes our
+        // hand-painted error overlay. The observer re-paints whenever our
+        // <g class="sunsale-error-overlay"> is missing. A `painting` guard +
+        // rAF batch breaks the self-trigger loop (appendChild → MutationRecord).
+        if (this._overlayObserver) this._overlayObserver.disconnect();
+        const inner = this._chart.el?.querySelector('.apexcharts-inner');
+        if (inner && errorSlots.length) {
+          let painting = false;
+          this._overlayObserver = new MutationObserver(() => {
+            if (painting) return;
+            const plot = this._chart?.el?.querySelector('.apexcharts-graphical');
+            if (!plot) return;
+            if (plot.querySelector('.' + OVL_GROUP)) return;
+            painting = true;
+            requestAnimationFrame(() => {
+              try { drawErrorOverlay(this._chart); } finally { painting = false; }
+            });
+          });
+          this._overlayObserver.observe(inner, { childList: true, subtree: true });
+        }
+
+        // Manual tooltip. We listen on the chart container (not the plot SVG)
+        // so the listener stays attached across zoom-induced re-renders; the
+        // plot rect is read fresh on every mousemove via getBoundingClientRect.
+        const hideAll = () => {
+          tooltipEl.style.display = 'none';
+          crosshairEl.style.display = 'none';
+        };
+        const onMove = (ev) => {
+          const w = this._chart?.w;
+          const plot = this._chart?.el?.querySelector('.apexcharts-graphical');
+          if (!w || !plot) { hideAll(); return; }
+          const plotRect = plot.getBoundingClientRect();
+          const xInPlot = ev.clientX - plotRect.left;
+          const yInPlot = ev.clientY - plotRect.top;
+          if (xInPlot < 0 || xInPlot > plotRect.width ||
+              yInPlot < 0 || yInPlot > plotRect.height) {
+            hideAll();
+            return;
+          }
+          const xMin = w.globals.minX, xMax = w.globals.maxX;
+          if (!(xMax > xMin)) { hideAll(); return; }
+          const hoveredX = xMin + (xInPlot / plotRect.width) * (xMax - xMin);
+          const html = buildTooltipHTML(hoveredX);
+          const elRect = el.getBoundingClientRect();
+          // Crosshair: thin vertical line spanning the plot area's height,
+          // positioned at the cursor's x within the chart container.
+          crosshairEl.style.left   = (plotRect.left - elRect.left + xInPlot) + 'px';
+          crosshairEl.style.top    = (plotRect.top  - elRect.top)            + 'px';
+          crosshairEl.style.height = plotRect.height + 'px';
+          crosshairEl.style.display = 'block';
+          if (!html) { tooltipEl.style.display = 'none'; return; }
+          tooltipEl.innerHTML = html;
+          tooltipEl.style.display = 'block';
+          // Position relative to #chart. Offset 12px to the right of cursor;
+          // flip to the left when it would overflow the container's right edge.
+          const ttW = tooltipEl.offsetWidth, ttH = tooltipEl.offsetHeight;
+          let left = ev.clientX - elRect.left + 12;
+          let top  = ev.clientY - elRect.top  + 12;
+          if (left + ttW > elRect.width)  left = ev.clientX - elRect.left - ttW - 12;
+          if (top  + ttH > elRect.height) top  = ev.clientY - elRect.top  - ttH - 12;
+          tooltipEl.style.left = Math.max(0, left) + 'px';
+          tooltipEl.style.top  = Math.max(0, top)  + 'px';
+        };
+        const onLeave = () => { hideAll(); };
+        el.addEventListener('mousemove', onMove);
+        el.addEventListener('mouseleave', onLeave);
+        this._chartMoveHandler  = onMove;
+        this._chartLeaveHandler = onLeave;
+      });
 
       this._renderBillSummary();
 
