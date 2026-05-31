@@ -3,15 +3,10 @@ from __future__ import annotations
 
 import pytest
 
-from custom_components.sun_sale.contract.models import (
-    ChargeMode,
-    StorageMode,
-)
+from custom_components.sun_sale.contract.models import StorageMode
 from custom_components.sun_sale.pipeline.storage_mode_specs import (
-    PlannerDecision,
     build_specs,
     decode_mode,
-    select_mode,
 )
 from tests.conftest import default_battery_config
 
@@ -178,53 +173,3 @@ def test_decode_round_trip_applied_modes_match_build_specs():
             assert decoded == mode, f"{mode} round-trip failed → {decoded}"
 
 
-# ---------------------------------------------------------------------------
-# select_mode — PlannerDecision × ChargingProfile → StorageMode
-# ---------------------------------------------------------------------------
-
-
-def test_select_mode_charge_from_grid_is_gulp():
-    assert select_mode(PlannerDecision.CHARGE_FROM_GRID) == StorageMode.GULP
-
-
-def test_select_mode_discharge_to_grid_is_dump():
-    assert select_mode(PlannerDecision.DISCHARGE_TO_GRID) == StorageMode.DUMP
-
-
-def test_select_mode_solar_no_export_is_hoard():
-    assert select_mode(
-        PlannerDecision.CHARGE_FROM_SOLAR, ChargeMode.NO_EXPORT
-    ) == StorageMode.HOARD
-
-
-def test_select_mode_solar_with_sell_profile_is_store():
-    assert select_mode(
-        PlannerDecision.CHARGE_FROM_SOLAR, ChargeMode.SELL
-    ) == StorageMode.STORE
-
-
-def test_select_mode_solar_with_solar_charge_profile_is_store():
-    assert select_mode(
-        PlannerDecision.CHARGE_FROM_SOLAR, ChargeMode.SOLAR_CHARGE
-    ) == StorageMode.STORE
-
-
-def test_select_mode_solar_no_profile_defaults_to_store():
-    assert select_mode(PlannerDecision.CHARGE_FROM_SOLAR, None) == StorageMode.STORE
-
-
-def test_select_mode_idle_positive_sell_is_auto():
-    assert select_mode(PlannerDecision.IDLE, sell_eur_kwh=0.05) == StorageMode.AUTO
-
-
-def test_select_mode_idle_zero_sell_is_auto():
-    assert select_mode(PlannerDecision.IDLE, sell_eur_kwh=0.0) == StorageMode.AUTO
-
-
-def test_select_mode_idle_negative_sell_is_stby():
-    # Negative sell price = grid would charge for exports → safer to stand by.
-    assert select_mode(PlannerDecision.IDLE, sell_eur_kwh=-0.01) == StorageMode.STBY
-
-
-def test_select_mode_idle_no_price_defaults_to_auto():
-    assert select_mode(PlannerDecision.IDLE) == StorageMode.AUTO

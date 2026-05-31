@@ -1,47 +1,28 @@
-"""Storage-mode register specs and planner → StorageMode mapping.
+"""Storage-mode register specs and observed-state decoder.
 
 The Solis hybrid inverter exposes a small set of register groups (see
 ``docs/solis_control.md``). Each high-level StorageMode is a *composition* of
 target values across (43110 bitmask, export limit, charge current, discharge
 current, RC active-power setpoint). This module owns:
 
-  - ``PlannerDecision``   — internal planner-side per-slot decision enum.
-    Not part of the public contract; lives in the pipeline because it
-    represents the optimizer's view of a slot, not the inverter's state.
   - ``build_specs(...)``  — concrete StorageModeSpec for each StorageMode given
     the deployment's battery and inverter limits.
   - ``decode_mode(...)``  — best-effort decode of an observed register state to
     a StorageMode, used by the inbound translator.
-  - ``select_mode(...)``  — map a planner-side (PlannerDecision,
-    ChargingProfile, sell-price) tuple to the StorageMode the inverter
-    should enter.
+
+The pipeline scheduler (``pipeline/schedule.py``) picks StorageMode values
+directly via slot physics — there is no separate planner-side decision
+type.
 
 Pure Python: no Home Assistant imports.
 """
 from __future__ import annotations
 
-from enum import Enum
-
 from ..contract.models import (
     BatteryConfig,
-    ChargeMode,
     StorageMode,
     StorageModeSpec,
 )
-
-
-class PlannerDecision(Enum):
-    """Internal planner-side decision for a single scheduling slot.
-
-    Produced by ``pipeline/schedule.py``'s greedy pair-match optimizer and
-    bridged to a Solis StorageMode by ``select_mode()``. Intentionally not
-    exposed via ``contract/models.py`` — callers outside the pipeline should
-    consume ``ScheduleSlot.mode`` (a StorageMode) instead.
-    """
-    IDLE              = "idle"
-    CHARGE_FROM_GRID  = "charge_from_grid"
-    DISCHARGE_TO_GRID = "discharge_to_grid"
-    CHARGE_FROM_SOLAR = "charge_from_solar"
 
 
 _CURRENT_EPSILON_A = 1e-3
@@ -196,45 +177,3 @@ def decode_mode(
     return StorageMode.UNKNOWN
 
 
-def select_mode(
-    decision: PlannerDecision,
-    charging_profile_mode: ChargeMode | None = None,
-    sell_eur_kwh: float | None = None,
-) -> StorageMode:
-    """Map a per-slot PlannerDecision (plus charging-profile context) to a StorageMode.
-
-    Mapping table:
-
-      ============================  ====================  ============
-      PlannerDecision               ChargingProfile mode  StorageMode
-      ============================  ====================  ============
-      CHARGE_FROM_GRID              (any)                 GULP
-      DISCHARGE_TO_GRID             (any)                 DUMP
-      CHARGE_FROM_SOLAR             NO_EXPORT             HOARD
-      CHARGE_FROM_SOLAR             SELL / SOLAR_CHARGE / IDLE / None  STORE
-      IDLE                          sell_eur_kwh < 0      STBY
-      IDLE                          otherwise             AUTO
-      ============================  ====================  ============
-
-    Args:
-        decision: Planner's per-slot decision.
-        charging_profile_mode: Per-slot disposition from ChargingProfileNode;
-            only consulted for ``CHARGE_FROM_SOLAR`` to choose STORE vs HOARD.
-        sell_eur_kwh: Effective sell price for the slot; used only when
-            ``decision == IDLE`` to decide between AUTO and STBY (the latter
-            avoids running the inverter while the grid would penalise export).
-
-    Returns:
-        StorageMode the inverter should enter for this slot.
-    """
-    if decision == PlannerDecision.CHARGE_FROM_GRID:
-        return StorageMode.GULP
-    if decision == PlannerDecision.DISCHARGE_TO_GRID:
-        return StorageMode.DUMP
-    if decision == PlannerDecision.CHARGE_FROM_SOLAR:
-        if charging_profile_mode == ChargeMode.NO_EXPORT:
-            return StorageMode.HOARD
-        return StorageMode.STORE
-    if sell_eur_kwh is not None and sell_eur_kwh < 0:
-        return StorageMode.STBY
-    return StorageMode.AUTO

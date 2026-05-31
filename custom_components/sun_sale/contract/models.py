@@ -81,11 +81,11 @@ class SolarForecast:
 
 @dataclass(frozen=True)
 class ScheduleSlot:
-    """One hour of the optimized battery schedule.
+    """One slot of the optimised battery schedule.
 
-    ``mode`` is the Solis StorageMode the inverter should enter for this slot;
-    it is derived by ``pipeline/schedule.py`` from the optimizer's internal
-    PlannerDecision via ``storage_mode_specs.select_mode``.
+    ``mode`` is the Solis StorageMode the inverter should enter for this slot.
+    The DP scheduler in ``pipeline/schedule.py`` picks it directly from per-slot
+    physics (``pipeline/slot_physics.simulate_slot``).
     """
     start: datetime
     end: datetime

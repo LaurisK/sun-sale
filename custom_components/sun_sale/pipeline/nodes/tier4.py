@@ -7,12 +7,15 @@ from .. import schedule as schedule_module
 from ..dag_engine import DagNode, NodeContext
 from ...contract.events import ControlEvent
 from ...contract.models import (
+    BaseLoadProfile,
     BatteryState,
     CalculationResult,
     ChargingProfile,
     DegradationCost,
     GenerationSeries,
+    InverterModeReading,
     PriceSeries,
+    ProfitabilityScore,
     Schedule,
 )
 
@@ -20,12 +23,13 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class ScheduleNode(DagNode):
-    """Greedy pair-match scheduler → Schedule(StorageMode per slot).
+    """DP scheduler over (slot, soc_bucket) → Schedule(StorageMode per slot).
 
-    Emits no ControlEvents — dispatch is owned by the post-DAG inverter control
-    module (added in the next refactor chunk). ChargingProfile is consumed when
-    available to disambiguate STORE vs HOARD for solar slots; without it, solar
-    slots default to STORE.
+    Consumes the BaseLoadProfile so the DP's per-slot physics accounts for
+    household draw (slot_physics.simulate_slot uses it to model
+    battery-discharge-for-load and AC deficit/surplus). ChargingProfile is
+    listed for tier-ordering only — the DP does not consume it; mode choice
+    is driven by simulate_slot outcomes.
     """
 
     tier = 4
@@ -36,20 +40,26 @@ class ScheduleNode(DagNode):
         GenerationSeries,
         BatteryState,
         DegradationCost,
+        BaseLoadProfile,
         ChargingProfile,
     ]
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[Schedule, list[ControlEvent]]:
-        """Run greedy optimizer and produce a StorageMode-tagged Schedule."""
+        """Run the DP scheduler and produce a StorageMode-tagged Schedule."""
         price_series = ctx.require(PriceSeries)
         calc = ctx.require(CalculationResult)
         battery_state = ctx.require(BatteryState)
         deg_cost = ctx.require(DegradationCost)
-        charging_profile = ctx.get(ChargingProfile)
-        # GenerationSeries is consumed for tier-ordering but not used directly here.
+        base_load_profile = ctx.require(BaseLoadProfile)
+        # GenerationSeries and ChargingProfile are consumed for tier-ordering only.
         ctx.get(GenerationSeries)
+        ctx.get(ChargingProfile)
+        # Optional inputs — schedule still runs without them.
+        profit_score = ctx.get(ProfitabilityScore)
+        mode_reading = ctx.get(InverterModeReading)
+        current_mode = mode_reading.mode if mode_reading is not None else None
 
         schedule = schedule_module.optimize_schedule(
             price_series=price_series,
@@ -58,7 +68,10 @@ class ScheduleNode(DagNode):
             battery_state=battery_state,
             degradation_cost=deg_cost.value_kwh,
             now=ctx.now,
-            charging_profile=charging_profile,
+            base_load_profile=base_load_profile,
+            local_tz=ctx.config.local_tz,
+            profitability_score=profit_score,
+            current_mode=current_mode,
         )
 
         return schedule, []
