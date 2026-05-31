@@ -138,6 +138,7 @@ def _compute_extended_day_totals(
     today = now.astimezone(local_tz).date() if local_tz else now.date()
 
     def _entry_date(e: SolarEntry):
+        """Return e's start date, in local time when local_tz is supplied."""
         return e.start.astimezone(local_tz).date() if local_tz else e.start.date()
 
     return {

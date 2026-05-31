@@ -12,6 +12,8 @@ from ..contract.const import CONF_SOLAR_FORECAST_ENTITY, CONF_SOLAR_FORECAST_ENT
 
 
 class SunSaleDebugView(HomeAssistantView):
+    """Auth-gated HTTP endpoint serving a JSON snapshot of every sunSale coordinator."""
+
     url = "/api/sun_sale/debug"
     name = "api:sun_sale:debug"
     requires_auth = True

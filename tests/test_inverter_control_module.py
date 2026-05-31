@@ -73,15 +73,15 @@ async def test_observer_only_does_not_call_apply_mode():
     mod = _module(inv)
     result = await mod.tick(
         now=NOW,
-        schedule=_schedule_with(StorageMode.GULP),
-        reading=_reading(StorageMode.STBY, reg=1),
+        schedule=_schedule_with(StorageMode.GridCharge),
+        reading=_reading(StorageMode.StandBy, reg=1),
         history=InverterModeHistory(samples=()),
         automation_enabled=False,
     )
     inv.apply_mode.assert_not_awaited()
     # Observation recorded even though we never dispatched.
     assert len(result.samples) == 1
-    assert result.samples[0].mode == StorageMode.STBY
+    assert result.samples[0].mode == StorageMode.StandBy
 
 
 @pytest.mark.asyncio
@@ -90,11 +90,11 @@ async def test_first_observation_appends_to_history():
     history = InverterModeHistory(samples=())
     result = await mod.tick(
         now=NOW, schedule=None,
-        reading=_reading(StorageMode.STORE, reg=1),
+        reading=_reading(StorageMode.SelfUse, reg=1),
         history=history, automation_enabled=False,
     )
     assert len(result.samples) == 1
-    assert result.samples[0].mode == StorageMode.STORE
+    assert result.samples[0].mode == StorageMode.SelfUse
     assert result.samples[0].timestamp == NOW
 
 
@@ -102,13 +102,13 @@ async def test_first_observation_appends_to_history():
 async def test_unchanged_mode_does_not_grow_history():
     existing = InverterModeChange(
         timestamp=NOW - timedelta(hours=2),
-        mode=StorageMode.STBY,
+        mode=StorageMode.StandBy,
         reg_43110_value=1,
     )
     mod = _module()
     result = await mod.tick(
         now=NOW, schedule=None,
-        reading=_reading(StorageMode.STBY, reg=1),
+        reading=_reading(StorageMode.StandBy, reg=1),
         history=InverterModeHistory(samples=(existing,)),
         automation_enabled=False,
     )
@@ -119,18 +119,18 @@ async def test_unchanged_mode_does_not_grow_history():
 async def test_mode_change_appends_new_entry():
     existing = InverterModeChange(
         timestamp=NOW - timedelta(hours=2),
-        mode=StorageMode.STBY,
+        mode=StorageMode.StandBy,
         reg_43110_value=1,
     )
     mod = _module()
     result = await mod.tick(
         now=NOW, schedule=None,
-        reading=_reading(StorageMode.GULP, reg=33),
+        reading=_reading(StorageMode.GridCharge, reg=33),
         history=InverterModeHistory(samples=(existing,)),
         automation_enabled=False,
     )
     assert len(result.samples) == 2
-    assert result.samples[-1].mode == StorageMode.GULP
+    assert result.samples[-1].mode == StorageMode.GridCharge
     assert result.samples[-1].reg_43110_value == 33
 
 
@@ -155,16 +155,16 @@ async def test_old_samples_pruned_at_yesterday_midnight():
     # Yesterday-local-midnight cutoff in UTC tz = NOW.date() - 1 day at 00:00.
     very_old = InverterModeChange(
         timestamp=NOW - timedelta(days=5),
-        mode=StorageMode.STBY, reg_43110_value=1,
+        mode=StorageMode.StandBy, reg_43110_value=1,
     )
     recent = InverterModeChange(
         timestamp=NOW - timedelta(hours=3),
-        mode=StorageMode.GULP, reg_43110_value=33,
+        mode=StorageMode.GridCharge, reg_43110_value=33,
     )
     mod = _module()
     result = await mod.tick(
         now=NOW, schedule=None,
-        reading=_reading(StorageMode.GULP, reg=33),
+        reading=_reading(StorageMode.GridCharge, reg=33),
         history=InverterModeHistory(samples=(very_old, recent)),
         automation_enabled=False,
     )
@@ -181,16 +181,16 @@ async def test_old_samples_pruned_at_yesterday_midnight():
 async def test_dispatch_calls_apply_mode_with_current_slot_target():
     inv = _mock_inverter()
     mod = _module(inv)
-    schedule = _schedule_with(StorageMode.GULP)
+    schedule = _schedule_with(StorageMode.GridCharge)
     await mod.tick(
         now=NOW, schedule=schedule,
-        reading=_reading(StorageMode.STBY, reg=1),
+        reading=_reading(StorageMode.StandBy, reg=1),
         history=InverterModeHistory(samples=()),
         automation_enabled=True,
     )
     inv.apply_mode.assert_awaited_once()
     target_mode = inv.apply_mode.await_args.args[0]
-    assert target_mode == StorageMode.GULP
+    assert target_mode == StorageMode.GridCharge
 
 
 @pytest.mark.asyncio
@@ -199,7 +199,7 @@ async def test_dispatch_skipped_when_no_schedule():
     mod = _module(inv)
     await mod.tick(
         now=NOW, schedule=None,
-        reading=_reading(StorageMode.STBY, reg=1),
+        reading=_reading(StorageMode.StandBy, reg=1),
         history=InverterModeHistory(samples=()),
         automation_enabled=True,
     )
@@ -213,14 +213,14 @@ async def test_dispatch_skipped_when_no_slot_covers_now():
     # Build a schedule whose only slot is in the past.
     past_slot = ScheduleSlot(
         start=NOW - timedelta(hours=5), end=NOW - timedelta(hours=4),
-        mode=StorageMode.GULP, power_kw=2.0,
+        mode=StorageMode.GridCharge, power_kw=2.0,
         expected_soc_after=0.5, expected_profit_eur=0.1, reason="x",
     )
     schedule = Schedule(slots=[past_slot], total_expected_profit_eur=0.0,
                         degradation_cost_per_kwh=0.0, computed_at=NOW)
     await mod.tick(
         now=NOW, schedule=schedule,
-        reading=_reading(StorageMode.STBY, reg=1),
+        reading=_reading(StorageMode.StandBy, reg=1),
         history=InverterModeHistory(samples=()),
         automation_enabled=True,
     )
@@ -230,8 +230,8 @@ async def test_dispatch_skipped_when_no_slot_covers_now():
 @pytest.mark.asyncio
 async def test_current_target_returns_slot_mode():
     mod = _module()
-    schedule = _schedule_with(StorageMode.STORE)
-    assert mod.current_target(NOW, schedule) == StorageMode.STORE
+    schedule = _schedule_with(StorageMode.SelfUse)
+    assert mod.current_target(NOW, schedule) == StorageMode.SelfUse
 
 
 @pytest.mark.asyncio

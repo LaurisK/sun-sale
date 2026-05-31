@@ -92,9 +92,9 @@ def test_current_action_idle_when_empty_schedule():
 
 
 def test_current_action_returns_first_slot_mode_as_fallback():
-    slots = [make_slot(0, StorageMode.GULP), make_slot(1, StorageMode.DUMP)]
+    slots = [make_slot(0, StorageMode.GridCharge), make_slot(1, StorageMode.Discharge)]
     sensor = CurrentActionSensor(make_coord({"schedule": make_schedule(slots)}), make_entry())
-    assert sensor.native_value == StorageMode.GULP.value
+    assert sensor.native_value == StorageMode.GridCharge.value
 
 
 # ---------------------------------------------------------------------------

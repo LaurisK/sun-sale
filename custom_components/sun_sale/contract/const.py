@@ -143,3 +143,9 @@ DEFAULT_EXPORT_LIMIT_W = 10_000
 # Mode-history retention: prune samples older than the start of yesterday
 # (computed in local time by the control module).
 MODE_HISTORY_RETENTION_DAYS = 2
+
+# Schedule policy switches — user-toggleable flags that constrain the DP
+# scheduler's action set. Defaults preserve the historical "all modes
+# available" behaviour so existing installs see no change after upgrade.
+DEFAULT_SCHEDULE_USE_STANDBY = True
+DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING = True

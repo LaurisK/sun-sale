@@ -3,9 +3,9 @@
 Pure Python — no Home Assistant imports.
 
 Algorithm: backward dynamic programming on (slot_index, soc_bucket) cells with
-the action set {STORE, HOARD, STBY, GULP, DUMP, SELL}. Per-slot physics is
-delegated to ``pipeline.slot_physics.simulate_slot`` so the planner and any
-diagnostics see identical energy flows for the same (mode, slot) pair.
+the action set {SelfUse, NoExport, StandBy, GridCharge, Discharge, FeedIn}. Per-slot
+physics is delegated to ``pipeline.slot_physics.simulate_slot`` so the planner
+and any diagnostics see identical energy flows for the same (mode, slot) pair.
 
 Scope:
   - phase 2: SoC-bucketed DP, no baseload, no terminal value, no mode-change penalty.
@@ -47,16 +47,16 @@ from ..contract.models import (
 )
 
 
-# Action set the DP may pick. AUTO is omitted: it is physics-identical to STORE
-# under simulate_slot, and STORE is the explicit, planner-driven choice. The
+# Action set the DP may pick. AUTO is omitted: it is physics-identical to SelfUse
+# under simulate_slot, and SelfUse is the explicit, planner-driven choice. The
 # inverter control module dispatches whichever mode the DP picks.
 _ACTIONS: tuple[StorageMode, ...] = (
-    StorageMode.STORE,
-    StorageMode.HOARD,
-    StorageMode.STBY,
-    StorageMode.GULP,
-    StorageMode.DUMP,
-    StorageMode.SELL,
+    StorageMode.SelfUse,
+    StorageMode.NoExport,
+    StorageMode.StandBy,
+    StorageMode.GridCharge,
+    StorageMode.Discharge,
+    StorageMode.FeedIn,
 )
 
 # SoC discretization. 51 buckets across [min_soc, max_soc] gives ~1.7% steps
@@ -67,8 +67,8 @@ _SOC_BUCKETS = 51
 
 # Default mode-change penalty: a small EUR cost per storage-side kWh moved by
 # the battery whenever the chosen mode differs from the previous slot's mode.
-# Scales with throughput so passive→passive transitions (STBY ↔ STORE with no
-# battery activity) are free, while flapping between GULP/DUMP gets punished.
+# Scales with throughput so passive→passive transitions (StandBy ↔ SelfUse with no
+# battery activity) are free, while flapping between GridCharge/Discharge gets punished.
 DEFAULT_MODE_CHANGE_PENALTY_EUR_PER_KWH = 0.005
 
 # Strength of the profitability tilt on the terminal value. score=1 (today is
@@ -98,6 +98,8 @@ def optimize_schedule(
     profitability_score: ProfitabilityScore | None = None,
     current_mode: StorageMode | None = None,
     mode_change_penalty: float = DEFAULT_MODE_CHANGE_PENALTY_EUR_PER_KWH,
+    use_standby: bool = True,
+    allow_grid_charging: bool = True,
 ) -> Schedule:
     """Compute a future StorageMode schedule via SoC-bucketed dynamic programming.
 
@@ -124,6 +126,11 @@ def optimize_schedule(
             doesn't flap on every cycle. ``None`` skips the first-slot charge.
         mode_change_penalty: EUR per storage-side kWh moved by the battery
             when the chosen mode differs from the previous slot's mode.
+        use_standby: When False, StandBy is removed from the DP action set so the
+            planner picks SelfUse during no-generation windows (battery stays
+            available to cover load instead of sitting idle).
+        allow_grid_charging: When False, GridCharge is removed from the DP action
+            set so the planner never force-charges the battery from grid.
 
     Returns:
         Schedule with one ScheduleSlot per future price slot.
@@ -153,9 +160,11 @@ def optimize_schedule(
 
     bucketer = _Bucketer(battery_config.min_soc, battery_config.max_soc, _SOC_BUCKETS)
 
-    # Degenerate envelope (min_soc == max_soc) — no usable battery; emit STBY.
+    actions = _filter_actions(_ACTIONS, use_standby, allow_grid_charging)
+
+    # Degenerate envelope (min_soc == max_soc) — no usable battery; emit StandBy.
     if not bucketer.has_envelope:
-        return _stby_only_schedule(
+        return _standby_only_schedule(
             future_slots, baseload_kwh, solar_kwh, slot_hours,
             battery_config, cap_kwh, degradation_cost, export_limit_kw, now,
         )
@@ -169,15 +178,40 @@ def optimize_schedule(
     choice = _run_dp(
         future_slots, baseload_kwh, solar_kwh, slot_hours,
         battery_config, cap_kwh, degradation_cost, export_limit_kw,
-        bucketer, terminal_per_kwh, mode_change_penalty,
+        bucketer, terminal_per_kwh, mode_change_penalty, actions,
     )
 
     return _forward_roll(
         future_slots, baseload_kwh, solar_kwh, slot_hours,
         battery_config, battery_state, cap_kwh, degradation_cost,
         export_limit_kw, bucketer, choice, now,
-        current_mode, mode_change_penalty,
+        current_mode, mode_change_penalty, actions,
     )
+
+
+def _filter_actions(
+    actions: tuple[StorageMode, ...],
+    use_standby: bool,
+    allow_grid_charging: bool,
+) -> tuple[StorageMode, ...]:
+    """Drop StandBy and/or GridCharge from the action set per the user-toggled policy.
+
+    Args:
+        actions: Full DP action tuple.
+        use_standby: Keep StandBy when True.
+        allow_grid_charging: Keep GridCharge when True.
+
+    Returns:
+        Filtered action tuple, preserving original order.
+    """
+    excluded: set[StorageMode] = set()
+    if not use_standby:
+        excluded.add(StorageMode.StandBy)
+    if not allow_grid_charging:
+        excluded.add(StorageMode.GridCharge)
+    if not excluded:
+        return actions
+    return tuple(a for a in actions if a not in excluded)
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +310,7 @@ class _Bucketer:
 
     Buckets are evenly spaced from min_soc to max_soc, inclusive. Bucket 0
     is min_soc; bucket N-1 is max_soc. ``has_envelope`` is False when the
-    SoC envelope collapses to a point — the DP must fall back to STBY.
+    SoC envelope collapses to a point — the DP must fall back to StandBy.
     """
 
     def __init__(self, min_soc: float, max_soc: float, n_buckets: int) -> None:
@@ -341,6 +375,7 @@ def _run_dp(
     bucketer: _Bucketer,
     terminal_per_kwh: float,
     mode_change_penalty: float,
+    actions: tuple[StorageMode, ...],
 ) -> list[list[list[StorageMode]]]:
     """Backward DP — compute the optimal mode for every (slot, soc_bucket, prev_mode) cell.
 
@@ -362,21 +397,23 @@ def _run_dp(
         bucketer: SoC bucketization helper.
         terminal_per_kwh: EUR worth per storage-side kWh held at end-of-horizon.
         mode_change_penalty: EUR per storage-kWh moved when mode changes.
+        actions: Modes the DP may pick from (possibly filtered by policy).
 
     Returns:
         ``choice[t][b][m]`` — the optimal StorageMode for slot ``t`` when the
         current SoC bucket is ``b`` and the previous slot's mode was index
-        ``m`` (or ``len(_ACTIONS)`` for "no previous mode" at slot 0).
+        ``m`` (or ``len(actions)`` for "no previous mode" at slot 0).
     """
     n_slots = len(future_slots)
     n_buckets = bucketer.n_buckets
-    n_modes = len(_ACTIONS)
+    n_modes = len(actions)
     # Slot t's "previous mode" index ranges over 0..n_modes (with n_modes meaning
     # "no previous", used at the very first decision when the inverter mode is
     # unknown). We size every layer the same for symmetry; the extra column
     # costs negligible memory.
     n_prev = n_modes + 1
     sentinel_prev = n_modes
+    fallback_mode = actions[0]
 
     # value[t][b][m] — best total reward from slot t through T given soc b and
     # previous mode index m. value[n_slots] holds the terminal valuation per
@@ -392,7 +429,7 @@ def _run_dp(
             value[n_slots][b][m] = v_term
 
     choice: list[list[list[StorageMode]]] = [
-        [[StorageMode.STBY] * n_prev for _ in range(n_buckets)]
+        [[fallback_mode] * n_prev for _ in range(n_buckets)]
         for _ in range(n_slots)
     ]
 
@@ -405,7 +442,7 @@ def _run_dp(
             # depends on it), so compute outcomes once per (b, action) and
             # reuse across prev_mode columns.
             per_action: list[tuple[SlotOutcome, int, float]] = []
-            for action in _ACTIONS:
+            for action in actions:
                 outcome = simulate_slot(
                     soc_in=soc_in,
                     mode=action,
@@ -425,8 +462,8 @@ def _run_dp(
 
             for prev_m in range(n_prev):
                 best_total = float("-inf")
-                best_mode = StorageMode.STBY
-                for action_idx, action in enumerate(_ACTIONS):
+                best_mode = fallback_mode
+                for action_idx, action in enumerate(actions):
                     outcome, next_b, throughput = per_action[action_idx]
                     # Penalty applies only when the chosen action differs from
                     # the previous mode and the battery actually moves energy.
@@ -474,6 +511,7 @@ def _forward_roll(
     now: datetime,
     current_mode: StorageMode | None,
     mode_change_penalty: float,
+    actions: tuple[StorageMode, ...],
 ) -> Schedule:
     """Walk the chosen policy forward from the actual current SoC and mode.
 
@@ -498,6 +536,7 @@ def _forward_roll(
         current_mode: Mode active on the inverter at start of horizon; used to
             charge the first-slot mode-change penalty. ``None`` skips it.
         mode_change_penalty: EUR per storage-kWh moved on a mode change.
+        actions: Modes the DP considered (must match ``_run_dp``).
 
     Returns:
         Schedule with per-slot StorageMode, projected SoC, reward, and reason.
@@ -506,8 +545,8 @@ def _forward_roll(
     soc = max(battery_config.min_soc, min(battery_config.max_soc, battery_state.soc))
     schedule_slots: list[ScheduleSlot] = []
     total_profit = 0.0
-    sentinel_prev = len(_ACTIONS)
-    prev_idx = _mode_to_index(current_mode, sentinel_prev)
+    sentinel_prev = len(actions)
+    prev_idx = _mode_to_index(current_mode, sentinel_prev, actions)
 
     for t, price in enumerate(future_slots):
         bucket = bucketer.to_index(soc)
@@ -525,7 +564,7 @@ def _forward_roll(
             deg_cost_eur_kwh=deg_cost,
             export_limit_kw=export_limit_kw,
         )
-        action_idx = _ACTIONS.index(mode)
+        action_idx = actions.index(mode)
         if prev_idx == sentinel_prev or prev_idx == action_idx:
             penalty = 0.0
         else:
@@ -548,23 +587,29 @@ def _forward_roll(
     )
 
 
-def _mode_to_index(mode: StorageMode | None, sentinel: int) -> int:
+def _mode_to_index(
+    mode: StorageMode | None,
+    sentinel: int,
+    actions: tuple[StorageMode, ...],
+) -> int:
     """Resolve an external StorageMode to its index in the DP action list.
 
-    Modes that are not in the DP action set (AUTO, TRACK, UNKNOWN) collapse to
-    the sentinel so the first slot is not penalised for "changing away" from
-    them; this matches the convention used during DP construction.
+    Modes that are not in the DP action set (AUTO, TRACK, UNKNOWN, or any mode
+    excluded by policy) collapse to the sentinel so the first slot is not
+    penalised for "changing away" from them; this matches the convention used
+    during DP construction.
 
     Args:
         mode: Inverter mode at the start of the forward roll, or ``None``.
         sentinel: Value returned for unknown / off-set modes.
+        actions: The active DP action tuple.
 
     Returns:
-        Index into ``_ACTIONS`` or ``sentinel``.
+        Index into ``actions`` or ``sentinel``.
     """
-    if mode is None or mode not in _ACTIONS:
+    if mode is None or mode not in actions:
         return sentinel
-    return _ACTIONS.index(mode)
+    return actions.index(mode)
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +628,7 @@ def _make_schedule_slot(
 
     ``power_kw`` exposes the dominant battery flow (charge or discharge),
     converted from per-slot kWh to kW via the slot duration. Modes that move
-    no battery energy (STBY, HOARD at full battery, SELL with no over-cap
+    no battery energy (StandBy, NoExport at full battery, FeedIn with no over-cap
     surplus) report 0.
 
     Args:
@@ -625,17 +670,17 @@ def _reason_for(
     Returns:
         One-line description suitable for the dashboard.
     """
-    if mode == StorageMode.GULP:
+    if mode == StorageMode.GridCharge:
         return f"Grid-charge at {price_slot.buy_eur_kwh:.4f} EUR/kWh"
-    if mode == StorageMode.DUMP:
+    if mode == StorageMode.Discharge:
         return f"Discharge to grid at {price_slot.sell_eur_kwh:.4f} EUR/kWh"
-    if mode == StorageMode.SELL:
+    if mode == StorageMode.FeedIn:
         return f"Feed-in priority at {price_slot.sell_eur_kwh:.4f} EUR/kWh"
-    if mode == StorageMode.STORE:
+    if mode == StorageMode.SelfUse:
         return f"Self-use; solar→batt {outcome.batt_charge_kwh:.2f} kWh"
-    if mode == StorageMode.HOARD:
+    if mode == StorageMode.NoExport:
         return f"Self-use, no export; solar→batt {outcome.batt_charge_kwh:.2f} kWh"
-    if mode == StorageMode.STBY:
+    if mode == StorageMode.StandBy:
         return "Idle"
     if mode == StorageMode.AUTO:
         return "Auto"
@@ -657,7 +702,7 @@ def _empty_schedule(degradation_cost: float, now: datetime) -> Schedule:
     )
 
 
-def _stby_only_schedule(
+def _standby_only_schedule(
     future_slots: list[PriceSlot],
     baseload_kwh: list[float],
     solar_kwh: list[float],
@@ -668,7 +713,7 @@ def _stby_only_schedule(
     export_limit_kw: float | None,
     now: datetime,
 ) -> Schedule:
-    """Emit STBY for every slot — used when the SoC envelope is degenerate.
+    """Emit StandBy for every slot — used when the SoC envelope is degenerate.
 
     Args:
         future_slots: Slots to schedule.
@@ -682,7 +727,7 @@ def _stby_only_schedule(
         now: Cycle timestamp.
 
     Returns:
-        Schedule whose every slot is STBY.
+        Schedule whose every slot is StandBy.
     """
     soc = battery_config.min_soc
     schedule_slots: list[ScheduleSlot] = []
@@ -690,7 +735,7 @@ def _stby_only_schedule(
     for t, price in enumerate(future_slots):
         outcome = simulate_slot(
             soc_in=soc,
-            mode=StorageMode.STBY,
+            mode=StorageMode.StandBy,
             solar_kwh=solar_kwh[t],
             baseload_kwh=baseload_kwh[t],
             buy_eur_kwh=price.buy_eur_kwh,
@@ -701,7 +746,7 @@ def _stby_only_schedule(
             deg_cost_eur_kwh=deg_cost,
             export_limit_kw=export_limit_kw,
         )
-        schedule_slots.append(_make_schedule_slot(price, StorageMode.STBY, outcome, slot_hours))
+        schedule_slots.append(_make_schedule_slot(price, StorageMode.StandBy, outcome, slot_hours))
         total += outcome.reward_eur
         soc = outcome.soc_out
     return Schedule(

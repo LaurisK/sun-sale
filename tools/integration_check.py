@@ -48,12 +48,29 @@ STATE_PATH = "/api/states/{entity_id}"
 
 
 class HAClient:
+    """Read-only HA REST client for the validation harness."""
+
     def __init__(self, base_url: str, token: str, timeout: float = 10.0) -> None:
+        """Store HA base URL, bearer token, and per-request timeout.
+
+        Args:
+            base_url: Root URL of the HA instance (trailing slash trimmed).
+            token: Long-lived access token used as the bearer credential.
+            timeout: Per-request timeout in seconds.
+        """
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
 
     def _get(self, path: str) -> Any:
+        """Issue an authenticated GET against the HA API and parse the JSON body.
+
+        Args:
+            path: API path beginning with ``/api``.
+
+        Returns:
+            Parsed JSON payload (dict, list, or scalar).
+        """
         req = urllib.request.Request(
             self.base_url + path,
             headers={
@@ -65,12 +82,28 @@ class HAClient:
             return json.loads(resp.read().decode("utf-8"))
 
     def debug(self) -> list[dict]:
+        """Fetch the sunSale debug snapshot list, one entry per coordinator.
+
+        Returns:
+            List of per-coordinator debug dicts as served by the integration.
+
+        Raises:
+            ValueError: When the debug endpoint returns a non-list payload.
+        """
         payload = self._get(DEBUG_PATH)
         if not isinstance(payload, list):
             raise ValueError(f"Expected list from {DEBUG_PATH}, got {type(payload).__name__}")
         return payload
 
     def state(self, entity_id: str) -> dict | None:
+        """Return the HA state dict for ``entity_id``, or ``None`` on HTTP 404.
+
+        Args:
+            entity_id: HA entity ID to look up.
+
+        Returns:
+            State dict, or ``None`` when the entity is unknown.
+        """
         try:
             return self._get(STATE_PATH.format(entity_id=entity_id))
         except urllib.error.HTTPError as e:
@@ -94,18 +127,22 @@ class Snapshot:
 
     @property
     def config(self) -> dict:
+        """Return the ``config`` block from the debug payload (or an empty dict)."""
         return self.debug.get("config", {}) or {}
 
     @property
     def inputs(self) -> dict:
+        """Return the ``inputs`` block from the debug payload (or an empty dict)."""
         return self.debug.get("inputs", {}) or {}
 
     @property
     def pipeline(self) -> dict:
+        """Return the ``pipeline`` block from the debug payload (or an empty dict)."""
         return self.debug.get("pipeline", {}) or {}
 
     @property
     def outputs(self) -> dict:
+        """Return the ``outputs`` block from the debug payload (or an empty dict)."""
         return self.debug.get("outputs", {}) or {}
 
 
@@ -115,6 +152,14 @@ class Snapshot:
 
 
 def _tomorrow_eid(entity_id: str) -> str:
+    """Derive the ``_tomorrow`` sibling entity ID from a ``_today`` one.
+
+    Args:
+        entity_id: Entity ID containing ``_today_`` or ``_today``.
+
+    Returns:
+        Modified entity ID, or empty string when no substitution pattern fits.
+    """
     for pattern in ("_today_", "_today"):
         if pattern in entity_id:
             return entity_id.replace(pattern, pattern.replace("today", "tomorrow"), 1)
@@ -122,6 +167,15 @@ def _tomorrow_eid(entity_id: str) -> str:
 
 
 def _day_eid(entity_id: str, n: int) -> str:
+    """Derive the ``_d<n>`` sibling entity ID for day-ahead horizons 2..6.
+
+    Args:
+        entity_id: Entity ID containing ``_today_`` or ``_today``.
+        n: Day offset (2–6).
+
+    Returns:
+        Modified entity ID, or empty string when no substitution pattern fits.
+    """
     for pattern in ("_today_", "_today"):
         if pattern in entity_id:
             return entity_id.replace(pattern, pattern.replace("today", f"d{n}"), 1)
@@ -180,6 +234,8 @@ def collect(client: HAClient) -> list[Snapshot]:
 
 @dataclass
 class CheckResult:
+    """Outcome of a single validator run."""
+
     name: str
     category: str
     ok: bool
@@ -191,8 +247,24 @@ _VALIDATORS: list[Validator] = []
 
 
 def validator(name: str, category: str) -> Callable[[Callable[[Snapshot], tuple[bool, str]]], Validator]:
+    """Decorator: register a ``(ok, detail)``-returning fn as a Snapshot validator.
+
+    The decorated function may raise; the wrapper traps the exception and
+    reports it as a failed CheckResult so a single broken validator can't
+    abort the harness.
+
+    Args:
+        name: Display name used in the report.
+        category: Logical grouping (e.g. pipeline module name) for filtering.
+
+    Returns:
+        The same callable but registered in the global ``_VALIDATORS`` list.
+    """
+
     def wrap(fn: Callable[[Snapshot], tuple[bool, str]]) -> Validator:
+        """Wrap ``fn`` into a CheckResult-producing validator and register it."""
         def run(snap: Snapshot) -> CheckResult:
+            """Invoke the wrapped validator on a snapshot, trapping exceptions."""
             try:
                 ok, detail = fn(snap)
             except Exception as exc:  # noqa: BLE001
@@ -213,6 +285,7 @@ def validator(name: str, category: str) -> Callable[[Callable[[Snapshot], tuple[
 
 @validator("config_entities_resolve", "config")
 def _config_entities_resolve(snap: Snapshot) -> tuple[bool, str]:
+    """Check that every configured HA entity exists on the live system."""
     missing = [eid for eid, state in snap.raw_entities.items() if state is None]
     if missing:
         return False, f"unresolved: {missing}"
@@ -293,6 +366,7 @@ def _pricing_covers_source(snap: Snapshot) -> tuple[bool, str]:
 
 @validator("tariff_math_consistent", "pricing")
 def _tariff_math(snap: Snapshot) -> tuple[bool, str]:
+    """Check that each slot's buy/sell prices match the configured tariff formula."""
     pricing = snap.pipeline.get("pricing") or {}
     tariff = snap.inputs.get("tariff_config")
     slots = pricing.get("slots") or []
@@ -323,6 +397,7 @@ def _tariff_math(snap: Snapshot) -> tuple[bool, str]:
 
 @validator("pricing_slots_contiguous", "pricing")
 def _pricing_contiguous(snap: Snapshot) -> tuple[bool, str]:
+    """Check that pricing slot starts are spaced exactly one resolution apart."""
     pricing = snap.pipeline.get("pricing") or {}
     slots = pricing.get("slots") or []
     res_s = pricing.get("resolution_s", 0)
@@ -340,6 +415,7 @@ def _pricing_contiguous(snap: Snapshot) -> tuple[bool, str]:
 
 @validator("calculation_within_pricing_window", "calculation")
 def _calc_within_pricing(snap: Snapshot) -> tuple[bool, str]:
+    """Check that no calculation slot falls outside the pricing slot range."""
     pricing = snap.pipeline.get("pricing") or {}
     calc = snap.pipeline.get("calculation") or {}
     p_slots = pricing.get("slots") or []
@@ -360,6 +436,7 @@ def _calc_within_pricing(snap: Snapshot) -> tuple[bool, str]:
 
 @validator("schedule_chronological", "schedule")
 def _schedule_chronological(snap: Snapshot) -> tuple[bool, str]:
+    """Check that schedule slots are emitted in non-decreasing start-time order."""
     schedule = snap.outputs.get("schedule")
     if schedule is None:
         return True, "no schedule"
@@ -377,6 +454,7 @@ def _schedule_chronological(snap: Snapshot) -> tuple[bool, str]:
 
 @validator("schedule_aligned_with_pricing", "schedule")
 def _schedule_aligned(snap: Snapshot) -> tuple[bool, str]:
+    """Check that every schedule slot starts on a pricing-slot boundary."""
     schedule = snap.outputs.get("schedule")
     pricing = snap.pipeline.get("pricing") or {}
     if schedule is None:
@@ -391,7 +469,8 @@ def _schedule_aligned(snap: Snapshot) -> tuple[bool, str]:
 
 
 _VALID_STORAGE_MODES = {
-    "sell", "store", "hoard", "dump", "gulp", "stby", "auto", "track", "unknown",
+    "feed_in", "self_use", "no_export", "discharge", "grid_charge", "stand_by",
+    "auto", "track", "unknown",
 }
 
 
@@ -466,6 +545,7 @@ def _inverter_mode_observed_matches_tail(snap: Snapshot) -> tuple[bool, str]:
 
 @validator("battery_soc_sane", "battery")
 def _battery_soc(snap: Snapshot) -> tuple[bool, str]:
+    """Check that the observed battery SoC is a valid 0..1 fraction."""
     battery = snap.inputs.get("battery")
     if battery is None:
         return True, "no battery state"
@@ -479,6 +559,7 @@ def _battery_soc(snap: Snapshot) -> tuple[bool, str]:
 
 @validator("degradation_cost_present", "battery")
 def _degradation_cost(snap: Snapshot) -> tuple[bool, str]:
+    """Check that a positive degradation cost is reported once capacity is known."""
     deg = snap.pipeline.get("degradation_cost_per_kwh")
     battery = snap.inputs.get("battery") or {}
     if battery.get("estimated_capacity_kwh"):
@@ -495,6 +576,8 @@ def _degradation_cost(snap: Snapshot) -> tuple[bool, str]:
 
 @dataclass
 class EntitySlots:
+    """Per-entity slot data extracted from a single Open Meteo / forecast.solar feed."""
+
     entity_id: str
     day_label: str
     resolution_min: int
@@ -504,6 +587,8 @@ class EntitySlots:
 
 @dataclass
 class ForecastCheckResult:
+    """Aggregated cross-checks for the forecast pipeline stage (TUI deep mode)."""
+
     skipped: bool = False
     skip_reason: str = ""
     n_arrays: int = 0
@@ -1677,6 +1762,7 @@ class ForecastSlotsTable(Static):
         )
 
         def _short(eid: str) -> str:
+            """Strip the ``sensor.`` prefix from an entity ID for compact column headers."""
             return eid.removeprefix("sensor.") if eid else "—"
 
         col1 = _short(self._array_eids[0]) if self._array_eids else "array_1"
@@ -1769,6 +1855,7 @@ class ForecastSummaryTable(Static):
         }
 
         def _short(eid: str) -> str:
+            """Strip the ``sensor.`` prefix from an entity ID for compact column headers."""
             return eid.removeprefix("sensor.") if eid else "—"
 
         col1 = _short(fc.array_eids[0]) if fc.array_eids else "array_1"
@@ -1845,6 +1932,7 @@ class ForecastSummaryTable(Static):
                 rem_check_style = "red" if is_rem_bad else "green"
 
                 def _fmt(v: float | None) -> Text:
+                    """Format a kWh value for the table cell, dim when None or zero."""
                     if v is None:
                         return Text("—", style=dim)
                     return Text(f"{v:.4f}", style=dim if v == 0 else "")
@@ -2715,6 +2803,15 @@ def check_forecast_quality(snap: Snapshot) -> ForecastQualityCheckResult:
     result.group3_pending_count = fq.get("group3_pending_count", 0)
 
     def _validate_buckets(group_dict: dict, label: str) -> list[dict]:
+        """Sanity-check every EMA bucket in one quality group and return per-bucket rows.
+
+        Args:
+            group_dict: Mapping of bucket key → metrics dict from the debug payload.
+            label: Group label used in the issue list when something fails.
+
+        Returns:
+            One dict per bucket, each carrying its metrics and any detected issues.
+        """
         rows: list[dict] = []
         for key, m in (group_dict or {}).items():
             n = m.get("n", 0)
@@ -3545,6 +3642,7 @@ class _BatteryDataTable(Static):
         dim = "dim"
 
         def _fv(v: float | None, fmt: str = ".3f") -> Text:
+            """Format a numeric field, dimming the cell when the value is None."""
             return Text(f"{v:{fmt}}") if v is not None else Text("—", style=dim)
 
         # soc is 0.0–1.0 fraction; display as percentage
@@ -3817,6 +3915,16 @@ class IntegrationCheckApp(App):
 
 
 def run_checks(snapshots: list[Snapshot], category_filter: str | None) -> list[tuple[Snapshot, list[CheckResult]]]:
+    """Run every registered validator against each snapshot.
+
+    Args:
+        snapshots: Coordinator snapshots collected from the debug endpoint.
+        category_filter: When non-empty, only validators matching this category
+            are executed; others are silently dropped.
+
+    Returns:
+        List of ``(snapshot, results)`` tuples preserving snapshot order.
+    """
     out: list[tuple[Snapshot, list[CheckResult]]] = []
     for snap in snapshots:
         results = []
@@ -3830,6 +3938,14 @@ def run_checks(snapshots: list[Snapshot], category_filter: str | None) -> list[t
 
 
 def render_text(report: list[tuple[Snapshot, list[CheckResult]]]) -> str:
+    """Render the check report as a plain-text PASS/FAIL listing with a summary.
+
+    Args:
+        report: Output of ``run_checks``.
+
+    Returns:
+        Multi-line string suitable for stdout.
+    """
     lines: list[str] = []
     total = passed = 0
     for snap, results in report:
@@ -3850,6 +3966,14 @@ def render_text(report: list[tuple[Snapshot, list[CheckResult]]]) -> str:
 
 
 def render_json(report: list[tuple[Snapshot, list[CheckResult]]]) -> str:
+    """Render the check report as a JSON document keyed by coordinator entry.
+
+    Args:
+        report: Output of ``run_checks``.
+
+    Returns:
+        Pretty-printed JSON string.
+    """
     out = []
     for snap, results in report:
         out.append({
@@ -3870,11 +3994,28 @@ _INTEGRATION_INPUT_KEYS = frozenset({"tariff_config"})
 
 
 def _section(title: str, payload: Any) -> str:
+    """Format a ``[title]``-headed JSON block for the values dump.
+
+    Args:
+        title: Section header (no surrounding brackets).
+        payload: Any JSON-serialisable structure.
+
+    Returns:
+        Two-line section: header plus indented JSON body.
+    """
     body = json.dumps(payload, indent=2, sort_keys=True, default=str)
     return f"[{title}]\n{body}"
 
 
 def render_values(snapshots: list[Snapshot]) -> str:
+    """Dump every snapshot's integration config, consumed inputs, and exposed outputs.
+
+    Args:
+        snapshots: Coordinator snapshots collected from the debug endpoint.
+
+    Returns:
+        Multi-section plain-text dump.
+    """
     parts: list[str] = []
     for snap in snapshots:
         debug = snap.debug
@@ -3915,6 +4056,15 @@ def render_values(snapshots: list[Snapshot]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse CLI args, collect snapshots, and dispatch to the requested output mode.
+
+    Args:
+        argv: Optional CLI arguments; defaults to ``sys.argv[1:]``.
+
+    Returns:
+        Process exit code (0 on success, non-zero on validator failure or
+        infrastructure errors).
+    """
     p = argparse.ArgumentParser(description="sunSale integration validation harness")
     p.add_argument("--url", default=os.environ.get("HA_URL", DEFAULT_HA_URL))
     p.add_argument("--token", default=os.environ.get("HA_TOKEN", DEFAULT_HA_TOKEN))

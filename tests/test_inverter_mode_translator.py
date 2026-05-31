@@ -29,35 +29,35 @@ def _make_inverter(
     return inv
 
 
-def test_parse_decodes_gulp_when_register_is_33():
+def test_parse_decodes_grid_charge_when_register_is_33():
     inv = _make_inverter(reg=33, charge_a=50.0, discharge_a=0.0, rc_w=-3000)
     reading = InverterModeTranslator(inv).parse(None, NOW)
     assert reading == InverterModeReading(
         timestamp=NOW,
         reg_43110_value=33,
-        mode=StorageMode.GULP,
+        mode=StorageMode.GridCharge,
         charge_a=50.0,
         discharge_a=0.0,
         rc_setpoint_w=-3000,
     )
 
 
-def test_parse_decodes_dump_when_discharging():
+def test_parse_decodes_discharge_when_discharging():
     inv = _make_inverter(reg=64, charge_a=0.0, discharge_a=50.0, rc_w=5000)
     reading = InverterModeTranslator(inv).parse(None, NOW)
-    assert reading.mode == StorageMode.DUMP
+    assert reading.mode == StorageMode.Discharge
 
 
-def test_parse_decodes_sell_when_feed_in_with_no_discharge():
+def test_parse_decodes_feed_in_when_feed_in_with_no_discharge():
     inv = _make_inverter(reg=64, charge_a=0.0, discharge_a=0.0, rc_w=0)
     reading = InverterModeTranslator(inv).parse(None, NOW)
-    assert reading.mode == StorageMode.SELL
+    assert reading.mode == StorageMode.FeedIn
 
 
-def test_parse_decodes_stby_when_self_use_with_zero_currents():
+def test_parse_decodes_standby_when_self_use_with_zero_currents():
     inv = _make_inverter(reg=1, charge_a=0.0, discharge_a=0.0, rc_w=0)
     reading = InverterModeTranslator(inv).parse(None, NOW)
-    assert reading.mode == StorageMode.STBY
+    assert reading.mode == StorageMode.StandBy
 
 
 def test_parse_returns_unknown_when_register_unavailable():
@@ -80,5 +80,5 @@ async def test_translate_async_wraps_parse():
     result = await InverterModeTranslator(inv).translate(
         hass=None, config=None, raw_config={}, now=NOW,
     )
-    assert result.mode == StorageMode.GULP
+    assert result.mode == StorageMode.GridCharge
     assert result.timestamp == NOW

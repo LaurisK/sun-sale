@@ -54,9 +54,9 @@ def build_specs(
 
     Args:
         battery_config: Battery limits (used to derive max charge/discharge amps).
-        export_max_w: Backflow / export power cap for SELL and STORE modes.
+        export_max_w: Backflow / export power cap for FeedIn and SelfUse modes.
         inverter_max_power_w: Rated AC output, used as the RC setpoint magnitude
-            for DUMP (force discharge to grid).
+            for Discharge (force discharge to grid).
 
     Returns:
         Dict mapping each StorageMode to its concrete spec.
@@ -70,42 +70,42 @@ def build_specs(
     p_charge_max_w = int(battery_config.max_charge_power_kw * 1000)
 
     return {
-        StorageMode.SELL: StorageModeSpec(
+        StorageMode.FeedIn: StorageModeSpec(
             reg_43110_value=64,
             export_limit_w=export_max_w,
             charge_a=i_charge_max_a,
             discharge_a=0.0,
             rc_setpoint_w=0,
         ),
-        StorageMode.STORE: StorageModeSpec(
+        StorageMode.SelfUse: StorageModeSpec(
             reg_43110_value=1,
             export_limit_w=export_max_w,
             charge_a=i_charge_max_a,
             discharge_a=0.0,
             rc_setpoint_w=0,
         ),
-        StorageMode.HOARD: StorageModeSpec(
+        StorageMode.NoExport: StorageModeSpec(
             reg_43110_value=1,
             export_limit_w=0,
             charge_a=i_charge_max_a,
             discharge_a=0.0,
             rc_setpoint_w=0,
         ),
-        StorageMode.DUMP: StorageModeSpec(
+        StorageMode.Discharge: StorageModeSpec(
             reg_43110_value=64,
-            export_limit_w=None,    # uncapped while DUMPing
+            export_limit_w=None,    # uncapped while Discharging
             charge_a=0.0,
             discharge_a=i_discharge_max_a,
             rc_setpoint_w=+inverter_max_power_w,
         ),
-        StorageMode.GULP: StorageModeSpec(
+        StorageMode.GridCharge: StorageModeSpec(
             reg_43110_value=33,
             export_limit_w=0,
             charge_a=i_charge_max_a,
             discharge_a=0.0,
             rc_setpoint_w=-p_charge_max_w,
         ),
-        StorageMode.STBY: StorageModeSpec(
+        StorageMode.StandBy: StorageModeSpec(
             reg_43110_value=1,
             export_limit_w=0,
             charge_a=0.0,
@@ -138,14 +138,14 @@ def decode_mode(
     """Best-effort decode of an observed inverter state to a StorageMode.
 
     The register-bitmask alone is ambiguous in two cases:
-      * 43110=1 (SelfUse) covers AUTO, STBY, STORE, and HOARD.
-      * 43110=64 (FeedIn) covers SELL and DUMP.
+      * 43110=1 (SelfUse) covers AUTO, StandBy, SelfUse, and NoExport.
+      * 43110=64 (FeedIn) covers FeedIn and Discharge.
     Ancillary signals (discharge current, charge current) disambiguate where
-    possible. HOARD vs STORE and AUTO vs the hardware-default cases collapse
-    to STORE / STBY respectively because the differentiating fields
-    (export-limit, allow-export-switch) are not consulted here. The control
-    module's *target* mode is the authoritative answer; this decoder produces
-    the *observed* label that drives the chart history.
+    possible. NoExport vs SelfUse and AUTO vs the hardware-default cases
+    collapse to SelfUse / StandBy respectively because the differentiating
+    fields (export-limit, allow-export-switch) are not consulted here. The
+    control module's *target* mode is the authoritative answer; this decoder
+    produces the *observed* label that drives the chart history.
 
     Args:
         reg_43110_value: Raw readback of the Storage Control word.
@@ -167,13 +167,13 @@ def decode_mode(
     d = discharge_a or 0.0
 
     if reg_43110_value == 33:
-        return StorageMode.GULP
+        return StorageMode.GridCharge
     if reg_43110_value == 64:
-        return StorageMode.DUMP if d > _CURRENT_EPSILON_A else StorageMode.SELL
+        return StorageMode.Discharge if d > _CURRENT_EPSILON_A else StorageMode.FeedIn
     if reg_43110_value == 1:
         if c < _CURRENT_EPSILON_A and d < _CURRENT_EPSILON_A:
-            return StorageMode.STBY
-        return StorageMode.STORE
+            return StorageMode.StandBy
+        return StorageMode.SelfUse
     return StorageMode.UNKNOWN
 
 

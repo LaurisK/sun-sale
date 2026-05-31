@@ -105,6 +105,21 @@ class Schedule:
     computed_at: datetime
 
 
+@dataclass(frozen=True)
+class SchedulePolicy:
+    """User-toggleable flags constraining the DP scheduler's action set.
+
+    ``use_standby`` controls whether StandBy (battery idle) may be picked; when
+    disabled, the planner falls back to SelfUse during no-generation windows so
+    the battery is always available to cover load instead of sitting idle.
+    ``allow_grid_charging`` controls whether GridCharge (force grid-charge) is
+    available; disabling it prohibits buying energy from the grid into the
+    battery even when prices are low.
+    """
+    use_standby: bool = True
+    allow_grid_charging: bool = True
+
+
 class ChargeMode(Enum):
     """Per-slot disposition of today's remaining solar generation."""
     SOLAR_CHARGE = "solar_charge"   # store solar in battery
@@ -842,15 +857,15 @@ class StorageMode(Enum):
     for the concrete StorageModeSpec builders. UNKNOWN is reserved for observed
     register states that do not map to any planned mode.
     """
-    SELL    = "sell"     # 43110=64 (FeedIn) — surplus above export cap → charge
-    STORE   = "store"    # 43110=1  (SelfUse) — charge first, capped export of surplus
-    HOARD   = "hoard"    # 43110=1  (SelfUse) — charge only, export prohibited
-    DUMP    = "dump"     # 43110=64 (FeedIn) — uncapped export + force discharge
-    GULP    = "gulp"     # 43110=33 (SelfUse|GridCharge) — force grid charge
-    STBY    = "stby"     # 43110=1  (SelfUse) — no battery flow, no grid exchange
-    AUTO    = "auto"     # 43110=1  (SelfUse) — hardware default, no sunSale override
-    TRACK   = "track"    # real-time VPP setpoint follower (future hook)
-    UNKNOWN = "unknown"  # observed bitmask does not map to any named mode
+    FeedIn     = "feed_in"      # 43110=64 — surplus above export cap → charge
+    SelfUse    = "self_use"     # 43110=1  — charge first, capped export of surplus
+    NoExport   = "no_export"    # 43110=1  (SelfUse) — charge only, export prohibited
+    Discharge  = "discharge"    # 43110=64 (FeedIn) — uncapped export + force discharge
+    GridCharge = "grid_charge"  # 43110=33 (SelfUse|GridCharge) — force grid charge
+    StandBy    = "stand_by"     # 43110=1  (SelfUse) — no battery flow, no grid exchange
+    AUTO       = "auto"         # 43110=1  (SelfUse) — hardware default, no sunSale override
+    TRACK      = "track"        # real-time VPP setpoint follower (future hook)
+    UNKNOWN    = "unknown"      # observed bitmask does not map to any named mode
 
 
 @dataclass(frozen=True)

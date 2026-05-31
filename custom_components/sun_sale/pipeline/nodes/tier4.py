@@ -17,6 +17,7 @@ from ...contract.models import (
     PriceSeries,
     ProfitabilityScore,
     Schedule,
+    SchedulePolicy,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class ScheduleNode(DagNode):
         profit_score = ctx.get(ProfitabilityScore)
         mode_reading = ctx.get(InverterModeReading)
         current_mode = mode_reading.mode if mode_reading is not None else None
+        policy = ctx.get(SchedulePolicy) or SchedulePolicy()
 
         schedule = schedule_module.optimize_schedule(
             price_series=price_series,
@@ -72,6 +74,8 @@ class ScheduleNode(DagNode):
             local_tz=ctx.config.local_tz,
             profitability_score=profit_score,
             current_mode=current_mode,
+            use_standby=policy.use_standby,
+            allow_grid_charging=policy.allow_grid_charging,
         )
 
         return schedule, []

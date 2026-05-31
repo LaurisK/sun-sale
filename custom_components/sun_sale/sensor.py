@@ -410,11 +410,11 @@ class InverterModeSensor(_BaseSensor):
 
         if cur_slot is None:
             return "self_use_sell" if solar_w > load_w else "self_use"
-        if cur_slot.mode == StorageMode.GULP:
+        if cur_slot.mode == StorageMode.GridCharge:
             return "charge_from_grid"
-        if cur_slot.mode in (StorageMode.DUMP, StorageMode.SELL):
+        if cur_slot.mode in (StorageMode.Discharge, StorageMode.FeedIn):
             return "sell_discharge"
-        if cur_slot.mode in (StorageMode.STORE, StorageMode.HOARD):
+        if cur_slot.mode in (StorageMode.SelfUse, StorageMode.NoExport):
             return "charge_solar"
         return "self_use_sell" if solar_w > load_w else "self_use"
 

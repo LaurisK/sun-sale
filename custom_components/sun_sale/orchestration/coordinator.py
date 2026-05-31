@@ -83,6 +83,8 @@ from ..contract.const import (
     DEFAULT_SOLIS_SELF_USE_SWITCH,
     DEFAULT_SOLIS_STORAGE_CONTROL_READBACK,
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
+    DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING,
+    DEFAULT_SCHEDULE_USE_STANDBY,
     DOMAIN,
     CONF_INVERTER_ENTITY_PV_POWER,
     GENERATION_HISTORY_RETENTION_DAYS,
@@ -149,6 +151,7 @@ from ..contract.models import (
     PriceHistory,
     PriceSeries,
     ProfitabilityScore,
+    SchedulePolicy,
     SolarData,
     SolarEntry,
     Schedule,
@@ -239,9 +242,11 @@ def _parse_solar_entries(payload: dict) -> list[SolarEntry]:
 def _serialize_yesterday(buckets: _YesterdayBuckets) -> dict:
     """Serialise yesterday buckets to the two-bucket storage layout."""
     def _ser_nordpool(xs: list[PriceEntry]) -> list[dict]:
+        """Serialise a list of Nordpool price entries to dicts."""
         return [{"start": e.start.isoformat(), "end": e.end.isoformat(), "price": e.price_eur_kwh} for e in xs]
 
     def _ser_solar(xs: list[SolarEntry]) -> list[dict]:
+        """Serialise a list of solar forecast entries to dicts."""
         return [{"start": e.start.isoformat(), "end": e.end.isoformat(), "kwh": e.expected_kwh, "source": e.source} for e in xs]
 
     return {
@@ -620,6 +625,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._monthly_bill_store: PersistentStore[MonthlyBillState] | None = None
         self._mode_history_store: PersistentStore[InverterModeHistory] | None = None
         self.automation_enabled: bool = False
+        self.use_standby: bool = DEFAULT_SCHEDULE_USE_STANDBY
+        self.allow_grid_charging: bool = DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
 
@@ -1024,6 +1031,11 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 value_kwh=self._capacity_estimator.estimated_capacity_kwh
             )
 
+            primary[SchedulePolicy] = SchedulePolicy(
+                use_standby=self.use_standby,
+                allow_grid_charging=self.allow_grid_charging,
+            )
+
             secondary, events = await self._engine.run(primary, self._sun_sale_config, now)
 
             acc_result: ForecastAccuracyResult | None = secondary.get(ForecastAccuracyResult)
@@ -1175,6 +1187,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         local_today = now.astimezone(self._sun_sale_config.local_tz).date()
 
         def _parse(attr: str) -> datetime | None:
+            """Read a sun.sun datetime attribute as UTC-aware, or None when missing."""
             state = self.hass.states.get("sun.sun")
             if state is None:
                 return None
@@ -1188,6 +1201,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 return None
 
         def _today_event(next_event: datetime | None) -> datetime | None:
+            """Map a sun.sun "next_*" event to today's instance of that event."""
             if next_event is None:
                 return None
             local_date = next_event.astimezone(self._sun_sale_config.local_tz).date()

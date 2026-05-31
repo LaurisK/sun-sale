@@ -73,18 +73,18 @@ def test_single_price_emits_one_slot():
     bc = default_battery_config()
     result = run([make_price(0, 0.10)], soc=bc.min_soc, battery_config=bc)
     assert len(result.slots) == 1
-    assert result.slots[0].mode in {StorageMode.STORE, StorageMode.STBY}
+    assert result.slots[0].mode in {StorageMode.SelfUse, StorageMode.StandBy}
     assert result.slots[0].power_kw == pytest.approx(0.0)
 
 
 def test_flat_prices_no_charge_at_min_soc():
-    """Flat prices at min_soc → no GULP (spread doesn't recoup deg × 2)."""
-    # At min_soc the DP has nothing to DUMP; a GULP would need a future DUMP to
-    # recoup, which the spread doesn't justify.
+    """Flat prices at min_soc → no GridCharge (spread doesn't recoup deg × 2)."""
+    # At min_soc the DP has nothing to Discharge; a GridCharge would need a future
+    # Discharge to recoup, which the spread doesn't justify.
     bc = default_battery_config()
     prices = [make_price(h, 0.10) for h in range(24)]
     result = run(prices, soc=bc.min_soc, battery_config=bc)
-    assert all(s.mode not in {StorageMode.GULP, StorageMode.DUMP} for s in result.slots)
+    assert all(s.mode not in {StorageMode.GridCharge, StorageMode.Discharge} for s in result.slots)
 
 
 # ---------------------------------------------------------------------------
@@ -103,30 +103,30 @@ def test_obvious_buy_low_sell_high():
     result = run(prices)
     slot_0 = next(s for s in result.slots if s.start.hour == 0)
     slot_12 = next(s for s in result.slots if s.start.hour == 12)
-    assert slot_0.mode == StorageMode.GULP
-    assert slot_12.mode == StorageMode.DUMP
+    assert slot_0.mode == StorageMode.GridCharge
+    assert slot_12.mode == StorageMode.Discharge
 
 
 def test_spread_below_degradation_does_not_charge_from_empty():
-    """Small spread at min_soc → no GULP (no future DUMP pays for the charge)."""
+    """Small spread at min_soc → no GridCharge (no future Discharge pays for the charge)."""
     # Degradation ~ 5000/(6000*10*2) = 0.0417 EUR/storage-kWh; spread of 0.02
     # is well below the round-trip degradation hurdle.
     bc = default_battery_config()
     prices = [make_price(h, 0.10 if h < 12 else 0.12) for h in range(24)]
     result = run(prices, soc=bc.min_soc, battery_config=bc)
-    assert not any(s.mode == StorageMode.GULP for s in result.slots)
+    assert not any(s.mode == StorageMode.GridCharge for s in result.slots)
 
 
 def test_charge_before_discharge():
-    """Chronological constraint: the DP cannot DUMP before it has charged."""
+    """Chronological constraint: the DP cannot Discharge before it has charged."""
     prices = (
         [make_price(0, 0.01)]
         + [make_price(h, 0.50) for h in range(1, 4)]
         + [make_price(h, 0.10) for h in range(4, 24)]
     )
     result = run(prices, soc=0.20)    # near-empty so DP must charge first
-    charge_slots = [s for s in result.slots if s.mode == StorageMode.GULP]
-    discharge_slots = [s for s in result.slots if s.mode == StorageMode.DUMP]
+    charge_slots = [s for s in result.slots if s.mode == StorageMode.GridCharge]
+    discharge_slots = [s for s in result.slots if s.mode == StorageMode.Discharge]
     if charge_slots and discharge_slots:
         assert min(s.start for s in charge_slots) < min(s.start for s in discharge_slots)
 
@@ -144,7 +144,7 @@ def test_multi_leg_arbitrage_visited():
             spot = 0.10
         prices.append(make_price(h, spot))
     result = run(prices, soc=0.30)
-    discharge_hours = sorted(s.start.hour for s in result.slots if s.mode == StorageMode.DUMP)
+    discharge_hours = sorted(s.start.hour for s in result.slots if s.mode == StorageMode.Discharge)
     # Both peaks should be exploited.
     assert 6 in discharge_hours
     assert 18 in discharge_hours
@@ -156,23 +156,23 @@ def test_multi_leg_arbitrage_visited():
 
 
 def test_no_charge_when_full():
-    """At max_soc, DP cannot GULP (no headroom to put kWh in)."""
+    """At max_soc, DP cannot GridCharge (no headroom to put kWh in)."""
     bc = default_battery_config()
     prices = [make_price(0, 0.01)] + [make_price(h, 0.50) for h in range(1, 4)]
     result = run(prices, soc=bc.max_soc, battery_config=bc)
-    # Slot 0 has no headroom — GULP would charge 0 kWh. DP may pick anything
-    # neutral (STORE/STBY); the key is it does not waste a "trade" attempt here.
+    # Slot 0 has no headroom — GridCharge would charge 0 kWh. DP may pick anything
+    # neutral (SelfUse/StandBy); the key is it does not waste a "trade" attempt here.
     slot_0 = next(s for s in result.slots if s.start.hour == 0)
-    assert slot_0.power_kw == 0.0 or slot_0.mode != StorageMode.GULP
+    assert slot_0.power_kw == 0.0 or slot_0.mode != StorageMode.GridCharge
 
 
 def test_no_discharge_when_empty():
-    """At min_soc, DP cannot DUMP (no battery to drain)."""
+    """At min_soc, DP cannot Discharge (no battery to drain)."""
     bc = default_battery_config()
     prices = [make_price(0, 0.50)] + [make_price(h, 0.01) for h in range(1, 4)]
     result = run(prices, soc=bc.min_soc, battery_config=bc)
     slot_0 = next(s for s in result.slots if s.start.hour == 0)
-    assert slot_0.power_kw == 0.0 or slot_0.mode != StorageMode.DUMP
+    assert slot_0.power_kw == 0.0 or slot_0.mode != StorageMode.Discharge
 
 
 def test_soc_stays_within_bounds_throughout():
@@ -196,9 +196,9 @@ def test_power_does_not_exceed_max():
     )
     result = run(prices, battery_config=bc)
     for slot in result.slots:
-        if slot.mode == StorageMode.GULP:
+        if slot.mode == StorageMode.GridCharge:
             assert slot.power_kw <= bc.max_charge_power_kw + 1e-6
-        elif slot.mode == StorageMode.DUMP:
+        elif slot.mode == StorageMode.Discharge:
             assert slot.power_kw <= bc.max_discharge_power_kw + 1e-6
 
 
@@ -208,9 +208,9 @@ def test_power_does_not_exceed_max():
 
 
 def test_solar_at_negative_sell_does_not_export():
-    """Solar slot inside a negative-sell window → DP must not DUMP or SELL.
+    """Solar slot inside a negative-sell window → DP must not Discharge or FeedIn.
 
-    Both would push solar to the grid at a loss. STORE/HOARD/STBY are
+    Both would push solar to the grid at a loss. SelfUse/NoExport/StandBy are
     the acceptable choices.
     """
     tc = _high_sell_fee_config()
@@ -219,16 +219,16 @@ def test_solar_at_negative_sell_does_not_export():
     solar = [make_solar(2, 2.0)]
     result = run(prices, solar=solar, soc=bc.min_soc, battery_config=bc, tariff_config=tc)
     solar_slot = next(s for s in result.slots if s.start.hour == 2)
-    assert solar_slot.mode not in {StorageMode.DUMP, StorageMode.SELL}
+    assert solar_slot.mode not in {StorageMode.Discharge, StorageMode.FeedIn}
 
 
 def test_no_solar_at_min_soc_picks_passive_modes():
-    """No solar at min_soc → DP has nothing to do, picks STORE or STBY."""
+    """No solar at min_soc → DP has nothing to do, picks SelfUse or StandBy."""
     bc = default_battery_config()
     prices = [make_price(h, 0.10) for h in range(4)]
     result = run(prices, solar=[], soc=bc.min_soc, battery_config=bc)
     for slot in result.slots:
-        assert slot.mode in {StorageMode.STORE, StorageMode.STBY}
+        assert slot.mode in {StorageMode.SelfUse, StorageMode.StandBy}
         assert slot.power_kw == pytest.approx(0.0)
 
 
@@ -277,17 +277,17 @@ def _run_with_negative_sell_window(locked_hours: list[int]):
 
 
 def test_no_dump_inside_negative_sell_window():
-    """DUMP would lose money at sell < 0 → DP refuses to pick it."""
+    """Discharge would lose money at sell < 0 → DP refuses to pick it."""
     locked = list(range(10, 14))
     result = _run_with_negative_sell_window(locked)
-    discharge_hours = [s.start.hour for s in result.slots if s.mode == StorageMode.DUMP]
+    discharge_hours = [s.start.hour for s in result.slots if s.mode == StorageMode.Discharge]
     assert all(h not in locked for h in discharge_hours), (
-        f"DUMP inside locked hours: {[h for h in discharge_hours if h in locked]}"
+        f"Discharge inside locked hours: {[h for h in discharge_hours if h in locked]}"
     )
 
 
 def test_negative_sell_slot_does_not_export():
-    """Inside the negative-sell window the chosen mode is HOARD/STBY/STORE.
+    """Inside the negative-sell window the chosen mode is NoExport/StandBy/SelfUse.
 
     Whichever it is, the slot's power_kw must be 0 — no battery cycling
     and no grid export.
@@ -295,12 +295,12 @@ def test_negative_sell_slot_does_not_export():
     locked = [12]
     result = _run_with_negative_sell_window(locked)
     locked_slot = next(s for s in result.slots if s.start.hour == 12)
-    assert locked_slot.mode in {StorageMode.HOARD, StorageMode.STBY, StorageMode.STORE}
+    assert locked_slot.mode in {StorageMode.NoExport, StorageMode.StandBy, StorageMode.SelfUse}
     assert locked_slot.power_kw == pytest.approx(0.0)
 
 
 def test_dump_allowed_outside_negative_sell_window():
-    """A genuine peak outside the lockout still triggers DUMP."""
+    """A genuine peak outside the lockout still triggers Discharge."""
     tc = _high_sell_fee_config()
     prices = (
         [make_price(0, 0.01)]
@@ -310,8 +310,8 @@ def test_dump_allowed_outside_negative_sell_window():
         + [make_price(23, 0.80)]                            # huge sell
     )
     result = run(prices, tariff_config=tc, soc=0.30)
-    discharge_slots = [s for s in result.slots if s.mode == StorageMode.DUMP]
-    assert discharge_slots, "Expected at least one DUMP slot at hour 23"
+    discharge_slots = [s for s in result.slots if s.mode == StorageMode.Discharge]
+    assert discharge_slots, "Expected at least one Discharge slot at hour 23"
     assert all(s.start.hour != 12 for s in discharge_slots)
 
 
@@ -344,7 +344,7 @@ def _flat_baseload(kw: float) -> BaseLoadProfile:
 
 
 def test_baseload_increases_grid_import_when_battery_empty():
-    """At min_soc with baseload, STBY/STORE slots import baseload from grid."""
+    """At min_soc with baseload, StandBy/SelfUse slots import baseload from grid."""
     bc = default_battery_config()
     tc = default_tariff_config()
     state = default_battery_state(bc.min_soc)
@@ -392,8 +392,8 @@ def test_baseload_does_not_change_pure_arbitrage_decision():
     )
     slot_0 = next(s for s in result.slots if s.start.hour == 0)
     slot_12 = next(s for s in result.slots if s.start.hour == 12)
-    assert slot_0.mode == StorageMode.GULP
-    assert slot_12.mode == StorageMode.DUMP
+    assert slot_0.mode == StorageMode.GridCharge
+    assert slot_12.mode == StorageMode.Discharge
 
 
 def test_baseload_omitted_still_produces_schedule():
@@ -430,7 +430,7 @@ def _profit_score(score: float) -> ProfitabilityScore:
 
 def test_terminal_value_discourages_unnecessary_drain():
     """At soc=0.5, flat positive prices: terminal value keeps the DP from
-    DUMPing the whole pack for tiny gains; charge is preserved."""
+    Discharging the whole pack for tiny gains; charge is preserved."""
     bc = default_battery_config()
     tc = default_tariff_config()
     state = default_battery_state(0.50)
@@ -509,7 +509,7 @@ def test_mode_change_penalty_dampens_flapping():
 def test_current_mode_prevents_first_slot_penalty():
     """When current_mode matches the chosen first-slot mode, no penalty fires.
 
-    Concretely: starting in STORE with a price profile that picks STORE first
+    Concretely: starting in SelfUse with a price profile that picks SelfUse first
     yields the same first-slot reward as starting in None (the sentinel).
     """
     bc = default_battery_config()
@@ -517,7 +517,7 @@ def test_current_mode_prevents_first_slot_penalty():
     state = default_battery_state(bc.min_soc)
     state.estimated_capacity_kwh = bc.nominal_capacity_kwh
     deg = degradation_cost_per_kwh(bc, state)
-    prices = [make_price(h, 0.10) for h in range(4)]    # no GULP/DUMP attractive
+    prices = [make_price(h, 0.10) for h in range(4)]    # no GridCharge/Discharge attractive
     ps = build_price_series(prices, tc, now=NOW)
     gen = _make_gen_series([])
     calc = calculate(ps, gen, state, NOW)
@@ -572,3 +572,92 @@ def test_charging_profile_argument_is_accepted_but_ignored():
     # Should run without error and produce a schedule of the right size.
     result = optimize_schedule(ps, calc, bc, state, deg, NOW, charging_profile=profile)
     assert len(result.slots) == len(ps.slots)
+
+
+# ---------------------------------------------------------------------------
+# Policy flags — use_standby / allow_grid_charging
+# ---------------------------------------------------------------------------
+
+
+def _run_with_policy(
+    prices,
+    *,
+    use_standby: bool = True,
+    allow_grid_charging: bool = True,
+    soc: float = 0.50,
+    solar=None,
+):
+    """Run the optimiser with explicit policy flags; returns the Schedule."""
+    bc = default_battery_config()
+    tc = default_tariff_config()
+    state = default_battery_state(soc)
+    state.estimated_capacity_kwh = bc.nominal_capacity_kwh
+    deg = degradation_cost_per_kwh(bc, state)
+    ps = build_price_series(prices, tc, now=NOW)
+    gen = _make_gen_series(solar or [])
+    calc = calculate(ps, gen, state, NOW)
+    return optimize_schedule(
+        ps, calc, bc, state, deg, NOW,
+        use_standby=use_standby,
+        allow_grid_charging=allow_grid_charging,
+    )
+
+
+def test_use_standby_off_excludes_standby_mode():
+    """When use_standby=False, the DP must never pick StandBy for any slot."""
+    bc = default_battery_config()
+    # Flat, low prices at min_soc — typical no-arbitrage case where StandBy is
+    # often the cheapest action. With the flag off StandBy must drop out entirely.
+    prices = [make_price(h, 0.10) for h in range(24)]
+    result = _run_with_policy(
+        prices,
+        use_standby=False,
+        allow_grid_charging=True,
+        soc=bc.min_soc,
+    )
+    assert all(s.mode != StorageMode.StandBy for s in result.slots)
+
+
+def test_allow_grid_charging_off_excludes_grid_charge_mode():
+    """When allow_grid_charging=False the DP must not pick GridCharge even on a clear arb."""
+    prices = (
+        [make_price(0, 0.01)]
+        + [make_price(h, 0.10) for h in range(1, 12)]
+        + [make_price(12, 0.50)]
+        + [make_price(h, 0.10) for h in range(13, 24)]
+    )
+    # Sanity check: with both flags on, the DP DOES pick GridCharge at the cheap hour.
+    baseline = _run_with_policy(prices, use_standby=True, allow_grid_charging=True)
+    assert any(s.mode == StorageMode.GridCharge for s in baseline.slots)
+
+    restricted = _run_with_policy(prices, use_standby=True, allow_grid_charging=False)
+    assert all(s.mode != StorageMode.GridCharge for s in restricted.slots)
+
+
+def test_both_flags_off_still_produces_valid_schedule():
+    """With both restrictive flags set the DP still emits a slot per price slot."""
+    prices = [make_price(h, 0.10 + 0.01 * (h % 3)) for h in range(8)]
+    result = _run_with_policy(
+        prices,
+        use_standby=False,
+        allow_grid_charging=False,
+    )
+    assert len(result.slots) == len(prices)
+    assert all(
+        s.mode not in {StorageMode.StandBy, StorageMode.GridCharge} for s in result.slots
+    )
+
+
+def test_default_flags_match_legacy_behaviour():
+    """Omitting the policy kwargs leaves both modes available — no behaviour change."""
+    prices = (
+        [make_price(0, 0.01)]
+        + [make_price(h, 0.10) for h in range(1, 12)]
+        + [make_price(12, 0.50)]
+        + [make_price(h, 0.10) for h in range(13, 24)]
+    )
+    default = run(prices)
+    explicit = _run_with_policy(
+        prices, use_standby=True, allow_grid_charging=True,
+    )
+    assert [s.mode for s in default.slots] == [s.mode for s in explicit.slots]

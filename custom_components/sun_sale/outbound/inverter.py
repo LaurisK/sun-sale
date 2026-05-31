@@ -34,6 +34,14 @@ from ..contract.models import (
 
 
 class InverterPlatform(Enum):
+    """Supported HA inverter integrations.
+
+    Only ``SOLIS`` has a complete register-level write implementation; the
+    remaining platforms expose telemetry today and a no-op ``apply_mode`` —
+    a platform-specific writer can be added per enum value without touching
+    callers.
+    """
+
     HUAWEI_SOLAR = "huawei_solar"
     SOLAREDGE = "solaredge"
     GOODWE = "goodwe"

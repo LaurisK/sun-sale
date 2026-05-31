@@ -35,12 +35,12 @@ def test_build_specs_covers_every_applied_mode():
 @pytest.mark.parametrize(
     "mode, expected_reg",
     [
-        (StorageMode.SELL, 64),
-        (StorageMode.STORE, 1),
-        (StorageMode.HOARD, 1),
-        (StorageMode.DUMP, 64),
-        (StorageMode.GULP, 33),
-        (StorageMode.STBY, 1),
+        (StorageMode.FeedIn, 64),
+        (StorageMode.SelfUse, 1),
+        (StorageMode.NoExport, 1),
+        (StorageMode.Discharge, 64),
+        (StorageMode.GridCharge, 33),
+        (StorageMode.StandBy, 1),
         (StorageMode.AUTO, 1),
         (StorageMode.TRACK, 1),
     ],
@@ -50,30 +50,30 @@ def test_build_specs_register_bitmasks_match_doc(mode, expected_reg):
     assert _specs()[mode].reg_43110_value == expected_reg
 
 
-def test_gulp_pushes_grid_charge_setpoint_negative():
-    # GULP forces grid → battery, so RC active-power setpoint is negative.
+def test_grid_charge_pushes_grid_charge_setpoint_negative():
+    # GridCharge forces grid → battery, so RC active-power setpoint is negative.
     bc = default_battery_config()
-    spec = build_specs(bc, export_max_w=10_000, inverter_max_power_w=10_000)[StorageMode.GULP]
+    spec = build_specs(bc, export_max_w=10_000, inverter_max_power_w=10_000)[StorageMode.GridCharge]
     assert spec.rc_setpoint_w == -int(bc.max_charge_power_kw * 1000)
     assert spec.discharge_a == 0.0
     assert spec.charge_a is not None and spec.charge_a > 0
 
 
-def test_dump_pushes_export_setpoint_positive_and_uncaps_export():
-    spec = _specs()[StorageMode.DUMP]
+def test_discharge_pushes_export_setpoint_positive_and_uncaps_export():
+    spec = _specs()[StorageMode.Discharge]
     assert spec.rc_setpoint_w == 10_000
     assert spec.export_limit_w is None
     assert spec.charge_a == 0.0
     assert spec.discharge_a is not None and spec.discharge_a > 0
 
 
-def test_hoard_zeros_export_limit():
-    spec = _specs()[StorageMode.HOARD]
+def test_no_export_zeros_export_limit():
+    spec = _specs()[StorageMode.NoExport]
     assert spec.export_limit_w == 0
 
 
-def test_stby_zeros_both_currents_and_export():
-    spec = _specs()[StorageMode.STBY]
+def test_standby_zeros_both_currents_and_export():
+    spec = _specs()[StorageMode.StandBy]
     assert spec.charge_a == 0.0
     assert spec.discharge_a == 0.0
     assert spec.export_limit_w == 0
@@ -90,7 +90,7 @@ def test_auto_leaves_hardware_defaults_intact():
 def test_amps_derived_from_battery_voltage():
     bc = default_battery_config()
     expected_a = (bc.max_charge_power_kw * 1000) / bc.nominal_voltage_v
-    assert _specs()[StorageMode.SELL].charge_a == pytest.approx(expected_a)
+    assert _specs()[StorageMode.FeedIn].charge_a == pytest.approx(expected_a)
 
 
 def test_build_specs_safe_with_zero_voltage_fallback():
@@ -99,7 +99,7 @@ def test_build_specs_safe_with_zero_voltage_fallback():
     object.__setattr__(bc, "nominal_voltage_v", 0.0)
     specs = build_specs(bc, export_max_w=10_000, inverter_max_power_w=10_000)
     # Falls back to 48 V — should not divide-by-zero.
-    assert specs[StorageMode.SELL].charge_a == pytest.approx(
+    assert specs[StorageMode.FeedIn].charge_a == pytest.approx(
         (bc.max_charge_power_kw * 1000) / 48.0
     )
 
@@ -118,44 +118,44 @@ def test_decode_unrecognised_bitmask_is_unknown():
     assert decode_mode(4, 0.0, 0.0, 0) == StorageMode.UNKNOWN
 
 
-def test_decode_self_use_idle_is_stby():
-    assert decode_mode(1, 0.0, 0.0, 0) == StorageMode.STBY
+def test_decode_self_use_idle_is_standby():
+    assert decode_mode(1, 0.0, 0.0, 0) == StorageMode.StandBy
 
 
-def test_decode_self_use_with_charge_current_is_store():
-    assert decode_mode(1, 50.0, 0.0, 0) == StorageMode.STORE
+def test_decode_self_use_with_charge_current_is_self_use():
+    assert decode_mode(1, 50.0, 0.0, 0) == StorageMode.SelfUse
 
 
-def test_decode_grid_charge_bitmask_is_gulp():
-    assert decode_mode(33, 50.0, 0.0, -3000) == StorageMode.GULP
+def test_decode_grid_charge_bitmask_is_grid_charge():
+    assert decode_mode(33, 50.0, 0.0, -3000) == StorageMode.GridCharge
 
 
-def test_decode_feed_in_no_discharge_is_sell():
-    assert decode_mode(64, 50.0, 0.0, 0) == StorageMode.SELL
+def test_decode_feed_in_no_discharge_is_feed_in():
+    assert decode_mode(64, 50.0, 0.0, 0) == StorageMode.FeedIn
 
 
-def test_decode_feed_in_with_discharge_is_dump():
-    assert decode_mode(64, 0.0, 50.0, 5000) == StorageMode.DUMP
+def test_decode_feed_in_with_discharge_is_discharge():
+    assert decode_mode(64, 0.0, 50.0, 5000) == StorageMode.Discharge
 
 
 def test_decode_handles_none_currents_as_zero():
     # Translator may pass None when the number entity is unavailable.
-    assert decode_mode(1, None, None, None) == StorageMode.STBY
+    assert decode_mode(1, None, None, None) == StorageMode.StandBy
 
 
 def test_decode_round_trip_applied_modes_match_build_specs():
     """For every applied mode whose decode is unambiguous, applying its spec to
     the inverter and reading the register back should reproduce the same mode."""
     specs = _specs()
-    # AUTO and TRACK collapse to STBY/STORE in the decoder by design — they
+    # AUTO and TRACK collapse to StandBy/SelfUse in the decoder by design — they
     # are not part of the round-trip set (see decode_mode docstring).
     unambiguous = {
-        StorageMode.SELL,
-        StorageMode.STORE,
-        StorageMode.HOARD,    # will round-trip to STORE; tested separately
-        StorageMode.DUMP,
-        StorageMode.GULP,
-        StorageMode.STBY,
+        StorageMode.FeedIn,
+        StorageMode.SelfUse,
+        StorageMode.NoExport,    # will round-trip to SelfUse; tested separately
+        StorageMode.Discharge,
+        StorageMode.GridCharge,
+        StorageMode.StandBy,
     }
     for mode in unambiguous:
         spec = specs[mode]
@@ -165,10 +165,10 @@ def test_decode_round_trip_applied_modes_match_build_specs():
             spec.discharge_a,
             spec.rc_setpoint_w,
         )
-        # HOARD is observationally indistinguishable from STORE (both SelfUse
-        # with charge current); the decoder collapses them to STORE.
-        if mode == StorageMode.HOARD:
-            assert decoded == StorageMode.STORE
+        # NoExport is observationally indistinguishable from SelfUse (both SelfUse
+        # bitmask with charge current); the decoder collapses them to SelfUse.
+        if mode == StorageMode.NoExport:
+            assert decoded == StorageMode.SelfUse
         else:
             assert decoded == mode, f"{mode} round-trip failed → {decoded}"
 

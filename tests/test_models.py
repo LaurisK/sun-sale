@@ -12,14 +12,14 @@ NOW = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
 
 def test_storage_mode_enum_values():
     assert StorageMode.AUTO.value == "auto"
-    assert StorageMode.GULP.value == "gulp"
-    assert StorageMode.DUMP.value == "dump"
-    assert StorageMode.STORE.value == "store"
+    assert StorageMode.GridCharge.value == "grid_charge"
+    assert StorageMode.Discharge.value == "discharge"
+    assert StorageMode.SelfUse.value == "self_use"
 
 
 def test_storage_mode_enum_from_value():
     assert StorageMode("auto") == StorageMode.AUTO
-    assert StorageMode("gulp") == StorageMode.GULP
+    assert StorageMode("grid_charge") == StorageMode.GridCharge
 
 
 def test_price_entry_frozen():
@@ -60,7 +60,7 @@ def test_schedule_slot_frozen():
         expected_soc_after=0.5, expected_profit_eur=0.0, reason="test",
     )
     with pytest.raises((AttributeError, TypeError)):
-        slot.mode = StorageMode.GULP  # type: ignore[misc]
+        slot.mode = StorageMode.GridCharge  # type: ignore[misc]
 
 
 def test_capacity_observation_frozen():

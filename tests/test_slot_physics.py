@@ -84,14 +84,14 @@ def _assert_mass_balance(
 
 
 # ---------------------------------------------------------------------------
-# STBY
+# StandBy
 # ---------------------------------------------------------------------------
 
 
 def test_stby_idle_battery_solar_covers_load():
-    """STBY: solar covers load entirely; battery untouched, no grid flow."""
+    """StandBy: solar covers load entirely; battery untouched, no grid flow."""
     cfg = default_battery_config()
-    out = _sim(mode=StorageMode.STBY, solar_kwh=1.0, baseload_kwh=1.0)
+    out = _sim(mode=StorageMode.StandBy, solar_kwh=1.0, baseload_kwh=1.0)
     assert out.batt_charge_kwh == 0.0
     assert out.batt_discharge_kwh == 0.0
     assert out.grid_in_kwh == 0.0
@@ -102,9 +102,9 @@ def test_stby_idle_battery_solar_covers_load():
 
 
 def test_stby_solar_surplus_curtails():
-    """STBY has export_limit=0 per hardware spec — surplus curtails always."""
+    """StandBy has export_limit=0 per hardware spec — surplus curtails always."""
     cfg = default_battery_config()
-    out = _sim(mode=StorageMode.STBY, solar_kwh=3.0, baseload_kwh=1.0, sell_eur_kwh=0.15)
+    out = _sim(mode=StorageMode.StandBy, solar_kwh=3.0, baseload_kwh=1.0, sell_eur_kwh=0.15)
     assert out.grid_out_kwh == 0.0
     assert out.curtailed_kwh == pytest.approx(2.0)
     assert out.batt_charge_kwh == 0.0
@@ -112,14 +112,14 @@ def test_stby_solar_surplus_curtails():
 
 
 def test_stby_load_only_imports_from_grid():
-    """STBY: no solar, only load → battery untouched, grid imports load."""
-    out = _sim(mode=StorageMode.STBY, solar_kwh=0.0, baseload_kwh=0.5)
+    """StandBy: no solar, only load → battery untouched, grid imports load."""
+    out = _sim(mode=StorageMode.StandBy, solar_kwh=0.0, baseload_kwh=0.5)
     assert out.grid_in_kwh == pytest.approx(0.5)
     assert out.batt_discharge_kwh == 0.0
 
 
 # ---------------------------------------------------------------------------
-# AUTO  /  STORE  /  HOARD  (self-use family)
+# AUTO  /  SelfUse  /  NoExport  (self-use family)
 # ---------------------------------------------------------------------------
 
 
@@ -173,9 +173,9 @@ def test_auto_exports_even_when_sell_negative():
 
 
 def test_store_caps_export_above_limit():
-    """STORE: export cap clips export; above-cap surplus curtails."""
+    """SelfUse: export cap clips export; above-cap surplus curtails."""
     out = _sim(
-        mode=StorageMode.STORE,
+        mode=StorageMode.SelfUse,
         solar_kwh=10.0,
         baseload_kwh=0.0,
         soc_in=0.50,
@@ -189,13 +189,13 @@ def test_store_caps_export_above_limit():
 
 
 def test_hoard_curtails_all_surplus():
-    """HOARD: no export at all — surplus that exceeds headroom curtails."""
+    """NoExport: no export at all — surplus that exceeds headroom curtails."""
     out = _sim(
-        mode=StorageMode.HOARD,
+        mode=StorageMode.NoExport,
         solar_kwh=8.0,
         baseload_kwh=1.0,
         soc_in=0.50,
-        sell_eur_kwh=0.20,    # even positive — HOARD never exports
+        sell_eur_kwh=0.20,    # even positive — NoExport never exports
     )
     surplus_after_load = 8.0 - 1.0
     assert out.batt_charge_kwh == pytest.approx(4.5)
@@ -204,8 +204,8 @@ def test_hoard_curtails_all_surplus():
 
 
 def test_hoard_still_discharges_for_baseload():
-    """HOARD: no export, but battery still covers deficit (it's self-use)."""
-    out = _sim(mode=StorageMode.HOARD, solar_kwh=0.0, baseload_kwh=2.0, soc_in=0.50)
+    """NoExport: no export, but battery still covers deficit (it's self-use)."""
+    out = _sim(mode=StorageMode.NoExport, solar_kwh=0.0, baseload_kwh=2.0, soc_in=0.50)
     assert out.batt_discharge_kwh == pytest.approx(2.0)
     assert out.grid_in_kwh == 0.0
 
@@ -238,13 +238,13 @@ def test_self_use_at_max_soc_cannot_charge():
 
 
 # ---------------------------------------------------------------------------
-# GULP
+# GridCharge
 # ---------------------------------------------------------------------------
 
 
 def test_gulp_charges_battery_at_max_rate():
-    """GULP: battery charges at min(max_charge, headroom); load also from grid."""
-    out = _sim(mode=StorageMode.GULP, solar_kwh=0.0, baseload_kwh=0.5, soc_in=0.50)
+    """GridCharge: battery charges at min(max_charge, headroom); load also from grid."""
+    out = _sim(mode=StorageMode.GridCharge, solar_kwh=0.0, baseload_kwh=0.5, soc_in=0.50)
     # max_charge_kwh = 5.0, headroom = 4.5 → batt_charge = 4.5
     assert out.batt_charge_kwh == pytest.approx(4.5)
     assert out.grid_in_kwh == pytest.approx(4.5 + 0.5)
@@ -252,17 +252,17 @@ def test_gulp_charges_battery_at_max_rate():
 
 
 def test_gulp_full_battery_no_charge_grid_still_serves_load():
-    """GULP at max_soc — no charging, but baseload still imports."""
+    """GridCharge at max_soc — no charging, but baseload still imports."""
     cfg = default_battery_config()
-    out = _sim(mode=StorageMode.GULP, solar_kwh=0.0, baseload_kwh=0.3, soc_in=cfg.max_soc)
+    out = _sim(mode=StorageMode.GridCharge, solar_kwh=0.0, baseload_kwh=0.3, soc_in=cfg.max_soc)
     assert out.batt_charge_kwh == 0.0
     assert out.grid_in_kwh == pytest.approx(0.3)
 
 
 def test_gulp_curtails_solar_surplus():
-    """GULP locks export to 0 by spec; solar above baseload curtails."""
+    """GridCharge locks export to 0 by spec; solar above baseload curtails."""
     out = _sim(
-        mode=StorageMode.GULP,
+        mode=StorageMode.GridCharge,
         solar_kwh=2.0,
         baseload_kwh=0.5,
         soc_in=0.50,
@@ -274,22 +274,22 @@ def test_gulp_curtails_solar_surplus():
 
 
 def test_gulp_solar_offsets_baseload_import():
-    """GULP: solar absorbs into baseload first, reducing grid import."""
-    out = _sim(mode=StorageMode.GULP, solar_kwh=0.5, baseload_kwh=2.0, soc_in=0.50)
+    """GridCharge: solar absorbs into baseload first, reducing grid import."""
+    out = _sim(mode=StorageMode.GridCharge, solar_kwh=0.5, baseload_kwh=2.0, soc_in=0.50)
     # batt_charge = 4.5; baseload_from_solar = 0.5; baseload_from_grid = 1.5
     assert out.batt_charge_kwh == pytest.approx(4.5)
     assert out.grid_in_kwh == pytest.approx(4.5 + 1.5)
 
 
 # ---------------------------------------------------------------------------
-# DUMP
+# Discharge
 # ---------------------------------------------------------------------------
 
 
 def test_dump_discharges_battery_and_exports():
-    """DUMP: battery drains at max rate; AC after baseload exports."""
+    """Discharge: battery drains at max rate; AC after baseload exports."""
     cfg = default_battery_config()
-    out = _sim(mode=StorageMode.DUMP, solar_kwh=0.0, baseload_kwh=0.5, soc_in=0.50)
+    out = _sim(mode=StorageMode.Discharge, solar_kwh=0.0, baseload_kwh=0.5, soc_in=0.50)
     # storage drawdown = 4 kWh; max_discharge_storage = 5/0.9 ≈ 5.56 → storage drained = 4
     # batt_discharge_ac = 4 * 0.9 = 3.6
     assert out.batt_discharge_kwh == pytest.approx(3.6)
@@ -300,10 +300,10 @@ def test_dump_discharges_battery_and_exports():
 
 
 def test_dump_at_min_soc_exports_solar_only():
-    """DUMP at min_soc: battery empty, solar still exports, deficit imports."""
+    """Discharge at min_soc: battery empty, solar still exports, deficit imports."""
     cfg = default_battery_config()
     out = _sim(
-        mode=StorageMode.DUMP,
+        mode=StorageMode.Discharge,
         solar_kwh=2.0,
         baseload_kwh=1.5,
         soc_in=cfg.min_soc,
@@ -315,22 +315,22 @@ def test_dump_at_min_soc_exports_solar_only():
 
 
 def test_dump_exports_even_at_negative_sell_price():
-    """DUMP is uncapped — runs even at negative prices. Reward is negative."""
-    out = _sim(mode=StorageMode.DUMP, solar_kwh=0.0, baseload_kwh=0.0, sell_eur_kwh=-0.10)
+    """Discharge is uncapped — runs even at negative prices. Reward is negative."""
+    out = _sim(mode=StorageMode.Discharge, solar_kwh=0.0, baseload_kwh=0.0, sell_eur_kwh=-0.10)
     assert out.grid_out_kwh == pytest.approx(3.6)
     assert out.curtailed_kwh == 0.0
     assert out.reward_eur < 0    # paying to export
 
 
 # ---------------------------------------------------------------------------
-# SELL
+# FeedIn
 # ---------------------------------------------------------------------------
 
 
 def test_sell_exports_solar_up_to_cap_then_charges():
-    """SELL: solar exports first; over-cap surplus charges battery."""
+    """FeedIn: solar exports first; over-cap surplus charges battery."""
     out = _sim(
-        mode=StorageMode.SELL,
+        mode=StorageMode.FeedIn,
         solar_kwh=8.0,
         baseload_kwh=1.0,
         soc_in=0.50,
@@ -346,17 +346,17 @@ def test_sell_exports_solar_up_to_cap_then_charges():
 
 
 def test_sell_does_not_discharge_battery_for_load():
-    """SELL: discharge_a=0 by spec — baseload deficit always imports."""
-    out = _sim(mode=StorageMode.SELL, solar_kwh=0.0, baseload_kwh=1.0, soc_in=0.50)
+    """FeedIn: discharge_a=0 by spec — baseload deficit always imports."""
+    out = _sim(mode=StorageMode.FeedIn, solar_kwh=0.0, baseload_kwh=1.0, soc_in=0.50)
     assert out.batt_discharge_kwh == 0.0
     assert out.grid_in_kwh == pytest.approx(1.0)
 
 
 def test_sell_curtails_when_battery_full_and_export_capped():
-    """SELL with full battery and tight cap → over-cap surplus curtails."""
+    """FeedIn with full battery and tight cap → over-cap surplus curtails."""
     cfg = default_battery_config()
     out = _sim(
-        mode=StorageMode.SELL,
+        mode=StorageMode.FeedIn,
         solar_kwh=8.0,
         baseload_kwh=0.0,
         soc_in=cfg.max_soc,
@@ -390,7 +390,7 @@ def test_reward_matches_revenue_cost_degradation_formula():
     """reward = grid_out·sell − grid_in·buy − throughput·deg."""
     cfg = default_battery_config()
     out = _sim(
-        mode=StorageMode.GULP,
+        mode=StorageMode.GridCharge,
         solar_kwh=0.0,
         baseload_kwh=0.0,
         soc_in=0.50,
@@ -404,9 +404,9 @@ def test_reward_matches_revenue_cost_degradation_formula():
 
 
 def test_reward_credits_discharge_revenue():
-    """DUMP reward includes sell × grid_out − deg × storage_drained."""
+    """Discharge reward includes sell × grid_out − deg × storage_drained."""
     out = _sim(
-        mode=StorageMode.DUMP,
+        mode=StorageMode.Discharge,
         solar_kwh=0.0,
         baseload_kwh=0.0,
         soc_in=0.50,
@@ -426,8 +426,8 @@ def test_reward_credits_discharge_revenue():
 
 def test_quarter_hour_slot_scales_power_limits():
     """A 15-min slot should yield 1/4 of the per-hour energy throughput."""
-    out_hour = _sim(mode=StorageMode.GULP, soc_in=0.10, slot_hours=1.0)
-    out_quarter = _sim(mode=StorageMode.GULP, soc_in=0.10, slot_hours=0.25)
+    out_hour = _sim(mode=StorageMode.GridCharge, soc_in=0.10, slot_hours=1.0)
+    out_quarter = _sim(mode=StorageMode.GridCharge, soc_in=0.10, slot_hours=0.25)
     # max_charge_kwh halves for a 15-min slot: 5*0.25 = 1.25
     assert out_quarter.batt_charge_kwh == pytest.approx(1.25)
     assert out_hour.batt_charge_kwh > out_quarter.batt_charge_kwh
@@ -439,13 +439,13 @@ def test_quarter_hour_slot_scales_power_limits():
 
 
 @pytest.mark.parametrize("mode", [
-    StorageMode.STBY,
+    StorageMode.StandBy,
     StorageMode.AUTO,
-    StorageMode.STORE,
-    StorageMode.HOARD,
-    StorageMode.GULP,
-    StorageMode.DUMP,
-    StorageMode.SELL,
+    StorageMode.SelfUse,
+    StorageMode.NoExport,
+    StorageMode.GridCharge,
+    StorageMode.Discharge,
+    StorageMode.FeedIn,
 ])
 @pytest.mark.parametrize("scenario", [
     {"solar": 0.0, "load": 0.0, "soc": 0.5, "sell": 0.10},

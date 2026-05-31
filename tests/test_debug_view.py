@@ -90,7 +90,7 @@ def make_coordinator(
     coord.tariff_config = tariff_cfg
 
     schedule = Schedule(
-        slots=[make_slot(0, StorageMode.GULP), make_slot(1, StorageMode.DUMP)],
+        slots=[make_slot(0, StorageMode.GridCharge), make_slot(1, StorageMode.Discharge)],
         total_expected_profit_eur=0.42,
         degradation_cost_per_kwh=0.02,
         computed_at=BASE,
@@ -152,7 +152,7 @@ def test_schedule_slots_serialised():
     for key in ("start", "end", "mode", "power_kw", "expected_profit_eur", "reason"):
         assert key in slot, f"missing slot key: {key}"
 
-    assert slot["mode"] == "gulp"
+    assert slot["mode"] == "grid_charge"
     assert isinstance(slot["start"], str)
 
 

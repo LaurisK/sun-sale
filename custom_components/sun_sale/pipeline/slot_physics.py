@@ -24,9 +24,9 @@ Conventions:
     discharge AC / efficiency); matches the round-trip ``deg × 2`` accounting
     used by ``trade_profit_per_kwh``.
 
-slot_physics never "second-guesses" a mode: SELL/AUTO/STORE will export
+slot_physics never "second-guesses" a mode: FeedIn/AUTO/SelfUse will export
 even when ``sell_eur_kwh < 0`` because that's what the hardware does. The
-scheduler is responsible for picking a price-aware mode (HOARD or STBY)
+scheduler is responsible for picking a price-aware mode (NoExport or StandBy)
 during negative-sell windows; the DP sees the negative reward and learns.
 """
 from __future__ import annotations
@@ -86,9 +86,9 @@ def simulate_slot(
         battery_cfg: Battery limits (capacity, power, SoC bounds, efficiency).
         est_capacity_kwh: Learned usable capacity in kWh.
         deg_cost_eur_kwh: Per-kWh cycle wear cost from DegradationNode.
-        export_limit_kw: Optional export cap applied to STORE/SELL exports;
-            ``None`` means uncapped. AUTO is always uncapped; HOARD never
-            exports; DUMP is uncapped; GULP curtails any solar surplus
+        export_limit_kw: Optional export cap applied to SelfUse/FeedIn exports;
+            ``None`` means uncapped. AUTO is always uncapped; NoExport never
+            exports; Discharge is uncapped; GridCharge curtails any solar surplus
             because grid-charge takes the charge bus.
 
     Returns:
@@ -107,11 +107,11 @@ def simulate_slot(
     )
 
     # Per-mode export caps mirror storage_mode_specs.build_specs():
-    #   AUTO / STORE / SELL → caller-supplied cap (inf when not set)
-    #   HOARD / STBY / GULP → 0 (export disabled by the spec)
-    #   DUMP                → uncapped
-    if mode == StorageMode.STBY:
-        flows = _simulate_stby(
+    #   AUTO / SelfUse / FeedIn          → caller-supplied cap (inf when not set)
+    #   NoExport / StandBy / GridCharge  → 0 (export disabled by the spec)
+    #   Discharge                        → uncapped
+    if mode == StorageMode.StandBy:
+        flows = _simulate_standby(
             solar_kwh, baseload_kwh, export_cap_kwh=0.0,
         )
     elif mode == StorageMode.AUTO:
@@ -120,36 +120,36 @@ def simulate_slot(
             drawdown_storage_kwh, max_charge_kwh, max_discharge_kwh, eff,
             export_cap_kwh=export_cap_kwh,
         )
-    elif mode == StorageMode.STORE:
+    elif mode == StorageMode.SelfUse:
         flows = _simulate_self_use(
             solar_kwh, baseload_kwh, headroom_kwh,
             drawdown_storage_kwh, max_charge_kwh, max_discharge_kwh, eff,
             export_cap_kwh=export_cap_kwh,
         )
-    elif mode == StorageMode.HOARD:
+    elif mode == StorageMode.NoExport:
         flows = _simulate_self_use(
             solar_kwh, baseload_kwh, headroom_kwh,
             drawdown_storage_kwh, max_charge_kwh, max_discharge_kwh, eff,
             export_cap_kwh=0.0,
         )
-    elif mode == StorageMode.GULP:
-        flows = _simulate_gulp(
+    elif mode == StorageMode.GridCharge:
+        flows = _simulate_grid_charge(
             solar_kwh, baseload_kwh, headroom_kwh,
             max_charge_kwh, export_cap_kwh=0.0,
         )
-    elif mode == StorageMode.DUMP:
-        flows = _simulate_dump(
+    elif mode == StorageMode.Discharge:
+        flows = _simulate_discharge(
             solar_kwh, baseload_kwh, drawdown_storage_kwh,
             max_discharge_storage_kwh, eff,
         )
-    elif mode == StorageMode.SELL:
-        flows = _simulate_sell(
+    elif mode == StorageMode.FeedIn:
+        flows = _simulate_feed_in(
             solar_kwh, baseload_kwh, headroom_kwh,
             max_charge_kwh, export_cap_kwh,
         )
     else:
-        # TRACK / UNKNOWN — treated as STBY for now; DP must not propose them.
-        flows = _simulate_stby(
+        # TRACK / UNKNOWN — treated as StandBy for now; DP must not propose them.
+        flows = _simulate_standby(
             solar_kwh, baseload_kwh, export_cap_kwh=0.0,
         )
 
@@ -192,16 +192,16 @@ class _Flows:
     curtailed: float
 
 
-def _simulate_stby(
+def _simulate_standby(
     solar_kwh: float,
     baseload_kwh: float,
     export_cap_kwh: float,
 ) -> _Flows:
-    """STBY: battery idle; solar covers load; surplus exports if cap allows.
+    """StandBy: battery idle; solar covers load; surplus exports if cap allows.
 
     Battery neither charges nor discharges. Solar covers baseload first;
     surplus exports up to the cap and curtails above it. The hardware
-    spec for STBY pins ``export_limit_w=0`` so callers normally pass
+    spec for StandBy pins ``export_limit_w=0`` so callers normally pass
     ``export_cap_kwh=0`` — the parameter is kept for symmetry.
 
     Args:
@@ -233,11 +233,11 @@ def _simulate_self_use(
     eff: float,
     export_cap_kwh: float,
 ) -> _Flows:
-    """Self-use family (AUTO / STORE / HOARD): battery balances solar vs load.
+    """Self-use family (AUTO / SelfUse / NoExport): battery balances solar vs load.
 
     Battery discharges to cover baseload deficit; surplus solar charges the
     battery; remaining surplus exports (capped) or curtails. Pass the
-    configured cap for AUTO/STORE and ``0.0`` for HOARD.
+    configured cap for AUTO/SelfUse and ``0.0`` for NoExport.
 
     Args:
         solar_kwh: Expected solar generation for the slot.
@@ -275,21 +275,21 @@ def _simulate_self_use(
     )
 
 
-def _simulate_gulp(
+def _simulate_grid_charge(
     solar_kwh: float,
     baseload_kwh: float,
     headroom_kwh: float,
     max_charge_kwh: float,
     export_cap_kwh: float,
 ) -> _Flows:
-    """GULP: force grid charge; solar covers baseload, surplus curtails (export=0).
+    """GridCharge: force grid charge; solar covers baseload, surplus curtails (export=0).
 
     Battery is force-charged from the grid at the maximum charge rate
     (clamped by available headroom). Solar still covers any baseload it
-    can; the deficit is imported on top of the GULP charge. Surplus solar
-    cannot export — GULP's export limit is zero by spec — so it curtails
-    unless the caller passes a non-zero ``export_cap_kwh`` (kept as a
-    parameter for symmetry with the other modes).
+    can; the deficit is imported on top of the GridCharge charge. Surplus
+    solar cannot export — GridCharge's export limit is zero by spec — so
+    it curtails unless the caller passes a non-zero ``export_cap_kwh``
+    (kept as a parameter for symmetry with the other modes).
 
     Args:
         solar_kwh: Expected solar generation for the slot.
@@ -318,20 +318,20 @@ def _simulate_gulp(
     )
 
 
-def _simulate_dump(
+def _simulate_discharge(
     solar_kwh: float,
     baseload_kwh: float,
     drawdown_storage_kwh: float,
     max_discharge_storage_kwh: float,
     eff: float,
 ) -> _Flows:
-    """DUMP: force battery discharge (uncapped export); solar exports too.
+    """Discharge: force battery discharge (uncapped export); solar exports too.
 
     Battery discharges at the maximum rate (clamped by storage drawdown
     available). All AC produced (battery + solar) serves baseload first;
-    the remainder exports unconditionally — DUMP has no export cap and
-    runs even when the sell price is negative. The scheduler must not
-    pick DUMP under negative prices.
+    the remainder exports unconditionally — Discharge has no export cap
+    and runs even when the sell price is negative. The scheduler must not
+    pick Discharge under negative prices.
 
     Args:
         solar_kwh: Expected solar generation for the slot.
@@ -362,14 +362,14 @@ def _simulate_dump(
     )
 
 
-def _simulate_sell(
+def _simulate_feed_in(
     solar_kwh: float,
     baseload_kwh: float,
     headroom_kwh: float,
     max_charge_kwh: float,
     export_cap_kwh: float,
 ) -> _Flows:
-    """SELL: FeedIn priority — export first up to cap, over-cap charges battery.
+    """FeedIn: export priority — export first up to cap, over-cap charges battery.
 
     Solar covers baseload first. Remaining solar tries to export (up to
     ``export_cap_kwh``); whatever exceeds the cap charges the battery.
@@ -433,8 +433,8 @@ def _export_or_curtail(
     """Split a solar surplus into exported and curtailed parts using the cap.
 
     The export decision is price-blind — modes (not slot_physics) decide
-    whether export is allowed by passing ``0.0`` (HOARD/STBY/GULP) or a
-    non-zero cap. The DP picks a price-aware mode; the resulting reward
+    whether export is allowed by passing ``0.0`` (NoExport/StandBy/GridCharge)
+    or a non-zero cap. The DP picks a price-aware mode; the resulting reward
     will reflect a loss when ``sell_eur_kwh`` is negative.
 
     Args:

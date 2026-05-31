@@ -130,14 +130,14 @@ def _specs():
 
 
 @pytest.mark.asyncio
-async def test_apply_mode_gulp_starts_from_self_use_1():
-    # Inverter currently at 43110=1 (SelfUse). Apply GULP (target 33 = SelfUse|GridCharge).
+async def test_apply_mode_grid_charge_starts_from_self_use_1():
+    # Inverter currently at 43110=1 (SelfUse). Apply GridCharge (target 33 = SelfUse|GridCharge).
     # Only bit 5 (allow_grid_charge) needs to flip on.
     hass_state = {
         SOLIS_ENTITY_IDS["storage_control_readback"]: _State("1"),
     }
     controller, hass = make_controller(state_map=hass_state)
-    await controller.apply_mode(StorageMode.GULP, _specs()[StorageMode.GULP])
+    await controller.apply_mode(StorageMode.GridCharge, _specs()[StorageMode.GridCharge])
 
     toggled = _switches_toggled(hass)
     assert toggled.get(SOLIS_ENTITY_IDS["allow_grid_charge_switch"]) == "turn_on"
@@ -148,13 +148,13 @@ async def test_apply_mode_gulp_starts_from_self_use_1():
 
 
 @pytest.mark.asyncio
-async def test_apply_mode_dump_clears_self_use_and_sets_feed_in():
-    # Current 43110=1 (SelfUse). Apply DUMP (target 64 = FeedIn) — bits 0 off, bit 6 on.
+async def test_apply_mode_discharge_clears_self_use_and_sets_feed_in():
+    # Current 43110=1 (SelfUse). Apply Discharge (target 64 = FeedIn) — bits 0 off, bit 6 on.
     hass_state = {
         SOLIS_ENTITY_IDS["storage_control_readback"]: _State("1"),
     }
     controller, hass = make_controller(state_map=hass_state)
-    await controller.apply_mode(StorageMode.DUMP, _specs()[StorageMode.DUMP])
+    await controller.apply_mode(StorageMode.Discharge, _specs()[StorageMode.Discharge])
 
     toggled = _switches_toggled(hass)
     assert toggled.get(SOLIS_ENTITY_IDS["self_use_switch"]) == "turn_off"
@@ -166,8 +166,8 @@ async def test_apply_mode_dump_clears_self_use_and_sets_feed_in():
 
 @pytest.mark.asyncio
 async def test_apply_mode_idempotent_when_readback_matches_target():
-    # Inverter already in GULP state — all bits match and all numbers match target.
-    spec = _specs()[StorageMode.GULP]
+    # Inverter already in GridCharge state — all bits match and all numbers match target.
+    spec = _specs()[StorageMode.GridCharge]
     state_map = {
         SOLIS_ENTITY_IDS["storage_control_readback"]: _State(str(spec.reg_43110_value)),
         SOLIS_ENTITY_IDS["battery_max_charge_current"]: _State(str(spec.charge_a)),
@@ -176,14 +176,14 @@ async def test_apply_mode_idempotent_when_readback_matches_target():
         SOLIS_ENTITY_IDS["rc_setpoint"]: _State(str(spec.rc_setpoint_w)),
     }
     controller, hass = make_controller(state_map=state_map)
-    await controller.apply_mode(StorageMode.GULP, spec)
+    await controller.apply_mode(StorageMode.GridCharge, spec)
     # No service calls — everything already at the target value.
     assert _calls(hass) == []
 
 
 @pytest.mark.asyncio
 async def test_apply_mode_writes_numbers_only_when_outside_tolerance():
-    spec = _specs()[StorageMode.STORE]
+    spec = _specs()[StorageMode.SelfUse]
     # Readback says 43110 already at target. Currents differ; export limit matches.
     state_map = {
         SOLIS_ENTITY_IDS["storage_control_readback"]: _State(str(spec.reg_43110_value)),
@@ -193,7 +193,7 @@ async def test_apply_mode_writes_numbers_only_when_outside_tolerance():
         SOLIS_ENTITY_IDS["rc_setpoint"]: _State(str(spec.rc_setpoint_w)),
     }
     controller, hass = make_controller(state_map=state_map)
-    await controller.apply_mode(StorageMode.STORE, spec)
+    await controller.apply_mode(StorageMode.SelfUse, spec)
 
     writes = _numbers_written(hass)
     # Only the charge current should be rewritten — the rest were within tolerance.
@@ -226,7 +226,7 @@ async def test_apply_mode_no_op_on_non_solis_platforms():
         platform=InverterPlatform.HUAWEI_SOLAR,
         entity_ids={"battery_soc": "sensor.x"},
     )
-    await controller.apply_mode(StorageMode.GULP, _specs()[StorageMode.GULP])
+    await controller.apply_mode(StorageMode.GridCharge, _specs()[StorageMode.GridCharge])
     assert _calls(hass) == []
 
 
@@ -238,8 +238,8 @@ async def test_apply_mode_skips_role_with_empty_entity_id():
         entity_ids["storage_control_readback"]: _State("1"),
     }
     controller, hass = make_controller(state_map=state_map, entity_ids=entity_ids)
-    # GULP needs bit 5 → on. With the switch missing, the call should be silently skipped.
-    await controller.apply_mode(StorageMode.GULP, _specs()[StorageMode.GULP])
+    # GridCharge needs bit 5 → on. With the switch missing, the call should be silently skipped.
+    await controller.apply_mode(StorageMode.GridCharge, _specs()[StorageMode.GridCharge])
     toggled = _switches_toggled(hass)
     assert "switch.solis_allow_grid_to_charge_the_battery" not in toggled
 
