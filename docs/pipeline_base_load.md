@@ -37,7 +37,7 @@ What this module deliberately does **not** do:
 
 - It does not look at weekday/weekend/holiday classes. Day-class normalisation is reserved for `pipeline/profitability.py`; baseload is intentionally simpler.
 - It does not model forecast solar generation in the runtime estimate. The output is a worst-case "household-only depletion" reserve, comparable across cycles and unaffected by weather noise.
-- It does not model the optimizer's scheduled charge/discharge. Same reason: keep the estimate a fixed lower bound on the time we have before household consumption alone empties the battery.
+- It does not model the scheduler's planned charge/discharge. Same reason: keep the estimate a fixed lower bound on the time we have before household consumption alone empties the battery.
 - It does not own persistence. The coordinator appends each cycle's sample to `STORAGE_KEY_HOUSEHOLD_LOAD` and deposits the full `HouseholdLoadHistory` as primary; this module only reads it.
 
 ---
@@ -73,7 +73,7 @@ Module-level tunables, all importable for tests:
 | `MIN_BUCKET_SAMPLES` | `6` | Samples required in a single hour-bucket before it gets its own P10. Below this, that hour falls back. |
 | `DEFAULT_PERCENTILE` | `0.10` | Per-bucket percentile (the "floor"). |
 | `DEFAULT_FALLBACK_PERCENTILE` | `0.20` | Cross-bucket fallback percentile — wider than P10 because it's used when a single bucket is thin. |
-| `DEFAULT_STUB_KW` | `0.2` | Last-resort floor on a fresh install with literally no samples. Matches `inbound/translators._DEFAULT_HOUSEHOLD_LOAD_KW`. |
+| `DEFAULT_STUB_KW` | `0.2` | Last-resort floor on a fresh install with literally no samples. Matches `inbound/battery._DEFAULT_HOUSEHOLD_LOAD_KW`. |
 | `DEFAULT_WINDOW_DAYS` | `30` | Rolling window for samples. |
 | `DEFAULT_HORIZON_HOURS` | `48` | How far ahead `estimate_battery_runtime` simulates before giving up and returning `until=None`. |
 | `SIMULATION_STEP_MINUTES` | `5` | Simulation step. Matches the coordinator update interval and gives sub-percent precision on the `until` timestamp. |
@@ -216,13 +216,13 @@ A few notes:
 - The first-hour average is collected during the same loop. When the battery drains mid-step inside the first hour, the partial step is still counted toward the average so a sensor reading taken right at the cutoff still makes sense.
 - A bucket with `baseload_kw == 0` (would only happen with a pathological profile) means no drain that hour — the simulation just walks forward.
 
-**Why no schedule / no solar** — the optimizer's planned discharges and the solar forecast are both useful in different views, but they make the runtime estimate noisy and harder to reason about ("we had 8 hours yesterday, now we have 14 — did anything actually change?"). A "what if we did nothing" reserve is monotonic in inputs you can name: SoC, battery size, household pattern, hour of day. If a plan-aware "expected drain under current schedule" metric becomes valuable, it should be its own output type next to this one, not a parameter on this one.
+**Why no schedule / no solar** — the scheduler's planned discharges and the solar forecast are both useful in different views, but they make the runtime estimate noisy and harder to reason about ("we had 8 hours yesterday, now we have 14 — did anything actually change?"). A "what if we did nothing" reserve is monotonic in inputs you can name: SoC, battery size, household pattern, hour of day. If a plan-aware "expected drain under current schedule" metric becomes valuable, it should be its own output type next to this one, not a parameter on this one.
 
 ---
 
 ## 8. Integration in the DAG
 
-Two nodes, both in `pipeline/nodes.py`:
+Two nodes — `BaseLoadProfileNode` in `pipeline/nodes/tier1.py`, `BatteryRuntimeNode` in `pipeline/nodes/tier2.py`:
 
 ```python
 class BaseLoadProfileNode(DagNode):
@@ -251,7 +251,7 @@ Downstream consumers:
 - `sensor.CurrentBaseloadSensor` — calls `profile.at(now, local_tz)` for the current numeric value; full 24-slot breakdown lives in `extra_state_attributes`.
 - `sensor.BatteryRuntimeMinutesSensor` / `BatteryDrainUntilSensor` / `BaseloadConfidenceSensor` — read the obvious fields straight off the dataclass.
 
-Nothing in the calculator/optimizer pipeline consumes `BaseLoadProfile` or `BatteryRuntimeEstimate` today. The profile may eventually replace the 0.2 kW stub inside `BatteryTranslator` (see `docs/base_load_missing.md` §8 — separate ticket).
+Nothing in the calculation/schedule pipeline consumes `BaseLoadProfile` or `BatteryRuntimeEstimate` today. The profile may eventually replace the 0.2 kW stub inside `BatteryTranslator` (see `docs/base_load_missing.md` §8 — separate ticket).
 
 ---
 

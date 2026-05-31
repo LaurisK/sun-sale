@@ -72,9 +72,9 @@ The DAG engine wires 13 nodes across 4 tiers by matching `output_type → consum
 
 Each store appears four times in `coordinator.py`: declaration, `Store(...)` instantiation in `async_setup`, load+parse, append+trim+serialize+save. Adding a new store means touching four places, copy-pasting the trim/serialize pattern, and risking the LOCAL-tz bug already discovered (see the comment at `coordinator.py:415–423`).
 
-### 3.3 `nodes.py` mixes 12 small node classes with import-time fan-out
+### 3.3 ~~`nodes.py` mixes 12 small node classes with import-time fan-out~~ — **Done.**
 
-`pipeline/nodes.py` imports `base_load`, `battery`, `calculation`, `charging_profile`, `forecast_accuracy`, `schedule`, `profitability`, `inbound.battery`, `inbound.forecast`, `inbound.generation`, `inbound.pricing`. It is a monolithic dispatch table. Each node is ~10 lines of "extract from ctx, call helper, return"; the file is 400 LOC because imports + boilerplate dominate.
+Resolved by splitting `pipeline/nodes.py` into `pipeline/nodes/tier{1,2,3,4}.py`, re-exported through `pipeline/nodes/__init__.py`. The coordinator's import line is unchanged. Each tier file scopes its imports to the helpers it actually needs.
 
 ### 3.4 The tier system uses `int` constants — fragile and lossy
 
@@ -108,7 +108,7 @@ The flat catalogue is an explicit choice and has value. At 662 LOC across 30+ ty
 
 ### 3.10 No structured architectural decision log
 
-`ARCHITECTURE.md` describes the *current* shape excellently. It does not record *why* tiers are explicit ints, why `nodes.py` is monolithic, why the coordinator owns persistence. Cold readers re-litigate. `base_load_missing.md` already follows the right pattern — extend it to a `docs/adr/` directory.
+`ARCHITECTURE.md` describes the *current* shape excellently. It does not record *why* tiers are explicit ints or why the coordinator owns persistence. Cold readers re-litigate. `base_load_missing.md` already follows the right pattern — extend it to a `docs/adr/` directory.
 
 ---
 
@@ -119,7 +119,7 @@ The flat catalogue is an explicit choice and has value. At 662 LOC across 30+ ty
 1. ~~**Extract persistence into a `PersistentStore[T]` helper.**~~
    **Done (2026-05-29).** `orchestration/persistent_store.py` introduces `PersistentStore[T]` with `load()`, `save()`, `value`, and `append_and_trim()`. All six coordinator stores migrate to it. The yesterday two-bucket state is consolidated into `_YesterdayBuckets` (private dataclass) with `_rotate_yesterday_buckets()` extracted as a pure helper. Serialisation logic lifted to module-level functions. Net: coordinator shrinks from 743 → 787 lines (added 183 lines of serde helpers / dataclass) but removes the five in-memory list fields, two `_append_*` methods (~40 LOC), and all inline `async_save` call-sites with their embedded serialisers. New stores each take 4–5 lines to register. The `persistent_store.py` helper is 87 LOC.
 
-2. **Split `nodes.py` per-tier or per-domain.** Either `pipeline/nodes/tier1.py`, `tier2.py`, … or `pipeline/nodes/{pricing,battery,forecast,schedule}.py`. Re-export from `pipeline/nodes/__init__.py` so the coordinator's import line is unchanged. Imports get scoped, the file becomes findable.
+2. ~~**Split `nodes.py` per-tier or per-domain.**~~ **Done.** Split into `pipeline/nodes/tier{1,2,3,4}.py`, re-exported from `pipeline/nodes/__init__.py`. Imports are scoped per tier; the coordinator's import line is unchanged.
 
 3. **Add `reads_primary: list[type]` to `DagNode`.** Make `ForecastAccuracyNode` (and any future node reading primaries that bypass `consumes` for wiring reasons) declare them. Update `_wire()` to use both lists. Eliminates the implicit-dependency hazard.
 
@@ -171,9 +171,11 @@ The flat catalogue is an explicit choice and has value. At 662 LOC across 30+ ty
 
 ## 6. Recommended first step
 
-**Tier A item #1: extract `PersistentStore[T]`** — **done 2026-05-29.** Next recommended step: **Tier A item #2 (split `nodes.py` per-tier or per-domain)**, which is now the largest single-file smell, followed by items #3 and #4.
+**Tier A item #1: extract `PersistentStore[T]`** — **done 2026-05-29.**
+**Tier A item #2: split `nodes.py` per-tier** — **done.** Now in `pipeline/nodes/tier{1..4}.py`.
+
+Next recommended step: **Tier A item #3 (add `reads_primary: list[type]` to `DagNode`)**, followed by **#4 (add `tests/test_dag_topology.py`)**. Both close the implicit-dependency hazard around `ForecastAccuracyNode` (and any future node that reads primaries via `ctx.get` outside `consumes`).
 
 ### Verification before acting
 
-- **Memory staleness:** project memory was last updated 41 days ago. `MODULES.md §9` lists `profitability.py` as "not wired," but `coordinator.py` clearly registers `ProfitabilityNode`. Update both before relying on them for planning.
 - **Integration-check coverage:** confirm `tools/integration_check.py` has the `ProfitabilityCheckWidget` required by `CLAUDE.md`. If not, that gap is independent of any refactor and should be closed first.

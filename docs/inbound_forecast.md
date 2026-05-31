@@ -2,7 +2,7 @@
 
 Reference for `custom_components/sun_sale/inbound/forecast.py`.
 
-The forecast module owns the **72h yesterday→today→tomorrow `GenerationSeries`** that downstream consumers (calculator, optimizer, sensors, dashboard) read for expected solar generation. It is pure Python with no Home Assistant imports.
+The forecast module owns the **72h yesterday→today→tomorrow `GenerationSeries`** that downstream consumers (calculation, schedule, sensors, dashboard) read for expected solar generation. It is pure Python with no Home Assistant imports.
 
 ## Summary
 
@@ -41,16 +41,18 @@ The yesterday-stitching that pricing handles via `YesterdayPrices` is, for solar
 ```python
 def build_generation_series(
     solar: SolarData,
-    price_series: PriceSeries,
+    price_slots: tuple,                # PriceSeries.slots
     now: datetime | None = None,
+    local_tz: tzinfo | None = None,    # used for date-bucket totals
 ) -> GenerationSeries
 ```
 
-Resample `solar.entries` onto `price_series.slots` and compute per-day totals.
+Resample `solar.entries` onto `price_slots` and compute per-day totals.
 
 - `now` defaults to `datetime.now(timezone.utc)` and is recorded as `GenerationSeries.computed_at`. It is also the reference for the yesterday/today/tomorrow date buckets and the `today_remaining_kwh` "future" cutoff.
-- If `solar.entries` is empty or `price_series.slots` is empty, returns an empty `GenerationSeries` with all totals at `0.0`.
-- Otherwise emits **exactly `len(price_series.slots)` generation slots**, one per price slot, in the same order.
+- `local_tz` controls the date-bucket boundaries (yesterday / today / tomorrow). Defaults to UTC when omitted; the coordinator passes `ctx.config.local_tz`.
+- If `solar.entries` is empty or `price_slots` is empty, returns an empty `GenerationSeries` with all totals at `0.0`.
+- Otherwise emits **exactly `len(price_slots)` generation slots**, one per price slot, in the same order.
 
 Two private helpers do the work and are not part of the public surface but are useful to understand:
 
@@ -61,7 +63,7 @@ Two private helpers do the work and are not part of the public surface but are u
 
 ## 3. Inputs
 
-**`SolarData`** (`contract/models.py`) — produced by `inbound.translators.SolarTranslator`. Covers today + tomorrow from the configured HA entities (Open Meteo `watts` dict preferred; Forecast.Solar / Solcast `forecast` attribute as fallback). Multiple panels (`entity_1`, `entity_2`) are summed per-timestamp in the translator. The coordinator prepends yesterday's persisted entries before passing the value to the DAG.
+**`SolarData`** (`contract/models.py`) — produced by `inbound.forecast.SolarTranslator`. Covers today + tomorrow from the configured HA entities (Open Meteo `watts` dict preferred; Forecast.Solar / Solcast `forecast` attribute as fallback). Multiple panels (`entity_1`, `entity_2`) are summed per-timestamp in the translator. The coordinator prepends yesterday's persisted entries before passing the value to the DAG.
 
 `SolarData.primary_source` ∈ `{"open_meteo", "forecast_solar", "none"}` — used verbatim as the `source` label on every emitted `GenerationSlot`. Yesterday slots inherit this label too: consumers cannot tell from the slot whether it came from the store or from HA.
 
@@ -137,7 +139,7 @@ Totals are rounded to 4 decimals.
 
 ## 7. Integration in the DAG
 
-`GenerationNode` (`pipeline/nodes.py`):
+`GenerationNode` (`pipeline/nodes/tier2.py`):
 
 ```python
 tier = 2
@@ -151,12 +153,13 @@ Coordinator flow (`orchestration/coordinator.py:_async_update_data`):
 
 1. Run translators → `primary[SolarData]` (today + tomorrow from HA).
 2. If the persistent yesterday store's date is exactly yesterday, prepend `SolarEntry` items from the store onto `solar_data.entries`.
-3. `DagEngine.run(primary, ...)` → `PricingNode` produces `PriceSeries` → `GenerationNode` calls `build_generation_series(solar, price_series, now=ctx.now)` → `secondary[GenerationSeries]`.
+3. `DagEngine.run(primary, ...)` → `PricingNode` produces `PriceSeries` → `GenerationNode` calls `build_generation_series(solar, price_series.slots, now=ctx.now, local_tz=ctx.config.local_tz)` → `secondary[GenerationSeries]`.
 4. After the cycle, today's solar entries (filtered out of `SolarData.entries` by date) are written to the yesterday store for the next day.
 
 Downstream consumers:
-- `Calculator` — calls `generation.energy_between(slot.start, slot.end)` per price slot. The 1:1 grid alignment means each call returns exactly the matching slot's `expected_kwh`.
-- `Optimizer` — iterates `generation.slots` directly.
+- `LockoutNode` (`pipeline/calculation.py`) — calls `generation.energy_between(slot.start, slot.end)` per price slot. The 1:1 grid alignment means each call returns exactly the matching slot's `expected_kwh`.
+- `ScheduleNode` (`pipeline/schedule.py`) — iterates `generation.slots` directly.
+- `ChargingProfileNode` and `ForecastAccuracyNode` — see their respective reference docs.
 - `sensor.py` "Solar forecast" diagnostic sensor — exposes the full slot list plus the four totals for chart rendering.
 
 ---
@@ -202,4 +205,4 @@ Run them with:
 
 - **HA-side solar parsing** (multi-entity merging, Open Meteo vs Forecast.Solar attribute shapes, `_tomorrow_entity` look-ups beyond the suffix helper) — covered in `SolarTranslator` tests, not in the forecast module's tests.
 - **Persistent yesterday-solar store I/O** — coordinator's responsibility; covered in `tests/test_coordinator.py`.
-- **End-to-end DAG wiring** (GenerationNode within the engine) — exercised in `tests/test_coordinator.py`; downstream consumption is exercised via `tests/test_calculator.py` and `tests/test_optimizer.py`, which construct `GenerationSeries` directly as fixtures.
+- **End-to-end DAG wiring** (GenerationNode within the engine) — exercised in `tests/test_coordinator.py`; downstream consumption is exercised via `tests/test_calculation.py` and `tests/test_schedule.py`, which construct `GenerationSeries` directly as fixtures.

@@ -2,7 +2,7 @@
 
 Reference for `custom_components/sun_sale/inbound/pricing.py`.
 
-The pricing module owns the **72h yesterday→today→tomorrow `PriceSeries`** that every downstream consumer (calculator, optimizer, dashboard, sensors) reads. It is pure Python with no Home Assistant imports.
+The pricing module owns the **72h yesterday→today→tomorrow `PriceSeries`** that every downstream consumer (calculation, schedule, dashboard, sensors) reads. It is pure Python with no Home Assistant imports.
 
 ## Summary
 
@@ -64,7 +64,7 @@ Assemble the full yesterday→today→tomorrow series. Concatenates `yesterday.e
 
 ## 3. Inputs
 
-**`NordpoolData`** (`contract/models.py`) — produced by `inbound.translators.NordpoolTranslator`. Covers today + tomorrow only. `resolution` is auto-detected from the source attribute timestamps (`raw_today[1].start - raw_today[0].start`); the integration's HA Nordpool sensor exposes a single resolution stream per cycle and tomorrow is zero-filled until the day-ahead market publishes.
+**`NordpoolData`** (`contract/models.py`) — produced by `inbound.pricing.NordpoolTranslator`. Covers today + tomorrow only. `resolution` is auto-detected from the source attribute timestamps (`raw_today[1].start - raw_today[0].start`); the integration's HA Nordpool sensor exposes a single resolution stream per cycle and tomorrow is zero-filled until the day-ahead market publishes.
 
 **`YesterdayPrices`** (`contract/models.py`) — a frozen wrapper around `tuple[PriceEntry, ...]`. Supplied by `orchestration.coordinator` from the `STORAGE_KEY_YESTERDAY` `Store`. The coordinator gates the value: if the stored date is not exactly yesterday, an empty tuple is passed (no stale stitching).
 
@@ -124,7 +124,7 @@ This matters when yesterday has fewer slots than today, or when the input is spa
 
 ## 7. Integration in the DAG
 
-`PricingNode` (`pipeline/nodes.py`):
+`PricingNode` (`pipeline/nodes/tier1.py`):
 
 ```python
 tier = 1
@@ -181,6 +181,6 @@ Run them with:
 
 ### What is intentionally **not** covered here
 
-- **End-to-end DAG wiring** (PricingNode within the engine) — exercised in `tests/test_coordinator.py` and indirectly through `tests/test_optimizer.py` / `tests/test_calculator.py`, which import `build_price_series` to construct fixtures.
+- **End-to-end DAG wiring** (PricingNode within the engine) — exercised in `tests/test_coordinator.py` and indirectly through `tests/test_schedule.py` / `tests/test_calculation.py`, which import `build_price_series` to construct fixtures.
 - **HA-side Nordpool parsing** (15-min vs legacy attributes, zero-fill of tomorrow) — covered in `NordpoolTranslator` tests, not in the pricing module's tests.
 - **Persistent yesterday store I/O** — coordinator's responsibility; covered in `tests/test_coordinator.py`.

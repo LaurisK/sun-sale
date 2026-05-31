@@ -36,7 +36,7 @@ Per-slot disposition of today's remaining solar — `solar_charge`, `sell`, `no_
 
 What this module deliberately does **not** do:
 
-- It does not schedule grid charging. The optimizer owns grid charge/discharge decisions; this module reasons only about *solar disposition*.
+- It does not schedule grid charging. The scheduler owns grid charge/discharge decisions; this module reasons only about *solar disposition*.
 - It does not consider future days. Only slots with `start.date() == now.date()` and `start >= now` are emitted, matching the `today_remaining_kwh` convention used by `GenerationSeries`.
 - It does not split the marginal slot. When cumulative allocation crosses `free_capacity_kwh` mid-slot, the slot is kept whole as `SOLAR_CHARGE` — slight overfill is acceptable and far simpler than per-slot fractional accounting.
 
@@ -66,7 +66,7 @@ Pure function — no I/O, no globals, no clock reads. `now` is the cycle timesta
 
 **`PriceSeries`** — produced by `PricingNode` (T1). Each slot carries `sell_eur_kwh`, the effective price after fees and tax. Looked up by `slot.start` to rank generating slots and to classify residual `SELL` vs `NO_EXPORT`.
 
-**`BatteryConfig`** — read from `ctx.config.battery`. Only `max_soc` is consumed. Other fields are owned by the optimizer.
+**`BatteryConfig`** — read from `ctx.config.battery`. Only `max_soc` is consumed. Other fields are owned by the scheduler.
 
 ---
 
@@ -135,7 +135,7 @@ for g in today_remaining:
 
 ## 6. Integration in the DAG
 
-`ChargingProfileNode` (`pipeline/nodes.py`):
+`ChargingProfileNode` (`pipeline/nodes/tier3.py`):
 
 ```python
 tier = 3
@@ -186,5 +186,5 @@ Run them with:
 ### What is intentionally **not** covered here
 
 - **End-to-end DAG wiring with the full engine** — covered in `tests/test_coordinator.py`; the node-wiring test above runs `ChargingProfileNode` directly against a hand-built `NodeContext`.
-- **Optimizer interaction with `ChargingProfile`** — the optimizer does not consume `ChargingProfile` today; if a future tier-4 node starts to, its tests will exercise the integration.
+- **Scheduler interaction with `ChargingProfile`** — `ScheduleNode` consumes `ChargingProfile` to disambiguate STORE vs HOARD for solar slots; the schedule tests in `tests/test_schedule.py` exercise this integration.
 - **Tariff-formula correctness** — covered in `tests/test_tariff.py`; this module trusts whatever `sell_eur_kwh` the price slot reports.

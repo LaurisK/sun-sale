@@ -1,5 +1,5 @@
 @startuml sunSale_modules
-title sunSale — Module map with refactor status
+title sunSale — Module map (current code)
 
 skinparam packageStyle rectangle
 skinparam defaultFontSize 11
@@ -23,165 +23,234 @@ skinparam note {
 }
 skinparam ArrowColor #555
 
-' Status palette
-!define REFACTORED  #C8E6C9
-!define MISSING     #FFCDD2
-!define OLD         #ECEFF1
+' Status palette (matches MODULES.md §1)
+!define REFDOC      #C8E6C9
+!define INLINE      #ECEFF1
 !define EXTERNAL    #BBDEFB
+!define ROOTNODE    #FFF8E1
+!define INBOUNDC    #E8F5E9
+!define PIPELINEC   #E3F2FD
+!define OUTBOUNDC   #FFE0B2
+!define ORCHC       #F3E5F5
+!define CONTRACTC   #ECEFF1
 
 ' ─────────────── Legend ───────────────
 legend top left
-  | Colour | Status | Meaning |
-  |<#C8E6C9>| refactored | dedicated reference doc under docs/ |
-  |<#FFCDD2>| missing | partial integration; *_missing.md exists or needed |
-  |<#ECEFF1>| old | pre-refactor, no doc, behaviour read from code |
-  |<#BBDEFB>| external | Home Assistant runtime |
+  | Colour | Status |
+  |<#C8E6C9>| dedicated reference doc under docs/ |
+  |<#ECEFF1>| documented inline in MODULES.md |
+  |<#BBDEFB>| external (Home Assistant / solis_modbus) |
 endlegend
 
 ' ══════════════════════════════════════════════════════════════
 ' EXTERNAL
 ' ══════════════════════════════════════════════════════════════
-rectangle "Home Assistant\n(hass.states / services)" as HA EXTERNAL
+rectangle "Home Assistant\n(hass.states / services / registry)" as HA EXTERNAL
+rectangle "solis_modbus\n(external integration)" as SOLIS EXTERNAL
 
 ' ══════════════════════════════════════════════════════════════
 ' CONTRACT LAYER
 ' ══════════════════════════════════════════════════════════════
 package "contract/  (pure data — no internal deps)" {
-  rectangle "const.py"  as C_const  OLD
-  rectangle "events.py" as C_events OLD
-  rectangle "models.py" as C_models OLD
+  rectangle "const.py\nCONF_* / DOMAIN / defaults"            as C_const  CONTRACTC
+  rectangle "events.py\nControlEvent / InverterActionEvent"   as C_events CONTRACTC
+  rectangle "models.py\nevery dataclass (single source)"      as C_models CONTRACTC
 }
 
 ' ══════════════════════════════════════════════════════════════
-' INBOUND LAYER  (one translator per file — old translators.py removed)
+' INBOUND LAYER
 ' ══════════════════════════════════════════════════════════════
 package "inbound/  (HA-read + normalise)" {
-  rectangle "pricing.py\n[refactored]\nNordpoolTranslator"        as I_price   REFACTORED
-  rectangle "forecast.py\n[refactored]\nSolarTranslator"          as I_fc      REFACTORED
-  rectangle "generation.py\n[refactored]\nGenerationTranslator"   as I_gen     REFACTORED
-  rectangle "battery.py\n[refactored]\nBatteryTranslator"         as I_bat     REFACTORED
-  rectangle "household_load.py\nHouseholdLoadTranslator"          as I_hh      OLD
+  rectangle "pricing.py\n[ref doc]\nNordpoolTranslator"                  as I_price  REFDOC
+  rectangle "forecast.py\n[ref doc]\nSolarTranslator"                    as I_fc     REFDOC
+  rectangle "generation.py\n[ref doc]\nGenerationTranslator\nPvPowerTranslator" as I_gen REFDOC
+  rectangle "battery.py\n[ref doc]\nBatteryTranslator"                   as I_bat    REFDOC
+  rectangle "grid.py\nGridObserver\nGridImport/Export translators\nbuild_observed_grid_series" as I_grid INBOUNDC
+  rectangle "household_load.py\nHouseholdLoadTranslator"                 as I_hh     INBOUNDC
+  rectangle "household_consumption.py\nHouseholdConsumptionTranslator"   as I_hc     INBOUNDC
+  rectangle "inverter_mode.py\nInverterModeTranslator"                   as I_mode   INBOUNDC
+  rectangle "solis_entity_resolver.py\nresolve_solis_entities()"         as I_solis  INBOUNDC
 }
 
 ' ══════════════════════════════════════════════════════════════
 ' PIPELINE LAYER
 ' ══════════════════════════════════════════════════════════════
 package "pipeline/  (pure-Python DAG)" {
-  rectangle "dag_engine.py"      as P_engine  OLD
-  rectangle "nodes.py"           as P_nodes   OLD
-  rectangle "tariff.py"          as P_tariff  OLD
-  rectangle "battery.py"         as P_bat     OLD
-  rectangle "calculator.py"      as P_calc    OLD
-  rectangle "optimizer.py"       as P_opt     OLD
-  rectangle "charging_profile.py\n[refactored]" as P_cp  REFACTORED
-  rectangle "base_load.py\n[refactored]"        as P_bl  REFACTORED
-  rectangle "profitability.py\n[missing — not wired]" as P_prof MISSING
+  rectangle "dag_engine.py\nDagEngine / DagNode / NodeContext" as P_engine PIPELINEC
+
+  package "nodes/  (DAG node tiers)" {
+    rectangle "tier1.py\nPricing / BatteryState /\nBatteryStatus / BaseLoadProfile" as P_t1 PIPELINEC
+    rectangle "tier2.py\nGeneration / ObservedGeneration /\nObservedGrid / Degradation /\nBatteryRuntime / Profitability" as P_t2 PIPELINEC
+    rectangle "tier3.py\nChargingProfile / Lockout /\nForecastAccuracy / MonthlyBill"  as P_t3 PIPELINEC
+    rectangle "tier4.py\nScheduleNode" as P_t4 PIPELINEC
+  }
+
+  rectangle "tariff.py"                                       as P_tariff PIPELINEC
+  rectangle "battery.py\nCapacityEstimator"                   as P_bat    PIPELINEC
+  rectangle "calculation.py\n(was: calculator.py)"            as P_calc   PIPELINEC
+  rectangle "charging_profile.py\n[ref doc]"                  as P_cp     REFDOC
+  rectangle "base_load.py\n[ref doc]"                         as P_bl     REFDOC
+  rectangle "schedule.py\n(was: optimizer.py)"                as P_sched  PIPELINEC
+  rectangle "forecast_accuracy.py"                            as P_acc    PIPELINEC
+  rectangle "profitability.py\n(wired as ProfitabilityNode)"  as P_prof   PIPELINEC
+  rectangle "monthly_bill.py"                                 as P_mb     PIPELINEC
+  rectangle "storage_mode_specs.py\nPlannerDecision /\nbuild_specs / decode_mode /\nselect_mode" as P_spec PIPELINEC
 }
 
 ' ══════════════════════════════════════════════════════════════
 ' OUTBOUND LAYER
 ' ══════════════════════════════════════════════════════════════
-package "outbound/  (HA-write + presentation)" {
-  rectangle "event_router.py" as O_router OLD
-  rectangle "inverter.py"     as O_inv    OLD
-  rectangle "dashboard.py"    as O_dash   OLD
+package "outbound/  (HA-write + actuation)" {
+  rectangle "inverter.py\nInverterController +\nSolis V2 / Generic platforms\nnormalize_power_to_kw" as O_inv OUTBOUNDC
+  rectangle "inverter_control_module.py\nInverterControlModule\n(observe / plan / act per cycle)"     as O_icm OUTBOUNDC
 }
 
 ' ══════════════════════════════════════════════════════════════
 ' ORCHESTRATION LAYER
 ' ══════════════════════════════════════════════════════════════
 package "orchestration/  (glue)" {
-  rectangle "coordinator.py" as ORCH_coord OLD
-  rectangle "debug_view.py"  as ORCH_dbg   OLD
+  rectangle "coordinator.py\nSunSaleCoordinator\n(DataUpdateCoordinator)" as ORCH_coord ORCHC
+  rectangle "debug_view.py\nSunSaleDebugView"                            as ORCH_dbg   ORCHC
+  rectangle "persistent_store.py\nPersistentStore[T]"                    as ORCH_store ORCHC
 }
 
 ' ══════════════════════════════════════════════════════════════
 ' HA ROOT ENTRY POINTS
 ' ══════════════════════════════════════════════════════════════
 package "HA root entry points" {
-  rectangle "__init__.py"   as R_init   OLD
-  rectangle "config_flow.py" as R_cfg   OLD
-  rectangle "sensor.py"     as R_sens   OLD
-  rectangle "switch.py"     as R_sw     OLD
+  rectangle "__init__.py\nasync_setup_entry / service / panel" as R_init ROOTNODE
+  rectangle "config_flow.py\nSunSaleConfigFlow / OptionsFlow"  as R_cfg  ROOTNODE
+  rectangle "sensor.py\nSunSale*Sensor entities"               as R_sens ROOTNODE
+  rectangle "switch.py\nAutomationSwitch"                      as R_sw   ROOTNODE
 }
 
 ' ══════════════════════════════════════════════════════════════
 ' EDGES
 ' ══════════════════════════════════════════════════════════════
 
-' HA boundary — each inbound translator reads hass.states directly
+' --- HA boundary ---
 HA --> I_price
 HA --> I_fc
 HA --> I_gen
 HA --> I_bat
+HA --> I_grid
 HA --> I_hh
-HA --> O_inv
+HA --> I_hc
+HA --> I_mode
+SOLIS ..> I_solis : "registry scan"
+O_inv --> HA      : "service calls"
 R_init --> HA
 R_cfg  --> HA
 R_sens --> HA
 R_sw   --> HA
 
-' Contract is consumed everywhere — show one representative edge per layer
+' --- contract is consumed everywhere (representative edges) ---
 C_models <.. I_price
-C_models <.. P_nodes
-C_models <.. O_router
+C_models <.. P_t1
+C_models <.. P_t2
+C_models <.. P_t3
+C_models <.. P_t4
+C_models <.. O_inv
+C_models <.. O_icm
 C_models <.. ORCH_coord
 C_const  <.. ORCH_coord
-C_events <.. P_nodes
-C_events <.. O_router
+C_const  <.. R_init
+C_events <.. P_t1
+C_events <.. P_t2
+C_events <.. P_t3
+C_events <.. P_t4
 
-' Inbound translators → DAG (each emits its typed primary into the engine)
-I_price  --> P_nodes  : "PriceSeries via PricingNode"
-I_fc     --> P_nodes  : "GenerationSeries via GenerationNode"
-I_gen    --> P_nodes  : "ObservedGenerationSeries"
-I_bat    --> P_nodes  : "BatteryStatus via BatteryStatusNode"
-I_hh     --> P_nodes  : "HouseholdLoadHistory via BaseLoadProfileNode"
-
-' DAG engine wiring
-P_engine <.. P_nodes
-P_nodes  --> P_tariff
-P_nodes  --> P_bat
-P_nodes  --> P_calc
-P_nodes  --> P_opt
-P_nodes  --> P_cp
-P_nodes  --> P_bl
-
-' Profitability — NOT wired (dashed red)
-P_prof ..> P_nodes #FF5252 : "**MISSING**\nno ProfitabilityNode,\nno coordinator hookup"
-
-' Pipeline → Outbound via events
-P_nodes --> O_router : "ControlEvent list"
-O_router --> O_inv
-P_nodes --> O_dash    : "DashboardData (pure builder)"
-
-' Orchestration owns translators + engine + router
+' --- coordinator: the hub ---
 ORCH_coord --> I_price
 ORCH_coord --> I_fc
 ORCH_coord --> I_gen
 ORCH_coord --> I_bat
+ORCH_coord --> I_grid
 ORCH_coord --> I_hh
+ORCH_coord --> I_hc
+ORCH_coord --> I_mode
+ORCH_coord --> I_solis
 ORCH_coord --> P_engine
-ORCH_coord --> O_router
+ORCH_coord --> P_t1
+ORCH_coord --> P_t2
+ORCH_coord --> P_t3
+ORCH_coord --> P_t4
+ORCH_coord --> P_bat
+ORCH_coord --> P_acc
+ORCH_coord --> P_prof
 ORCH_coord --> O_inv
+ORCH_coord --> O_icm
+ORCH_coord --> ORCH_store
 ORCH_dbg   <.. ORCH_coord : "primary/secondary snapshot"
 
-' Root entries → orchestration
-R_init  --> ORCH_coord
-R_init  --> ORCH_dbg
-R_sens  --> ORCH_coord
-R_sw    --> ORCH_coord
-R_cfg   --> ORCH_coord
+' --- DAG node → helper deps ---
+P_t1 --> P_bl
+P_t1 --> I_bat
+P_t1 --> I_price
+P_t2 --> P_bl
+P_t2 --> P_bat
+P_t2 --> P_prof
+P_t2 --> I_fc
+P_t2 --> I_gen
+P_t2 --> I_grid
+P_t3 --> P_calc
+P_t3 --> P_cp
+P_t3 --> P_acc
+P_t3 --> P_mb
+P_t4 --> P_sched
+P_t1 --> P_engine
+P_t2 --> P_engine
+P_t3 --> P_engine
+P_t4 --> P_engine
+
+' --- intra-pipeline deps ---
+P_sched --> P_bat
+P_sched --> P_spec
+
+' --- inbound → outbound / pipeline (deliberate back-edges) ---
+I_bat   --> O_inv  : "InverterController"
+I_grid  --> O_inv  : "normalize_power_to_kw"
+I_mode  --> O_inv
+I_mode  --> P_spec : "decode_mode"
+I_price --> P_tariff : "tariff helpers"
+
+' --- outbound internal ---
+O_icm --> O_inv
+O_icm --> P_spec   : "build_specs"
+
+' --- root entries → orchestration ---
+R_init --> ORCH_coord
+R_init --> ORCH_dbg
+R_sens --> ORCH_coord
+R_sw   --> ORCH_coord
+R_cfg  --> O_inv
+
+note bottom of O_icm
+  Replaces the historical
+  outbound/event_router.py.
+  Dispatch is no longer event-driven —
+  the Schedule encodes the target mode
+  and this module reads it directly.
+end note
+
+note bottom of P_spec
+  Small hub. Imported by:
+    * pipeline/schedule.py        (select_mode)
+    * outbound/inverter_control_module.py (build_specs)
+    * inbound/inverter_mode.py    (decode_mode)
+end note
 
 note bottom of P_prof
-  Implemented as pure helpers; types in contract/models.py;
-  exercised only by tests/test_profitability.py.
-  See docs/MODULES.md §9 for the integration tail.
+  Wired as ProfitabilityNode (Tier 2).
+  PriceHistory primary supplied by
+  the coordinator from a persistent
+  DailyPeak store.
 end note
 
 note bottom of P_bl
-  base_load_missing.md items are merged
-  (translator, persistence, nodes, sensors).
-  Doc retained for 0.2 kW stub + local-tz rationale.
+  base_load_missing.md items are merged.
+  Doc retained for the 0.2 kW stub and
+  local-tz bucketing rationale.
 end note
 
 @enduml

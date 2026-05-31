@@ -35,7 +35,7 @@ The battery module produces a normalised **`BatteryStatus`** snapshot that combi
 What this module deliberately does **not** do:
 
 - It does not consume `EstimatedCapacity`. Total capacity is the **configured nominal** value, not the learned one. The learned capacity stays on `BatteryState`, which is a separate type produced by `BatteryStateNode`.
-- It does not enforce SoC bounds (`min_soc`, `max_soc`). Those are policy applied by the optimizer; this module reports the raw observed SoC.
+- It does not enforce SoC bounds (`min_soc`, `max_soc`). Those are policy applied by the scheduler; this module reports the raw observed SoC.
 
 ---
 
@@ -54,7 +54,7 @@ Combine live telemetry with configured limits into a `BatteryStatus`. There is n
 
 ## 3. Inputs
 
-**`BatteryReading`** (`contract/models.py`) — produced by `inbound.translators.BatteryTranslator`. Carries `soc`, `power_kw`, `grid_power_kw`, and `household_load_kw`. This module reads only `soc`; the other fields are consumed elsewhere.
+**`BatteryReading`** (`contract/models.py`) — produced by `inbound.battery.BatteryTranslator`. Carries `soc`, `power_kw`, `grid_power_kw`, and `household_load_kw`. This module reads only `soc`; the other fields are consumed elsewhere.
 
 **`BatteryConfig`** — user-configured battery parameters, built once at coordinator setup from the config entry. This module reads `nominal_capacity_kwh`, `max_charge_power_kw`, and `max_discharge_power_kw`. Fields used by other layers (`purchase_price_eur`, `rated_cycle_life`, `min_soc`, `max_soc`, `round_trip_efficiency`, `nominal_voltage_v`) are ignored here.
 
@@ -107,13 +107,13 @@ No rounding is applied — the value is exact within `float` precision. Edge cas
 | `BatteryState` | `estimated_capacity_kwh` | `CapacityEstimator` — learned over time |
 | `BatteryStatus` | `total_capacity_kwh` | `BatteryConfig.nominal_capacity_kwh` — fixed user config |
 
-`BatteryState` is what the optimizer and degradation model consume (they need the *real* usable capacity). `BatteryStatus` is the user-facing snapshot exposed via `coordinator.data["battery_status"]`. They are intentionally separate — replacing one with the other would conflate "what the optimizer reasons about" with "what the user sees".
+`BatteryState` is what the scheduler and degradation model consume (they need the *real* usable capacity). `BatteryStatus` is the user-facing snapshot exposed via `coordinator.data["battery_status"]`. They are intentionally separate — replacing one with the other would conflate "what the scheduler reasons about" with "what the user sees".
 
 ---
 
 ## 7. Integration in the DAG
 
-`BatteryStatusNode` (`pipeline/nodes.py`):
+`BatteryStatusNode` (`pipeline/nodes/tier1.py`):
 
 ```python
 tier = 1

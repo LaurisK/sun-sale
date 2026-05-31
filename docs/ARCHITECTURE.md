@@ -5,8 +5,8 @@ End-to-end description of the tiered observer DAG that drives every sunSale upda
 | | |
 |---|---|
 | **Status** | Implemented |
-| **Pattern** | Translation layer + inbound normalisers + tiered observer DAG + event router |
-| **HA boundary** | HA imports confined to root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/`, and `outbound/inverter.py`. `inbound/translators.py` does not import HA but receives `hass` at runtime to read `hass.states`. All other modules are pure Python. |
+| **Pattern** | Translation layer + inbound normalisers + tiered observer DAG + post-DAG inverter control module |
+| **HA boundary** | HA imports confined to root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/`, and `outbound/inverter.py`. Inbound translators (`inbound/*.py`) do not import HA — each accepts a duck-typed `hass` at runtime to read `hass.states`. All other modules are pure Python. |
 
 ## Contents
 
@@ -28,42 +28,59 @@ End-to-end description of the tiered observer DAG that drives every sunSale upda
 HA state machine
       │  (read once per cycle, parallel)
       ▼
-┌─────────────────────────────────────────────────────────┐
-│  Translation Layer        inbound/translators.py        │
-│                                                         │
-│  NordpoolTranslator   →  NordpoolData                   │
-│  SolarTranslator      →  SolarData                      │
-│  BatteryTranslator    →  BatteryReading                 │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  Translation Layer        inbound/*.py                      │
+│                                                             │
+│  NordpoolTranslator      →  NordpoolData                    │
+│  SolarTranslator         →  SolarData                       │
+│  BatteryTranslator       →  BatteryReading                  │
+│  GenerationTranslator    →  GenerationReading               │
+│  PvPowerTranslator       →  PvPowerReading                  │
+│  GridObserver / *Total   →  GridPowerReading / *TodayReading│
+│  HouseholdLoad / *Cons.  →  HouseholdLoad/Consumption       │
+│  InverterModeTranslator  →  InverterModeReading             │
+└─────────────────────────────────────────────────────────────┘
       │  typed primary data (dict[type, Any])
-      │  + YesterdayPrices, EstimatedCapacity (injected by coordinator)
+      │  + YesterdayPrices, EstimatedCapacity, PriceHistory,
+      │    *History primaries (injected by coordinator)
       ▼
-┌─────────────────────────────────────────────────────────┐
-│  DAG Engine               pipeline/dag_engine.py        │
-│                                                         │
-│  T1  PricingNode      BatteryStateNode                  │
-│  T2  GenerationNode   DegradationNode                   │
-│  T3  LockoutNode      ChargingProfileNode               │
-│  T4  OptimizerNode                                      │
-│                                                         │
-│  Pure-Python helpers used by nodes:                     │
-│    inbound/pricing.py     (PriceSeries assembly)        │
-│    inbound/forecast.py    (GenerationSeries assembly)   │
-│    pipeline/tariff.py     (buy/sell formula)            │
-│    pipeline/battery.py    (capacity + degradation)      │
-│    pipeline/calculator.py        (lockout windows)      │
-│    pipeline/charging_profile.py  (solar disposition)    │
-│    pipeline/optimizer.py         (greedy pair-match)    │
-└─────────────────────────────────────────────────────────┘
-      │  ControlEvents
+┌─────────────────────────────────────────────────────────────┐
+│  DAG Engine               pipeline/dag_engine.py            │
+│  DAG Nodes                pipeline/nodes/tier{1..4}.py      │
+│                                                             │
+│  T1  PricingNode     BatteryStateNode    BatteryStatusNode  │
+│      BaseLoadProfileNode                                    │
+│  T2  GenerationNode  ObservedGenerationNode  ObservedGridNode│
+│      DegradationNode BatteryRuntimeNode  ProfitabilityNode  │
+│  T3  ChargingProfileNode  LockoutNode                       │
+│      ForecastAccuracyNode  MonthlyBillNode                  │
+│  T4  ScheduleNode                                           │
+│                                                             │
+│  Pure-Python helpers used by nodes:                         │
+│    inbound/pricing.py        (PriceSeries assembly)         │
+│    inbound/forecast.py       (GenerationSeries assembly)    │
+│    inbound/grid.py           (ObservedGridSeries assembly)  │
+│    pipeline/tariff.py        (buy/sell formula)             │
+│    pipeline/battery.py       (capacity + degradation)       │
+│    pipeline/calculation.py   (lockout windows)              │
+│    pipeline/charging_profile.py (solar disposition)         │
+│    pipeline/schedule.py      (greedy pair-match)            │
+│    pipeline/storage_mode_specs.py (planner ↔ StorageMode)   │
+│    pipeline/profitability.py (rolling daily-peak percentile)│
+│    pipeline/monthly_bill.py  (running bill = carry + live)  │
+│    pipeline/base_load.py     (P10 baseload profile)         │
+│    pipeline/forecast_accuracy.py (MAE/bias/MAPE + EMAs)     │
+└─────────────────────────────────────────────────────────────┘
+      │  Schedule (with StorageMode per slot)
       ▼
-┌─────────────────────────────────────────────────────────┐
-│  Event Router             outbound/event_router.py      │
-│  → InverterController     outbound/inverter.py          │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  InverterControlModule    outbound/inverter_control_module  │
+│  → InverterController     outbound/inverter.py              │
+│  (observe → plan → act; act gated by automation switch)     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-The coordinator (`orchestration/coordinator.py`) owns the update schedule, feeds the three layers in order, manages the persistent yesterday/capacity stores, and collects results into `coordinator.data` for sensor entities.
+The coordinator (`orchestration/coordinator.py`) owns the update schedule, feeds the three layers in order, manages all persistent stores via `orchestration/persistent_store.py`, and collects results into `coordinator.data` for sensor entities.
 
 ---
 
@@ -82,26 +99,42 @@ custom_components/sun_sale/
 │   └── models.py                All dataclasses (configs, primary types, secondary types)
 │
 ├── inbound/                     HA-read translators + pure-Python normalisers
-│   ├── translators.py           Reads hass.states → primary types
-│   ├── pricing.py               build_price_series / build_price_series_72h
-│   ├── forecast.py              build_generation_series
-│   └── battery.py               build_battery_status
+│   ├── pricing.py               NordpoolTranslator + 72h PriceSeries assembly
+│   ├── forecast.py              SolarTranslator + GenerationSeries assembly
+│   ├── generation.py            GenerationTranslator + PvPowerTranslator + ObservedGenerationSeries
+│   ├── battery.py               BatteryTranslator + BatteryStatus assembly
+│   ├── grid.py                  GridObserver + import/export totals + ObservedGridSeries
+│   ├── household_load.py        HouseholdLoadTranslator (instantaneous kW)
+│   ├── household_consumption.py HouseholdConsumptionTranslator (today-total kWh)
+│   ├── inverter_mode.py         InverterModeTranslator (decoded StorageMode)
+│   └── solis_entity_resolver.py Auto-resolve solis_modbus entity IDs from the registry
 │
 ├── pipeline/                    Pure-Python DAG engine + node logic
 │   ├── dag_engine.py            DagNode, DagEngine, NodeContext, run_translators
-│   ├── nodes.py                 All DAG node classes
+│   ├── nodes/                   DAG nodes split by execution tier
+│   │   ├── tier1.py             Pricing / BatteryState / BatteryStatus / BaseLoadProfile
+│   │   ├── tier2.py             Generation / ObservedGeneration / ObservedGrid /
+│   │   │                        Degradation / BatteryRuntime / Profitability
+│   │   ├── tier3.py             ChargingProfile / Lockout / ForecastAccuracy / MonthlyBill
+│   │   └── tier4.py             ScheduleNode
 │   ├── tariff.py                buy_price / sell_price
 │   ├── battery.py               CapacityEstimator, degradation_cost_per_kwh
-│   ├── calculator.py            Lockout windows, slot decisions
+│   ├── calculation.py           Lockout windows, slot decisions
 │   ├── charging_profile.py      Per-slot solar disposition (battery/sell/no-export)
-│   └── optimizer.py             Greedy pair-match schedule
+│   ├── schedule.py              Greedy pair-match schedule → StorageMode per slot
+│   ├── storage_mode_specs.py    PlannerDecision / build_specs / decode_mode / select_mode
+│   ├── profitability.py         Rolling 30d daily-peak percentile (day-class normalised)
+│   ├── monthly_bill.py          Running monthly bill = persistent carry + live slot costs
+│   ├── base_load.py             24h P10 baseload profile + battery runtime estimate
+│   └── forecast_accuracy.py     Forecast vs observed deltas + EMA quality buckets
 │
-├── outbound/                    HA-write adapters + event routing
-│   ├── event_router.py          Deduplicates and routes ControlEvents
-│   └── inverter.py              InverterController (Solis + abstract)
+├── outbound/                    HA-write adapters + post-DAG actuation
+│   ├── inverter.py              InverterController (Solis V2 + generic), normalize_power_to_kw
+│   └── inverter_control_module.py  Observer + dispatcher: observe → plan → act per cycle
 │
 └── orchestration/               Glue: schedule, persistence, sensor dict mapping
     ├── coordinator.py           SunSaleCoordinator (DataUpdateCoordinator subclass)
+    ├── persistent_store.py      PersistentStore[T] — typed wrapper around HA Store
     └── debug_view.py            HTTP view exposing cycle inputs/outputs as JSON
 ```
 
@@ -111,11 +144,11 @@ Layering rule: `contract` imports nothing from the integration. `inbound`/`pipel
 
 ## 3. Layer 1 — Translation (inbound)
 
-**File:** `inbound/translators.py`
+**Files:** `inbound/{pricing,forecast,generation,battery,grid,household_load,household_consumption,inverter_mode,solis_entity_resolver}.py`
 
-Translators are the primary HA-state readers. The only other module that touches `hass.states` is `outbound/inverter.py`, which reads live device telemetry (SoC, etc.) on demand from its controller methods. All remaining modules are pure Python.
+Translators are the primary HA-state readers. The only other module that touches `hass.states` is `outbound/inverter.py`, which reads live device telemetry (SoC, register state, etc.) on demand from its controller methods. All remaining modules are pure Python.
 
-Translator modules themselves do **not** import the `homeassistant` package — they accept `hass: Any` and call methods on it at runtime, which keeps them unit-testable without an HA harness.
+Each translator lives in its own module — there is no monolithic `translators.py`. Translator modules themselves do **not** import the `homeassistant` package — they accept `hass: Any` and call methods on it at runtime, which keeps them unit-testable without an HA harness.
 
 Each translator has a synchronous `.parse(hass, now)` method (testable without HA) and an asynchronous `.translate(hass, config, raw_config, now)` wrapper called by the coordinator. Each declares an `output_type` class attribute used by `run_translators` to key the primary dict.
 
@@ -143,7 +176,7 @@ These live in `inbound/` because they normalise translator output into the shape
 
 ## 4. Layer 2 — DAG engine and nodes (pipeline)
 
-**Files:** `pipeline/dag_engine.py`, `pipeline/nodes.py`
+**Files:** `pipeline/dag_engine.py`, `pipeline/nodes/tier{1,2,3,4}.py` (re-exported through `pipeline/nodes/__init__.py`)
 
 ### DagNode contract
 
@@ -188,71 +221,73 @@ class NodeContext:
 
 ---
 
-## 5. Layer 3 — Event router and output adapters (outbound)
+## 5. Layer 3 — Inverter control module and output adapters (outbound)
 
-**Files:** `outbound/event_router.py`, `outbound/inverter.py`
+**Files:** `outbound/inverter_control_module.py`, `outbound/inverter.py`
 
-Nodes emit `ControlEvent` objects (defined in `contract/events.py`) alongside their computed result. The coordinator collects all events from the DAG run and passes them to `EventRouter.handle()` only when automation is enabled.
+Dispatch is **not** event-driven. Pipeline nodes currently return empty `ControlEvent` lists — the `Schedule` they produce already encodes the target `StorageMode` per slot. After the DAG run, the coordinator calls `InverterControlModule.tick(...)` once per cycle. It does three things in fixed order:
 
-```python
-@dataclass(frozen=True)
-class InverterActionEvent(ControlEvent):
-    action: Action       # IDLE | CHARGE_FROM_GRID | DISCHARGE_TO_GRID | CHARGE_FROM_SOLAR
-    power_kw: float
-```
-
-Dedup happens at two layers:
-
-- **Node-side** — `OptimizerNode` holds a mutable `_LastActionRef` cell that tracks the last action key. It only emits an event when the current-slot action differs from the previous cycle's.
-- **Router-side** — `EventRouter` additionally keeps `_last_inverter_key` and re-checks `f"{action}:{power_kw:.3f}"` before calling the inverter controller, so a duplicate inverter command would still be suppressed even if a node emitted one.
+1. **Observe.** Compare this cycle's `InverterModeReading` against the last entry of the rolling `InverterModeHistory`. If the decoded mode changed, append a new `InverterModeChange` and prune samples older than start-of-yesterday (local time).
+2. **Plan.** Look up the current `Schedule` slot, resolve its target mode into a concrete `StorageModeSpec` via `pipeline.storage_mode_specs.build_specs`.
+3. **Act (conditional).** When `automation_enabled` is True, call `InverterController.apply_mode(target, spec)`. With the switch off (default), the module is observer-only — history grows and the plan is exposed, but no Modbus writes happen.
 
 The `InverterController` contains all platform-specific HA service-call logic and is the only outbound writer to HA.
+
+> Historical note: the older `outbound/event_router.py` and the `_LastActionRef`/`_last_inverter_key` two-layer dedup it implemented are gone. The `ControlEvent` / `InverterActionEvent` types in `contract/events.py` are retained for forward use; today they flow through the pipeline as empty lists.
 
 ---
 
 ## 6. Orchestration and update cycle
 
-**Files:** `orchestration/coordinator.py`, `orchestration/debug_view.py`
+**Files:** `orchestration/coordinator.py`, `orchestration/persistent_store.py`, `orchestration/debug_view.py`
 
 `SunSaleCoordinator` is a `DataUpdateCoordinator` subclass with `update_interval = UPDATE_INTERVAL_MINUTES`.
 
 `async_setup()` (once at integration load):
 
-1. Build `TariffConfig`, `BatteryConfig` from the config entry.
-2. Instantiate `InverterController` (Solis or abstract).
-3. Build translator list, DAG node list, `DagEngine`, `EventRouter`.
-4. Load `CapacityEstimator` state from `STORAGE_KEY_CAPACITY`.
-5. Load yesterday entries (Nordpool + solar) from `STORAGE_KEY_YESTERDAY`.
+1. Build `TariffConfig`, `BatteryConfig`, `SunSaleConfig` from the config entry.
+2. Instantiate `InverterController` (Solis V2 or generic).
+3. Build translator list, DAG node list, `DagEngine`, `InverterControlModule`.
+4. Load all `PersistentStore[T]` instances (capacity, yesterday prices, generation/pv-power history, household-load history, grid power & today-totals, price-peak history, inverter-mode history, monthly-bill state, forecast-quality EMAs).
 
 `_async_update_data()` (every cycle):
 
 1. **Translate** — `run_translators(translators, hass, config, raw_config, now)` runs all translators in parallel; collect `primary` dict.
-2. **Inject yesterday pricing** — build `YesterdayPrices(entries=...)` from the persistent store (empty tuple if stored date is not exactly yesterday) and deposit into `primary`. This is what gives `inbound/pricing` ownership of the 72h yesterday→today→tomorrow span.
-3. **Stitch yesterday solar** — currently still done by mutating `SolarData.entries` in place (legacy path; counterpart for solar of what pricing now owns explicitly).
-4. **Persist today** — extract today's slots from `NordpoolData.entries` and `SolarData.entries` and write them to `STORAGE_KEY_YESTERDAY` so the next cycle can read them as yesterday.
-5. **Capacity estimation** — derive a `CapacityObservation` from the SoC delta vs. `_last_battery_reading`; add it to the `CapacityEstimator` and persist. Inject `EstimatedCapacity` into `primary`.
-6. **DAG run** — `DagEngine.run(primary, config, now)` executes tiers T1→T4; returns `secondary` dict + all emitted events.
-7. **Route events** — pass each event to `EventRouter.handle()` (only when `automation_enabled`); update `last_dispatched_action` / `last_dispatched_at` for the UI.
-8. **Build sensor dict** — map type-keyed `secondary` entries to the string-keyed dict sensors read (`"pricing"`, `"forecast"`, `"calculation"`, `"schedule"`, `"battery_state"`, `"degradation_cost"`, `"estimated_capacity"`, `"prices"`, `"grid_power_kw"`, `"battery_power_kw"`, `"household_load_kw"`).
+2. **Inject coordinator primaries** — append per-cycle observations (battery, household load, grid power, generation, pv power, inverter mode) into their respective `PersistentStore[T]`s with trim, then deposit history primaries (`HouseholdLoadHistory`, `GridPowerHistory`, `GridImport/ExportTodayHistory`, `GenerationHistory`, `PvPowerHistory`, `PriceHistory`, …) plus `YesterdayPrices` and `EstimatedCapacity` into `primary`. This is what gives the pipeline a full picture without the nodes touching persistence.
+3. **Stitch yesterday solar** — still done by mutating `SolarData.entries` in place (legacy path; counterpart for solar of what pricing owns explicitly via `YesterdayPrices`).
+4. **Persist today** — extract today's slots from `NordpoolData.entries` / `SolarData.entries` and write them to the yesterday store so the next cycle can read them as yesterday. End-of-day, append today's `DailyPeak` to the price-history store.
+5. **Capacity estimation** — derive a `CapacityObservation` from the SoC delta vs `_last_battery_reading`; add it to the `CapacityEstimator` and persist. Inject `EstimatedCapacity` into `primary`.
+6. **DAG run** — `DagEngine.run(primary, config, now)` executes tiers T1→T4; returns `secondary` dict (event lists are currently always empty).
+7. **Inverter control tick** — call `InverterControlModule.tick(...)`. Observes the current `InverterModeReading` against history, looks up the current `Schedule` slot, and (only when `automation_enabled`) applies the resolved `StorageModeSpec` via `InverterController.apply_mode`.
+8. **Build sensor dict** — map type-keyed `secondary` entries to the string-keyed dict sensors read (`"pricing"`, `"forecast"`, `"calculation"`, `"schedule"`, `"battery_state"`, `"battery_status"`, `"battery_runtime"`, `"degradation_cost"`, `"estimated_capacity"`, `"profitability"`, `"observed_generation"`, `"observed_grid"`, `"forecast_accuracy"`, `"monthly_bill"`, `"prices"`, `"grid_power_kw"`, `"battery_power_kw"`, `"household_load_kw"`, …).
 
 The coordinator contains no domain computation — it owns the schedule, the persistent stores, and the string↔type bridge to sensors.
 
-`debug_view.py` registers an HTTP view at `/api/sun_sale/debug` that exposes the most recent `primary` and `secondary` for inspection.
+`debug_view.py` registers an HTTP view at `/api/sun_sale/debug` exposing the most recent `primary` / `secondary` / inputs as JSON for the panel UI and `tools/integration_check.py`.
 
 ---
 
 ## 7. Node reference
 
-| Node | Tier | Consumes | Produces | Events |
-|---|---|---|---|---|
-| `PricingNode` | 1 | `NordpoolData`, `YesterdayPrices` | `PriceSeries` (72h) | — |
-| `BatteryStateNode` | 1 | `BatteryReading`, `EstimatedCapacity` | `BatteryState` | — |
-| `BatteryStatusNode` | 1 | `BatteryReading` | `BatteryStatus` | — |
-| `GenerationNode` | 2 | `SolarData`, `PriceSeries` | `GenerationSeries` | — |
-| `DegradationNode` | 2 | `BatteryState` | `DegradationCost` | — |
-| `ChargingProfileNode` | 3 | `BatteryStatus`, `GenerationSeries`, `PriceSeries` | `ChargingProfile` | — |
-| `LockoutNode` | 3 | `PriceSeries`, `GenerationSeries`, `BatteryState` | `CalculationResult` | — |
-| `OptimizerNode` | 4 | `PriceSeries`, `CalculationResult`, `GenerationSeries`, `BatteryState`, `DegradationCost` | `Schedule` | `InverterActionEvent` (on change) |
+| Node | Tier | Consumes | Produces |
+|---|---|---|---|
+| `PricingNode` | 1 | `NordpoolData`, `YesterdayPrices` | `PriceSeries` (72h) |
+| `BatteryStateNode` | 1 | `BatteryReading`, `EstimatedCapacity` | `BatteryState` |
+| `BatteryStatusNode` | 1 | `BatteryReading` | `BatteryStatus` |
+| `BaseLoadProfileNode` | 1 | `HouseholdLoadHistory` | `BaseLoadProfile` |
+| `GenerationNode` | 2 | `SolarData`, `PriceSeries` | `GenerationSeries` |
+| `ObservedGenerationNode` | 2 | `PvPowerHistory`, `GenerationHistory`, `PriceSeries` | `ObservedGenerationSeries` |
+| `DegradationNode` | 2 | `BatteryState` | `DegradationCost` |
+| `BatteryRuntimeNode` | 2 | `BatteryStatus`, `BaseLoadProfile` | `BatteryRuntimeEstimate` |
+| `ObservedGridNode` | 2 | `GridPowerHistory`, `GridImportTodayHistory`, `GridExportTodayHistory`, `PriceSeries` | `ObservedGridSeries` |
+| `ProfitabilityNode` | 2 | `PriceSeries`, `PriceHistory` | `ProfitabilityScore` |
+| `ChargingProfileNode` | 3 | `BatteryStatus`, `GenerationSeries`, `PriceSeries` | `ChargingProfile` |
+| `ForecastAccuracyNode` | 3 | `GenerationSeries`, `ObservedGenerationSeries` | `ForecastAccuracyResult` |
+| `MonthlyBillNode` | 3 | `PriceSeries`, `ObservedGridSeries` | `MonthlyBillResult` |
+| `LockoutNode` | 3 | `PriceSeries`, `GenerationSeries`, `BatteryState` | `CalculationResult` |
+| `ScheduleNode` | 4 | `PriceSeries`, `CalculationResult`, `GenerationSeries`, `BatteryState`, `DegradationCost`, `ChargingProfile` | `Schedule` |
+
+All nodes currently return empty event lists — dispatch is handled by `InverterControlModule.tick()` after the DAG run, using the `Schedule`'s per-slot `StorageMode`.
 
 ---
 
@@ -281,7 +316,14 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 | `DegradationCost` | `DegradationNode` | `value_kwh: float` |
 | `CalculationResult` | `LockoutNode` | `slots: tuple[SlotDecision, ...]`, `feed_in_lockout_windows`, `total_negative_sale_kwh`, `computed_at` |
 | `ChargingProfile` | `ChargingProfileNode` | `slots: tuple[ChargingProfileSlot, ...]` (today's remaining; `mode ∈ {solar_charge, sell, no_export, idle}`), `free_capacity_kwh`, `today_remaining_generation_kwh`, `solar_exceeds_capacity`, `allocated_solar_kwh`, `total_no_export_kwh`, `computed_at` |
-| `Schedule` | `OptimizerNode` | `slots: list[ScheduleSlot]`, `total_expected_profit_eur`, `degradation_cost_per_kwh`, `computed_at` |
+| `Schedule` | `ScheduleNode` | `slots: list[ScheduleSlot]` (each carries target `StorageMode`), `total_expected_profit_eur`, `degradation_cost_per_kwh`, `computed_at` |
+| `ObservedGenerationSeries` | `ObservedGenerationNode` | per-slot kWh from differenced today-total + averaged PV power; end-of-day counter correction |
+| `ObservedGridSeries` | `ObservedGridNode` | per-slot gross `import_kwh` / `export_kwh` (split per sample), `today_import_total`, `today_export_total` |
+| `BatteryRuntimeEstimate` | `BatteryRuntimeNode` | hours of household runtime from current SoC against the P10 baseload profile |
+| `BaseLoadProfile` | `BaseLoadProfileNode` | 24 hourly P10 kW buckets derived from the household-load history |
+| `ProfitabilityScore` | `ProfitabilityNode` | `score: float ∈ [0, 1]` (None until ≥ MIN_HISTORY_DAYS samples), `today_peak_eur_kwh`, `day_class`, window |
+| `ForecastAccuracyResult` | `ForecastAccuracyNode` | `errors: ForecastErrorSeries`, EMA buckets (intensity / position / time-of-day) |
+| `MonthlyBillResult` | `MonthlyBillNode` | `live_slots`, `carry_eur`, `running_total_eur`, `previous_month_total_eur` |
 
 `PriceSlot` carries `buy_eur_kwh`, `sell_eur_kwh` (can be negative or zero), `spot_eur_kwh`, and `sources: tuple[str, ...]` for diagnostics. Sellability (the strict `> 0` check) lives downstream in the charging-profile stage.
 
@@ -289,7 +331,7 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 
 ## 9. Key design decisions
 
-**HA boundary.** HA imports are confined to the root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/coordinator.py`, `orchestration/debug_view.py`, and the outbound controller (`outbound/inverter.py`). `inbound/translators.py` reads `hass.states` but never imports the `homeassistant` package — it works on duck-typed `hass`. Every other module is pure Python and testable with plain `pytest` without an HA harness.
+**HA boundary.** HA imports are confined to the root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/coordinator.py`, `orchestration/persistent_store.py`, `orchestration/debug_view.py`, and the outbound controller (`outbound/inverter.py`). Inbound translators read `hass.states` but never import the `homeassistant` package — they work on duck-typed `hass`. Every other module is pure Python and testable with plain `pytest` without an HA harness.
 
 **Sub-package layering enforces direction.** `contract` depends on nothing. `inbound` / `pipeline` / `outbound` depend only on `contract`. `orchestration` is the only layer allowed to glue them. This is enforced by convention (and would surface as a circular import if violated).
 
@@ -297,8 +339,8 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 
 **Tier constraint enforced at wire-time.** `add_observer()` raises `TierViolationError` if `observer.tier <= subject.tier`. This catches dependency graph mistakes during integration startup, not at runtime.
 
-**Events vs. return values.** Nodes return their computed data *and* a list of `ControlEvent` objects. Events signal side-effects (send an inverter command); the return value is data that flows to downstream nodes. Keeping them separate means the engine can route them independently.
+**Events vs. return values (legacy contract).** `DagNode._compute` still returns `(result, list[ControlEvent])` so the type signature accommodates side-effect emission. In the current code every node returns an empty event list — actuation moved into the post-DAG `InverterControlModule`, which reads the `Schedule`'s per-slot `StorageMode` directly. The event-tuple shape is kept for forward use without forcing a contract change if a future node needs to emit something orthogonal to the schedule.
 
-**Two-layer deduplication.** `OptimizerNode` suppresses emitting an event when the current-slot action key matches the previous cycle (`_LastActionRef`). `EventRouter` additionally re-checks the inverter key (`_last_inverter_key`) before dispatching, giving belt-and-braces protection against duplicate inverter commands.
+**Post-DAG dispatch with idempotent application.** `InverterControlModule.tick()` is called once per cycle after the DAG. The `InverterController.apply_mode(mode, spec)` implementation is idempotent — applying the same target `StorageMode` twice is a no-op at the inverter level (Modbus writes are skipped when the readback already matches). This replaces the older `OptimizerNode` / `EventRouter` two-layer dedup with a simpler "apply the plan every cycle, let the controller short-circuit" pattern.
 
-**Coordinator-injected primary data.** `YesterdayPrices` and `EstimatedCapacity` are not translator outputs — they are stateful values the coordinator owns across cycles (loaded from `Store`, updated each cycle) and deposited into `primary` before `DagEngine.run()`. Treating them as primary data keeps DAG nodes stateless and the engine free of cross-cycle state.
+**Coordinator-injected primary data.** `YesterdayPrices`, `EstimatedCapacity`, and every `*History` primary are not translator outputs — they are stateful values the coordinator owns across cycles (loaded from `PersistentStore[T]`, appended-and-trimmed each cycle) and deposited into `primary` before `DagEngine.run()`. Treating them as primary data keeps DAG nodes stateless and the engine free of cross-cycle state.

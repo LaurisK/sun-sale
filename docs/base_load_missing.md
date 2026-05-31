@@ -57,7 +57,7 @@ Plus the secondary types produced by `base_load.py` itself (`BaseLoadSlot`, `Bas
 
 ## 3. New translator
 
-`HouseholdLoadTranslator` in `inbound/translators.py`. Pattern: clone of `GenerationTranslator` (`inbound/translators.py:337-368`).
+`HouseholdLoadTranslator` lives in its own module `inbound/household_load.py`. Pattern: clone of `GenerationTranslator` (now `inbound/generation.py`).
 
 **Requirements:**
 
@@ -146,7 +146,7 @@ Imports in `orchestration/coordinator.py` need the two new symbols.
 
 ## 6. DAG node registration
 
-Two nodes (defined in `pipeline/nodes.py` as part of the base_load implementation) need to be added to the `nodes` list in `coordinator.async_setup` (`orchestration/coordinator.py:280-291`):
+Two nodes (defined in `pipeline/nodes/tier1.py` and `pipeline/nodes/tier2.py` as part of the base_load implementation) need to be added to the `nodes` list in `coordinator.async_setup`:
 
 - `BaseLoadProfileNode()` — Tier 1, consumes `HouseholdLoadHistory`
 - `BatteryRuntimeNode()` — Tier 2, consumes `BatteryStatus`, `BaseLoadProfile`. Intentionally ignores `GenerationSeries` and `Schedule`: this is a worst-case "household-only depletion" reserve, comparable across cycles. Adding solar/schedule modelling is a separate ticket if needed.
@@ -177,9 +177,9 @@ New entities in `sensor.py`:
 
 ## 8. The 0.2 kW household-load stub
 
-**Current state.** `BatteryTranslator` calls `_read_household_load` (`inbound/translators.py:321-330`), which returns `_DEFAULT_HOUSEHOLD_LOAD_KW = 0.2` whenever the configured load sensor is missing, unavailable, or unparseable. The value lands in `BatteryReading.household_load_kw` and is consumed downstream by anything that needs an instantaneous load figure.
+**Current state.** `BatteryTranslator` calls `_read_household_load` (`inbound/battery.py`), which returns `_DEFAULT_HOUSEHOLD_LOAD_KW = 0.2` whenever the configured load sensor is missing, unavailable, or unparseable. The value lands in `BatteryReading.household_load_kw` and is consumed downstream by anything that needs an instantaneous load figure.
 
-**Why a stub at all.** Several downstream calculations (calculator, dashboard, schedule estimation) want a *number*, not `None`. A hardcoded 0.2 kW is a "warm-but-quiet house" guess — wrong, but never wildly wrong, and never zero.
+**Why a stub at all.** Several downstream calculations (calculation, dashboard, schedule estimation) want a *number*, not `None`. A hardcoded 0.2 kW is a "warm-but-quiet house" guess — wrong, but never wildly wrong, and never zero.
 
 **Why we keep the stub for now.** The new `HouseholdLoadTranslator` only feeds the *baseload history* — there it must signal absence with `None` so the percentile isn't polluted. The pre-existing `BatteryTranslator` path keeps its 0.2 kW fallback so the rest of the pipeline doesn't suddenly start seeing zeros or `None` on installs without a load sensor. The two paths intentionally diverge.
 
@@ -194,7 +194,7 @@ falling back to 0.2 kW only when the profile itself is sparse (`confidence is No
 **Action items for the takeover (separate ticket, do not bundle with base_load):**
 - Decide whether the lookup happens inside `BatteryTranslator` (needs profile injected — awkward) or inside a new tier-1 node `CurrentBaseLoadNode` that produces a `CurrentBaseLoad(value_kw)` primary-ish type for consumers. Probably the node — cleaner separation.
 - Audit current consumers of `BatteryReading.household_load_kw` and switch them to `CurrentBaseLoad` or equivalent.
-- Delete `_DEFAULT_HOUSEHOLD_LOAD_KW` from `inbound/translators.py` once nothing references it.
+- Delete `_DEFAULT_HOUSEHOLD_LOAD_KW` from `inbound/battery.py` once nothing references it.
 
 Until that ticket lands, **leave the 0.2 kW constant alone.** It is not a bug — it is the documented stub.
 
