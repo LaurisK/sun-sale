@@ -83,6 +83,8 @@
       this._g2Chart     = null;
       this._g3Chart     = null;
       this._overlayObserver = null;
+      this._overlayTimer    = null;
+      this._overlayInterval = null;
       this._initialized = false;
       this.attachShadow({ mode: 'open' });
     }
@@ -102,6 +104,8 @@
 
     disconnectedCallback() {
       if (this._overlayObserver) { this._overlayObserver.disconnect(); this._overlayObserver = null; }
+      if (this._overlayTimer != null)    { clearTimeout(this._overlayTimer);     this._overlayTimer    = null; }
+      if (this._overlayInterval != null) { clearInterval(this._overlayInterval); this._overlayInterval = null; }
       if (this._chart)     { this._chart.destroy();     this._chart     = null; }
       if (this._g1Chart)   { this._g1Chart.destroy();    this._g1Chart   = null; }
       if (this._g2Chart)   { this._g2Chart.destroy();    this._g2Chart   = null; }
@@ -1040,26 +1044,51 @@
       this._chart.render().then(() => {
         drawErrorOverlay(this._chart);
 
-        // Watch the inner SVG group ApexCharts owns — every zoom, pan, reset,
-        // legend toggle, or update wipes its children, which removes our
-        // hand-painted error overlay. The observer re-paints whenever our
-        // <g class="sunsale-error-overlay"> is missing. A `painting` guard +
-        // rAF batch breaks the self-trigger loop (appendChild → MutationRecord).
+        // Watch ApexCharts' DOM root — every zoom, pan, reset, legend toggle,
+        // or update wipes children inside it, which removes our hand-painted
+        // error overlay. We observe `this._chart.el` (the container passed to
+        // ApexCharts, which is stable across updates) rather than the inner
+        // SVG groups (which ApexCharts can replace wholesale on update),
+        // so the observer survives every internal re-render.
+        //
+        // Re-paint is debounced with setTimeout: each fresh mutation cancels
+        // the prior timer, so we paint once at the end of a burst. The
+        // `plot.querySelector(OVL_GROUP)` short-circuit prevents the
+        // appendChild → mutation → schedule loop. We deliberately avoid
+        // requestAnimationFrame because rAF is throttled to zero in
+        // background tabs — that previously stuck the painting guard at
+        // `true` and stopped all further re-paints until a manual refresh.
         if (this._overlayObserver) this._overlayObserver.disconnect();
-        const inner = this._chart.el?.querySelector('.apexcharts-inner');
-        if (inner && errorSlots.length) {
-          let painting = false;
-          this._overlayObserver = new MutationObserver(() => {
-            if (painting) return;
+        if (this._overlayTimer != null)    { clearTimeout(this._overlayTimer);     this._overlayTimer    = null; }
+        if (this._overlayInterval != null) { clearInterval(this._overlayInterval); this._overlayInterval = null; }
+        if (this._chart.el && errorSlots.length) {
+          const ensureOverlay = () => {
             const plot = this._chart?.el?.querySelector('.apexcharts-graphical');
             if (!plot) return;
             if (plot.querySelector('.' + OVL_GROUP)) return;
-            painting = true;
-            requestAnimationFrame(() => {
-              try { drawErrorOverlay(this._chart); } finally { painting = false; }
-            });
+            try { drawErrorOverlay(this._chart); }
+            catch (e) { console.warn('sunSale: overlay re-paint failed', e); }
+          };
+          const schedule = () => {
+            if (this._overlayTimer != null) clearTimeout(this._overlayTimer);
+            this._overlayTimer = setTimeout(() => {
+              this._overlayTimer = null;
+              ensureOverlay();
+            }, 80);
+          };
+          this._overlayObserver = new MutationObserver(() => {
+            const plot = this._chart?.el?.querySelector('.apexcharts-graphical');
+            if (!plot) { schedule(); return; }
+            if (plot.querySelector('.' + OVL_GROUP)) return;
+            schedule();
           });
-          this._overlayObserver.observe(inner, { childList: true, subtree: true });
+          this._overlayObserver.observe(this._chart.el, { childList: true, subtree: true });
+          // Safety net: if the observer ever misses a re-render (rare but
+          // possible if ApexCharts swaps the watched subtree wholesale before
+          // the observer attaches to the new one), this poll guarantees the
+          // overlay returns within ~400 ms. Cost: a single querySelector each
+          // tick, no work when the overlay is present.
+          this._overlayInterval = setInterval(ensureOverlay, 400);
         }
 
         // Manual tooltip. We listen on the chart container (not the plot SVG)

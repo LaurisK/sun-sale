@@ -910,6 +910,7 @@ class MonthlyBillSensor(_BaseSensor):
 
     _attr_name = "sunSale Monthly Bill"
     _attr_native_unit_of_measurement = "EUR"
+    _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
     _attr_icon = "mdi:currency-eur"
 
