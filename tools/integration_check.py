@@ -762,7 +762,7 @@ def check_pricing(snap: Snapshot) -> PricingCheckResult:
 
 @dataclass
 class CalculationCheckResult:
-    """Result of the calculation deep-check: sell_allowed logic vs pricing sell prices."""
+    """Result of the calculation deep-check: per-slot solar attribution vs pricing."""
 
     skipped: bool = False
     skip_reason: str = ""
@@ -777,13 +777,18 @@ class CalculationCheckResult:
 
 
 def check_calculation(snap: Snapshot) -> CalculationCheckResult:
-    """Verify calculation sell_allowed flags match the pricing sell-price sign.
+    """Verify per-slot negative-sale solar attribution matches pricing.
+
+    For each slot, ``expected_solar_negative_sale_kwh`` should equal
+    ``expected_solar_kwh`` when the slot's sell price is non-positive and 0
+    otherwise. The aggregate ``total_negative_sale_kwh`` should equal the sum
+    of per-slot values.
 
     Args:
         snap: Coordinator snapshot containing pipeline.calculation and pipeline.pricing.
 
     Returns:
-        CalculationCheckResult with per-slot sell_allowed comparisons and overall pass/fail.
+        CalculationCheckResult with per-slot rows and overall pass/fail.
     """
     result = CalculationCheckResult()
 
@@ -796,7 +801,7 @@ def check_calculation(snap: Snapshot) -> CalculationCheckResult:
     pricing = snap.pipeline.get("pricing")
     if not pricing:
         result.skipped = True
-        result.skip_reason = "pipeline.pricing is null (needed for expected sell_allowed)"
+        result.skip_reason = "pipeline.pricing is null (needed for expected lockout attribution)"
         return result
 
     result.module_slot_count = calc.get("slot_count", 0)
@@ -812,22 +817,25 @@ def check_calculation(snap: Snapshot) -> CalculationCheckResult:
     comp_neg_sale = 0.0
     for s in calc.get("slots") or []:
         start = s.get("start", "")
-        sell_act = s.get("sell_allowed", False)
         sell_price = price_by_start.get(start)
-        sell_exp = sell_price is not None and sell_price > 0.0
+        locked = sell_price is not None and sell_price <= 0.0
         solar_kwh = s.get("expected_solar_kwh", 0.0)
         neg_sale_kwh = s.get("expected_solar_negative_sale_kwh", 0.0)
         comp_neg_sale += neg_sale_kwh
         notes = list(s.get("notes") or [])
-        ok = sell_price is None or sell_act == sell_exp
+
+        if sell_price is None:
+            ok = True
+        else:
+            expected_neg = solar_kwh if locked else 0.0
+            ok = abs(neg_sale_kwh - expected_neg) <= 1e-4
         if not ok:
             result.mismatches.append(start)
             result.overall_ok = False
         result.slot_rows.append({
             "start": start,
             "sell_price": sell_price,
-            "sell_exp": sell_exp,
-            "sell_act": sell_act,
+            "locked": locked,
             "solar_kwh": solar_kwh,
             "neg_sale_kwh": neg_sale_kwh,
             "notes": notes,
@@ -3293,7 +3301,7 @@ class PricingCheckWidget(Static):
 
 
 class CalculationSlotsTable(Static):
-    """DataTable: Time | Sell (€) | Exp Sell? | Act Sell? | Solar (kWh) | Notes | ✓/✗."""
+    """DataTable: Time | Sell (€) | Locked? | Solar (kWh) | Neg Sale (kWh) | Notes | ✓/✗."""
 
     DEFAULT_CSS = """
     CalculationSlotsTable { height: auto; }
@@ -3304,7 +3312,7 @@ class CalculationSlotsTable(Static):
         """Initialise with the calculation check result.
 
         Args:
-            cc: Result of check_calculation() containing per-slot sell_allowed comparisons.
+            cc: Result of check_calculation() containing per-slot solar attribution.
         """
         super().__init__()
         self._cc = cc
@@ -3316,7 +3324,7 @@ class CalculationSlotsTable(Static):
     def on_mount(self) -> None:
         """Populate the DataTable with one row per calculation slot, date-separated."""
         table = self.query_one(DataTable)
-        table.add_columns("Time", "Sell (€)", "Exp Sell?", "Act Sell?", "Solar (kWh)", "Notes", "")
+        table.add_columns("Time", "Sell (€)", "Locked?", "Solar (kWh)", "Neg Sale (kWh)", "Notes", "")
         dim = "dim"
         prev_date = None
 
@@ -3338,25 +3346,25 @@ class CalculationSlotsTable(Static):
             ok = row["ok"]
             sp = row["sell_price"]
             sp_str = f"{sp:.4f}" if sp is not None else "—"
-            exp_str = "✓" if row["sell_exp"] else "✗"
-            act_str = "✓" if row["sell_act"] else "✗"
-            act_style = "" if ok else "red"
+            locked_str = "✓" if row["locked"] else "✗"
             solar = row["solar_kwh"]
+            neg = row["neg_sale_kwh"]
+            neg_style = "" if ok else "red"
             notes_str = ", ".join(row["notes"])[:30] if row["notes"] else ""
 
             table.add_row(
                 Text(time_str, style="cyan"),
                 Text(sp_str, style=dim if sp is None or sp == 0.0 else ""),
-                Text(exp_str, style=dim if not row["sell_exp"] else ""),
-                Text(act_str, style=act_style),
+                Text(locked_str, style=dim if not row["locked"] else ""),
                 Text(f"{solar:.4f}", style=dim if solar == 0 else ""),
+                Text(f"{neg:.4f}", style=neg_style if not ok else (dim if neg == 0 else "")),
                 Text(notes_str, style=dim),
                 Text("✓" if ok else "✗", style="green" if ok else "red"),
             )
 
 
 class CalculationCheckWidget(Static):
-    """Collapsible calculation deep-check: sell_allowed logic + lockout windows."""
+    """Collapsible calculation deep-check: negative-sale attribution + lockout windows."""
 
     DEFAULT_CSS = "CalculationCheckWidget { height: auto; }"
 

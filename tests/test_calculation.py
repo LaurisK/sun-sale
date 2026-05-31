@@ -1,9 +1,9 @@
 """Tests for calculation.py — pure Python, no HA required."""
 from datetime import datetime, timedelta, timezone
 
-from custom_components.sun_sale.pipeline.calculation import calculate, _coalesce_lockout_windows
+from custom_components.sun_sale.pipeline.calculation import calculate
 from custom_components.sun_sale.contract.models import (
-    BatteryState, GenerationSeries, GenerationSlot, SlotDecision,
+    BatteryState, GenerationSeries, GenerationSlot,
 )
 from custom_components.sun_sale.inbound.pricing import build_price_series
 from tests.conftest import BASE_DT, default_battery_state, default_tariff_config, make_price
@@ -42,7 +42,7 @@ def test_all_positive_prices_no_lockouts():
     prices = [make_price(h, 0.10) for h in range(24)]
     result = run(prices)
     assert result.feed_in_lockout_windows == ()
-    assert all(s.sell_allowed for s in result.slots)
+    assert all(s.expected_solar_negative_sale_kwh == 0.0 for s in result.slots)
     assert result.total_negative_sale_kwh == 0.0
 
 
@@ -75,7 +75,12 @@ def test_negative_sell_window_flagged():
     gen = _gen_series({h: 2.0 for h in range(10, 14)})
     result = calculate(ps, gen, default_battery_state(), NOW)
 
-    locked = [s for s in result.slots if not s.sell_allowed]
+    assert len(result.feed_in_lockout_windows) == 1
+    w = result.feed_in_lockout_windows[0]
+    assert w[0].hour == 10
+    assert w[1].hour == 14
+
+    locked = [s for s in result.slots if s.expected_solar_negative_sale_kwh > 0]
     assert len(locked) == 4
     assert all(10 <= s.start.hour < 14 for s in locked)
 
@@ -174,7 +179,7 @@ def test_no_paid_to_charge_on_positive_buy():
 
 
 # ---------------------------------------------------------------------------
-# sell_allowed does not affect expected_solar_kwh
+# Feed-in lockout does not affect expected_solar_kwh
 # ---------------------------------------------------------------------------
 
 def test_expected_solar_kwh_always_reported():

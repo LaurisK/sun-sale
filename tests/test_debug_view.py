@@ -56,7 +56,6 @@ def _make_calculation(price_series: PriceSeries) -> CalculationResult:
     slots = tuple(
         SlotDecision(
             start=s.start, end=s.end,
-            sell_allowed=s.sell_eur_kwh > 0,
             expected_solar_kwh=0.0,
             expected_solar_negative_sale_kwh=0.0,
             notes=(),

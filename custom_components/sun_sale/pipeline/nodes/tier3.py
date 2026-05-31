@@ -119,7 +119,7 @@ class LockoutNode(DagNode):
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[CalculationResult, list[ControlEvent]]:
-        """Detect feed-in lockout windows and per-slot sell_allowed flags."""
+        """Detect feed-in lockout windows and per-slot solar attribution."""
         price_series = ctx.require(PriceSeries)
         generation = ctx.require(GenerationSeries)
         battery_state = ctx.require(BatteryState)

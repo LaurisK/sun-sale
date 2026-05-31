@@ -6,7 +6,8 @@ returns a Schedule whose slots carry a Solis StorageMode (mapped via
 PlannerDecision).
 
 Algorithm: greedy pair-matching.
-  1. Enumerate all (buy_hour, sell_hour) pairs where buy < sell and sell_allowed=True.
+  1. Enumerate all (buy_hour, sell_hour) pairs where buy < sell and the sell
+     slot's sell_eur_kwh > 0 (feed-in is profitable).
   2. Rank by net profit per kWh descending.
   3. Greedily assign pairs, tracking per-slot available power and running SoC.
   4. Fill remaining hours with CHARGE_FROM_SOLAR (if solar available) or IDLE.
@@ -43,14 +44,15 @@ def optimize_schedule(
 ) -> Schedule:
     """Produce a future StorageMode schedule that maximises profit via greedy pair-matching.
 
-    Slots flagged sell_allowed=False in calc are excluded from discharge pairs.
-    Per-slot StorageMode is derived from the optimizer's internal PlannerDecision
-    via ``select_mode()``; when a ``charging_profile`` is provided, its per-slot
-    mode is consulted to distinguish HOARD vs STORE for solar slots.
+    Slots with non-positive sell prices are excluded from discharge pairs (feed-in
+    would cost rather than earn). Per-slot StorageMode is derived from the optimizer's
+    internal PlannerDecision via ``select_mode()``; when a ``charging_profile`` is
+    provided, its per-slot mode is consulted to distinguish HOARD vs STORE for solar
+    slots.
 
     Args:
         price_series: Full 72h price series (only future slots are scheduled).
-        calc: Calculator output with per-slot sell_allowed flags and solar estimates.
+        calc: Calculator output with per-slot solar estimates.
         battery_config: Battery limits (capacity, power, SoC bounds, efficiency).
         battery_state: Current SoC and estimated usable capacity.
         degradation_cost: EUR/kWh cycle wear cost (from DegradationNode).
@@ -201,7 +203,8 @@ def _rank_trade_pairs(
 ) -> list[tuple[int, int, float]]:
     """Enumerate all profitable (buy, sell) index pairs sorted by profit descending.
 
-    Sell slots with sell_allowed=False are excluded from the search.
+    Sell slots with non-positive sell_eur_kwh are excluded — exporting into a
+    negative sell price would cost money rather than earn it.
 
     Args:
         slots: Future (price_slot, decision) pairs in chronological order.
@@ -216,7 +219,7 @@ def _rank_trade_pairs(
     n = len(slots)
     for buy_idx in range(n):
         for sell_idx in range(buy_idx + 1, n):
-            if not slots[sell_idx][1].sell_allowed:
+            if slots[sell_idx][0].sell_eur_kwh <= 0:
                 continue
             profit = trade_profit_per_kwh(
                 slots[buy_idx][0].buy_eur_kwh,

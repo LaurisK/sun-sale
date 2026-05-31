@@ -323,7 +323,6 @@ class SlotDecision:
     """Per-slot decision flags produced by the Calculator stage."""
     start: datetime
     end: datetime
-    sell_allowed: bool              # False if sell_eur_kwh <= 0
     expected_solar_kwh: float       # expected generation this slot
     expected_solar_negative_sale_kwh: float  # production during negative-sale (reported only)
     notes: tuple[str, ...]          # e.g. ("battery_full_during_lockout", "paid_to_charge")

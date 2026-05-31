@@ -146,7 +146,6 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "slots": [
                     {
                         "start": s.start.isoformat(),
-                        "sell_allowed": s.sell_allowed,
                         "expected_solar_kwh": round(s.expected_solar_kwh, 4),
                         "expected_solar_negative_sale_kwh": round(s.expected_solar_negative_sale_kwh, 4),
                         "notes": list(s.notes),

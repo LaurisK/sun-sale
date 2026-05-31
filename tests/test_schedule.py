@@ -205,11 +205,11 @@ def test_simulate_soc_returns_none_on_underflow():
 
 
 # ---------------------------------------------------------------------------
-# sell_allowed flag respected
+# Feed-in lockout respected (negative sell price)
 # ---------------------------------------------------------------------------
 
 def _run_with_negative_sell_window(locked_hours: list[int]) -> "Schedule":
-    """Run optimizer with some hours marked sell_allowed=False."""
+    """Run optimizer with some hours having a negative sell price (locked out)."""
     from custom_components.sun_sale.contract.models import TariffConfig
     from custom_components.sun_sale.pipeline.calculation import calculate
     from custom_components.sun_sale.inbound.pricing import build_price_series
