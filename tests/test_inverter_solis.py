@@ -24,7 +24,7 @@ from custom_components.sun_sale.pipeline.storage_mode_specs import build_specs
 SOLIS_ENTITY_IDS = {
     "battery_soc":                "sensor.solis_battery_soc",
     "battery_power":              "sensor.solis_battery_power",
-    "grid_power":                 "sensor.solis_ac_grid_port_power",
+    "grid_power":                 "sensor.solis_meter_total_active_power",
     "storage_control_readback":   "sensor.solis_storage_control_word",
     "battery_max_charge_current":    "number.solis_battery_max_charge_current",
     "battery_max_discharge_current": "number.solis_battery_max_discharge_current",
@@ -316,10 +316,12 @@ def test_normalize_power_to_kw_handles_known_units():
     assert normalize_power_to_kw(3920.0, "garbage") == pytest.approx(3920.0)
 
 
-def test_get_grid_power_normalises_watts_to_kw():
+def test_get_grid_power_normalises_watts_to_kw_and_inverts_sign():
+    # solis_modbus convention: positive = inverter→grid (export). sunSale
+    # contract is positive = import, so the Solis controller negates.
     state_map = {SOLIS_ENTITY_IDS["grid_power"]: _State("3920", "W")}
     controller, _ = make_controller(state_map=state_map)
-    assert controller.get_grid_power() == pytest.approx(3.92)
+    assert controller.get_grid_power() == pytest.approx(-3.92)
 
 
 def test_get_battery_power_passes_through_kw():
@@ -334,7 +336,7 @@ def test_get_grid_power_returns_fallback_when_unavailable():
     assert controller.get_grid_power() == 0.0
 
 
-def test_get_grid_power_assumes_kw_when_unit_missing():
+def test_get_grid_power_assumes_kw_when_unit_missing_and_inverts_sign():
     state_map = {SOLIS_ENTITY_IDS["grid_power"]: _State("3.92", None)}
     controller, _ = make_controller(state_map=state_map)
-    assert controller.get_grid_power() == pytest.approx(3.92)
+    assert controller.get_grid_power() == pytest.approx(-3.92)

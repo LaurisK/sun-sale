@@ -214,7 +214,7 @@ def _inverter_solis_schema(d: dict) -> vol.Schema:
     return vol.Schema({
         _req(CONF_INVERTER_ENTITY_BATTERY_SOC, d, "sensor.solis_battery_soc"): _SENSOR_SOC,
         _req(CONF_INVERTER_ENTITY_BATTERY_POWER, d, "sensor.solis_battery_power"): _SENSOR_POWER,
-        _req(CONF_INVERTER_ENTITY_GRID_POWER, d, "sensor.solis_ac_grid_port_power"): _SENSOR_POWER,
+        _req(CONF_INVERTER_ENTITY_GRID_POWER, d, "sensor.solis_meter_total_active_power"): _SENSOR_POWER,
         _req(CONF_INVERTER_SOLIS_STORAGE_CONTROL_READBACK, d, DEFAULT_SOLIS_STORAGE_CONTROL_READBACK): _SENSOR,
         _req(CONF_INVERTER_SOLIS_BATTERY_MAX_CHARGE_CURRENT, d, DEFAULT_SOLIS_BATTERY_MAX_CHARGE_CURRENT): _NUMBER,
         _req(CONF_INVERTER_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT, d, DEFAULT_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT): _NUMBER,

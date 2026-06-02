@@ -54,21 +54,40 @@ class GridObserver:
 
     output_type = GridPowerReading
 
-    def __init__(self, entity_id: str) -> None:
+    def __init__(
+        self,
+        entity_id: str,
+        invert_sign: bool = False,
+        fallback_entity_id: str = "",
+    ) -> None:
         """Initialise with the HA entity ID of the grid power sensor.
 
         Args:
-            entity_id: Entity ID of the grid power sensor (W or kW,
-                       positive = import from grid, negative = export).
+            entity_id: Entity ID of the primary grid power sensor (W or kW).
+                       The sunSale-internal contract is positive = import
+                       from grid; raw values are negated when ``invert_sign``
+                       is set so the rest of the pipeline can treat them as
+                       already in sunSale convention.
+            invert_sign: When True, the value read from the entity is
+                       multiplied by -1 before being returned. Used to
+                       adapt the solis_modbus convention (positive =
+                       inverter→grid) to sunSale's positive=import contract.
+            fallback_entity_id: Optional secondary entity consulted when the
+                       primary is missing or its state is unavailable (Solis
+                       CT-only installs where the Modbus-meter register is
+                       empty fall back to the AC grid port power, which
+                       shares the same sign convention as the meter).
         """
         self._entity_id = entity_id
+        self._invert_sign = invert_sign
+        self._fallback_entity_id = fallback_entity_id
 
     def parse(self, hass: Any, now: datetime) -> GridPowerReading | None:
         """Read the grid power entity and return a timestamped reading in kW.
 
-        Returns None (not a zero stub) when the entity is absent or
-        unavailable so the persisted history is not polluted with false
-        readings.
+        Returns None (not a zero stub) when neither the primary nor fallback
+        entity yields a numeric state, so the persisted history is not
+        polluted with false readings.
 
         Args:
             hass: Home Assistant instance.
@@ -77,9 +96,24 @@ class GridObserver:
         Returns:
             GridPowerReading in kW, or None when unavailable.
         """
-        if not self._entity_id:
+        power_kw = self._read_kw(hass, self._entity_id)
+        if power_kw is None and self._fallback_entity_id:
+            power_kw = self._read_kw(hass, self._fallback_entity_id)
+        if power_kw is None:
             return None
-        state = hass.states.get(self._entity_id)
+        if self._invert_sign:
+            power_kw = -power_kw
+        return GridPowerReading(
+            power_kw=power_kw,
+            timestamp=now,
+        )
+
+    @staticmethod
+    def _read_kw(hass: Any, entity_id: str) -> float | None:
+        """Read ``entity_id`` and normalise to kW; return None on missing state."""
+        if not entity_id:
+            return None
+        state = hass.states.get(entity_id)
         if state is None or state.state in ("unavailable", "unknown", ""):
             return None
         try:
@@ -87,10 +121,7 @@ class GridObserver:
         except (ValueError, TypeError):
             return None
         unit = str((state.attributes or {}).get("unit_of_measurement") or "").strip()
-        return GridPowerReading(
-            power_kw=normalize_power_to_kw(value, unit),
-            timestamp=now,
-        )
+        return normalize_power_to_kw(value, unit)
 
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime

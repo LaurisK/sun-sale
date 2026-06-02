@@ -151,8 +151,21 @@ class InverterController:
         return self._read_power_kw("battery_power", fallback=0.0)
 
     def get_grid_power(self) -> float:
-        """Return grid power in kW (positive = importing). 0.0 when unavailable."""
-        return self._read_power_kw("grid_power", fallback=0.0)
+        """Return grid power in kW (positive = importing). 0.0 when unavailable.
+
+        For Solis the underlying ``meter_total_active_power`` register uses
+        the inverter-centric convention (positive = inverter→grid), so the
+        raw value is negated to match sunSale's positive=import contract.
+        On CT-only installs the meter register is empty; the controller
+        then falls back to ``ac_grid_port_power`` which shares the same
+        sign convention.
+        """
+        raw = self._read_power_kw_with_fallback(
+            "grid_power", "grid_power_fallback", fallback=0.0,
+        )
+        if self._platform == InverterPlatform.SOLIS:
+            return -raw
+        return raw
 
     # ------------------------------------------------------------------ #
     # State reads — Solis state machine (consumed by InverterModeTranslator) #
@@ -369,3 +382,39 @@ class InverterController:
             return fallback
         unit = str(state.attributes.get("unit_of_measurement") or "").strip()
         return normalize_power_to_kw(value, unit)
+
+    def _read_power_kw_with_fallback(
+        self, primary_key: str, fallback_key: str, fallback: float,
+    ) -> float:
+        """Read primary; if its entity is missing/unavailable, try fallback.
+
+        Used for grid-power on Solis CT-only installs where the Modbus-meter
+        register may be empty — the inverter AC port reading then stands in.
+
+        Args:
+            primary_key: Entity-ID map key to try first.
+            fallback_key: Entity-ID map key consulted only when primary is
+                          unset or its HA state is unavailable / unparseable.
+            fallback: Value returned when neither entity yields a number.
+
+        Returns:
+            Sensor value normalised to kW, or ``fallback``.
+        """
+        if self._has_live_state(self._entity_ids.get(primary_key, "")):
+            return self._read_power_kw(primary_key, fallback=fallback)
+        if self._has_live_state(self._entity_ids.get(fallback_key, "")):
+            return self._read_power_kw(fallback_key, fallback=fallback)
+        return fallback
+
+    def _has_live_state(self, entity_id: str) -> bool:
+        """Return True when ``entity_id`` is set and its HA state is numeric."""
+        if not entity_id:
+            return False
+        state = self._hass.states.get(entity_id)
+        if state is None or state.state in ("unavailable", "unknown", ""):
+            return False
+        try:
+            float(state.state)
+        except (TypeError, ValueError):
+            return False
+        return True

@@ -728,6 +728,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             }
         inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
         self._grid_power_entity_id = inverter_entity_ids.get("grid_power", "")
+        grid_power_fallback_entity_id = inverter_entity_ids.get("grid_power_fallback", "")
         grid_import_total_entity_id = inverter_entity_ids.get("grid_import_energy_today", "")
         grid_export_total_entity_id = inverter_entity_ids.get("grid_export_energy_today", "")
 
@@ -749,7 +750,11 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 inverter=inverter,
                 household_load_entity=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
             ),
-            GridObserver(entity_id=self._grid_power_entity_id),
+            GridObserver(
+                entity_id=self._grid_power_entity_id,
+                invert_sign=(inverter_platform == InverterPlatform.SOLIS),
+                fallback_entity_id=grid_power_fallback_entity_id,
+            ),
             GridImportTotalTranslator(entity_id=grid_import_total_entity_id),
             GridExportTotalTranslator(entity_id=grid_export_total_entity_id),
             GenerationTranslator(

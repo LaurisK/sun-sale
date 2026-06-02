@@ -22,7 +22,16 @@ _SENSOR_SUFFIXES: dict[str, str] = {
     # Telemetry — read every cycle.
     "battery_soc":                "solis_modbus_inverter_battery_soc",
     "battery_power":              "solis_modbus_inverter_battery_power",
-    "grid_power":                 "solis_modbus_inverter_ac_grid_port_power",
+    # Net grid flow measured at the external CT meter — represents what
+    # actually crosses the grid connection (positive = inverter→grid in the
+    # solis_modbus convention; sunSale flips this to its positive=import
+    # contract inside GridObserver / InverterController). The AC port power
+    # would mix in self-consumed energy and is not what we want.
+    "grid_power":                 "solis_modbus_inverter_meter_total_active_power",
+    # Fallback for CT-only installs where the Modbus-meter register is empty
+    # — the inverter AC port reading is still populated and shares the same
+    # sign convention, so the boundary sign-flip applies unchanged.
+    "grid_power_fallback":        "solis_modbus_inverter_ac_grid_port_power",
     # Daily-resetting energy counters used as authoritative totals for the
     # ObservedGridSeries end-of-day correction (see inbound/grid.py).
     "grid_import_energy_today":   "solis_modbus_inverter_energy_imported_today",
