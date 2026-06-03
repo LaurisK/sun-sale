@@ -752,8 +752,14 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ),
             GridObserver(
                 entity_id=self._grid_power_entity_id,
-                invert_sign=(inverter_platform == InverterPlatform.SOLIS),
+                # The Solis auto-detect path now points at ``grid_power_net``
+                # (derived sensor — already sunSale convention) so the
+                # primary does not need a sign-flip; only the AC-port
+                # fallback does. Non-Solis platforms supply an
+                # already-correct entity and never flip either slot.
+                invert_sign=False,
                 fallback_entity_id=grid_power_fallback_entity_id,
+                fallback_invert_sign=(inverter_platform == InverterPlatform.SOLIS),
             ),
             GridImportTotalTranslator(entity_id=grid_import_total_entity_id),
             GridExportTotalTranslator(entity_id=grid_export_total_entity_id),

@@ -153,19 +153,22 @@ class InverterController:
     def get_grid_power(self) -> float:
         """Return grid power in kW (positive = importing). 0.0 when unavailable.
 
-        For Solis the underlying ``meter_total_active_power`` register uses
-        the inverter-centric convention (positive = inverter→grid), so the
-        raw value is negated to match sunSale's positive=import contract.
-        On CT-only installs the meter register is empty; the controller
-        then falls back to ``ac_grid_port_power`` which shares the same
-        sign convention.
+        On Solis the primary auto-detected entity is the derived
+        ``grid_power_net`` sensor, which already matches sunSale's
+        positive=import convention so no sign-flip is applied. When the
+        primary is missing / stale (e.g. the Modbus meter chain dropping
+        out), the controller falls back to ``ac_grid_port_power`` whose
+        positive=inverter→grid convention requires a sign flip.
         """
-        raw = self._read_power_kw_with_fallback(
-            "grid_power", "grid_power_fallback", fallback=0.0,
-        )
+        primary = self._read_power_kw_optional("grid_power")
+        if primary is not None:
+            return primary
+        fallback = self._read_power_kw_optional("grid_power_fallback")
+        if fallback is None:
+            return 0.0
         if self._platform == InverterPlatform.SOLIS:
-            return -raw
-        return raw
+            return -fallback
+        return fallback
 
     # ------------------------------------------------------------------ #
     # State reads — Solis state machine (consumed by InverterModeTranslator) #
@@ -383,38 +386,29 @@ class InverterController:
         unit = str(state.attributes.get("unit_of_measurement") or "").strip()
         return normalize_power_to_kw(value, unit)
 
-    def _read_power_kw_with_fallback(
-        self, primary_key: str, fallback_key: str, fallback: float,
-    ) -> float:
-        """Read primary; if its entity is missing/unavailable, try fallback.
+    def _read_power_kw_optional(self, key: str) -> float | None:
+        """Read a power entity, returning None when unset / unavailable / stale.
 
-        Used for grid-power on Solis CT-only installs where the Modbus-meter
-        register may be empty — the inverter AC port reading then stands in.
+        Mirrors ``_read_power_kw`` but distinguishes "no reading" (None) from
+        "reading happens to be zero" (0.0). Used by callers that want to chain
+        primary → fallback entities without a sentinel value getting in the way.
 
         Args:
-            primary_key: Entity-ID map key to try first.
-            fallback_key: Entity-ID map key consulted only when primary is
-                          unset or its HA state is unavailable / unparseable.
-            fallback: Value returned when neither entity yields a number.
+            key: Entity-ID map key (e.g. "grid_power", "grid_power_fallback").
 
         Returns:
-            Sensor value normalised to kW, or ``fallback``.
+            Sensor value normalised to kW, or None when the entity isn't
+            configured / its state isn't a number.
         """
-        if self._has_live_state(self._entity_ids.get(primary_key, "")):
-            return self._read_power_kw(primary_key, fallback=fallback)
-        if self._has_live_state(self._entity_ids.get(fallback_key, "")):
-            return self._read_power_kw(fallback_key, fallback=fallback)
-        return fallback
-
-    def _has_live_state(self, entity_id: str) -> bool:
-        """Return True when ``entity_id`` is set and its HA state is numeric."""
+        entity_id = self._entity_ids.get(key, "")
         if not entity_id:
-            return False
+            return None
         state = self._hass.states.get(entity_id)
         if state is None or state.state in ("unavailable", "unknown", ""):
-            return False
+            return None
         try:
-            float(state.state)
+            value = float(state.state)
         except (TypeError, ValueError):
-            return False
-        return True
+            return None
+        unit = str(state.attributes.get("unit_of_measurement") or "").strip()
+        return normalize_power_to_kw(value, unit)

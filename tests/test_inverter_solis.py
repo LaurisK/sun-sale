@@ -24,7 +24,8 @@ from custom_components.sun_sale.pipeline.storage_mode_specs import build_specs
 SOLIS_ENTITY_IDS = {
     "battery_soc":                "sensor.solis_battery_soc",
     "battery_power":              "sensor.solis_battery_power",
-    "grid_power":                 "sensor.solis_meter_total_active_power",
+    "grid_power":                 "sensor.solis_grid_power_net",
+    "grid_power_fallback":        "sensor.solis_ac_grid_port_power",
     "storage_control_readback":   "sensor.solis_storage_control_word",
     "battery_max_charge_current":    "number.solis_battery_max_charge_current",
     "battery_max_discharge_current": "number.solis_battery_max_discharge_current",
@@ -316,12 +317,12 @@ def test_normalize_power_to_kw_handles_known_units():
     assert normalize_power_to_kw(3920.0, "garbage") == pytest.approx(3920.0)
 
 
-def test_get_grid_power_normalises_watts_to_kw_and_inverts_sign():
-    # solis_modbus convention: positive = inverter→grid (export). sunSale
-    # contract is positive = import, so the Solis controller negates.
+def test_get_grid_power_reads_grid_power_net_without_sign_flip():
+    # The derived ``grid_power_net`` sensor already follows sunSale's
+    # positive=import convention — controller passes the value through.
     state_map = {SOLIS_ENTITY_IDS["grid_power"]: _State("3920", "W")}
     controller, _ = make_controller(state_map=state_map)
-    assert controller.get_grid_power() == pytest.approx(-3.92)
+    assert controller.get_grid_power() == pytest.approx(3.92)
 
 
 def test_get_battery_power_passes_through_kw():
@@ -330,13 +331,27 @@ def test_get_battery_power_passes_through_kw():
     assert controller.get_battery_power() == pytest.approx(-1.579)
 
 
-def test_get_grid_power_returns_fallback_when_unavailable():
-    state_map = {SOLIS_ENTITY_IDS["grid_power"]: _State("unavailable", "W")}
+def test_get_grid_power_falls_back_to_port_with_sign_flip_when_net_unavailable():
+    # Primary net sensor missing → controller reads the AC-port fallback and
+    # flips its sign to match sunSale convention (positive=import).
+    state_map = {
+        SOLIS_ENTITY_IDS["grid_power"]: _State("unavailable", "W"),
+        SOLIS_ENTITY_IDS["grid_power_fallback"]: _State("3920", "W"),
+    }
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_grid_power() == pytest.approx(-3.92)
+
+
+def test_get_grid_power_returns_zero_when_both_primary_and_fallback_unavailable():
+    state_map = {
+        SOLIS_ENTITY_IDS["grid_power"]: _State("unavailable", "W"),
+        SOLIS_ENTITY_IDS["grid_power_fallback"]: _State("unavailable", "W"),
+    }
     controller, _ = make_controller(state_map=state_map)
     assert controller.get_grid_power() == 0.0
 
 
-def test_get_grid_power_assumes_kw_when_unit_missing_and_inverts_sign():
+def test_get_grid_power_assumes_kw_when_unit_missing():
     state_map = {SOLIS_ENTITY_IDS["grid_power"]: _State("3.92", None)}
     controller, _ = make_controller(state_map=state_map)
-    assert controller.get_grid_power() == pytest.approx(-3.92)
+    assert controller.get_grid_power() == pytest.approx(3.92)

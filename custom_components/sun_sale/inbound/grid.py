@@ -49,6 +49,13 @@ from ..contract.models import (
 from ..outbound.inverter import normalize_power_to_kw
 
 
+# Maximum age (seconds) for a grid power sample to be considered fresh.
+# The solis_modbus meter chain can silently stop polling (sensor state stays
+# numeric but ``last_updated`` freezes); when the freshness window is exceeded
+# we treat the entity as unavailable and fall back to the inverter port reading.
+_GRID_POWER_MAX_AGE_S = 180
+
+
 class GridObserver:
     """Reads the grid-power HA entity; produces GridPowerReading."""
 
@@ -59,58 +66,87 @@ class GridObserver:
         entity_id: str,
         invert_sign: bool = False,
         fallback_entity_id: str = "",
+        fallback_invert_sign: bool = False,
+        max_age_s: float = _GRID_POWER_MAX_AGE_S,
     ) -> None:
-        """Initialise with the HA entity ID of the grid power sensor.
+        """Initialise with primary + fallback grid-power entity IDs.
 
         Args:
             entity_id: Entity ID of the primary grid power sensor (W or kW).
-                       The sunSale-internal contract is positive = import
-                       from grid; raw values are negated when ``invert_sign``
-                       is set so the rest of the pipeline can treat them as
-                       already in sunSale convention.
-            invert_sign: When True, the value read from the entity is
-                       multiplied by -1 before being returned. Used to
-                       adapt the solis_modbus convention (positive =
-                       inverter→grid) to sunSale's positive=import contract.
+            invert_sign: When True the primary value is multiplied by -1.
+                       Set when the primary entity uses the solis_modbus
+                       inverter-centric convention (positive = inverter→grid)
+                       rather than sunSale's positive=import contract. The
+                       derived ``grid_power_net`` sensor already matches the
+                       sunSale convention, so this is False for the default
+                       auto-detect target.
             fallback_entity_id: Optional secondary entity consulted when the
-                       primary is missing or its state is unavailable (Solis
-                       CT-only installs where the Modbus-meter register is
-                       empty fall back to the AC grid port power, which
-                       shares the same sign convention as the meter).
+                       primary is missing, unavailable, or its state has not
+                       updated for ``max_age_s`` seconds (e.g. solis_modbus
+                       meter chain dropping out while the inverter port
+                       reading keeps polling).
+            fallback_invert_sign: When True the fallback value is multiplied
+                       by -1 — the AC port reading on Solis still uses the
+                       inverter-centric convention even though the derived
+                       net sensor doesn't.
+            max_age_s: Freshness window for the primary read; readings older
+                       than this fall back. ``float('inf')`` disables the
+                       freshness check (used by tests that inject states
+                       without realistic timestamps).
         """
         self._entity_id = entity_id
         self._invert_sign = invert_sign
         self._fallback_entity_id = fallback_entity_id
+        self._fallback_invert_sign = fallback_invert_sign
+        self._max_age_s = max_age_s
 
     def parse(self, hass: Any, now: datetime) -> GridPowerReading | None:
         """Read the grid power entity and return a timestamped reading in kW.
 
         Returns None (not a zero stub) when neither the primary nor fallback
-        entity yields a numeric state, so the persisted history is not
-        polluted with false readings.
+        entity yields a fresh numeric state, so the persisted history is
+        not polluted with false readings.
 
         Args:
             hass: Home Assistant instance.
-            now: Snapshot timestamp.
+            now: Snapshot timestamp; also the reference for the freshness
+                 check applied to the primary read.
 
         Returns:
             GridPowerReading in kW, or None when unavailable.
         """
-        power_kw = self._read_kw(hass, self._entity_id)
-        if power_kw is None and self._fallback_entity_id:
-            power_kw = self._read_kw(hass, self._fallback_entity_id)
+        power_kw = self._read_kw(hass, self._entity_id, now, self._max_age_s)
+        if power_kw is not None:
+            if self._invert_sign:
+                power_kw = -power_kw
+            return GridPowerReading(power_kw=power_kw, timestamp=now)
+        if not self._fallback_entity_id:
+            return None
+        power_kw = self._read_kw(hass, self._fallback_entity_id, now, float("inf"))
         if power_kw is None:
             return None
-        if self._invert_sign:
+        if self._fallback_invert_sign:
             power_kw = -power_kw
-        return GridPowerReading(
-            power_kw=power_kw,
-            timestamp=now,
-        )
+        return GridPowerReading(power_kw=power_kw, timestamp=now)
 
     @staticmethod
-    def _read_kw(hass: Any, entity_id: str) -> float | None:
-        """Read ``entity_id`` and normalise to kW; return None on missing state."""
+    def _read_kw(
+        hass: Any, entity_id: str, now: datetime, max_age_s: float,
+    ) -> float | None:
+        """Read ``entity_id`` and normalise to kW; return None if missing or stale.
+
+        Args:
+            hass: Home Assistant instance.
+            entity_id: Entity to read; empty string returns None.
+            now: Reference time for the staleness check.
+            max_age_s: Maximum age (seconds) of ``state.last_updated`` for the
+                       reading to be considered fresh. Use ``float('inf')`` to
+                       disable the freshness check entirely.
+
+        Returns:
+            kW value, or None when the entity is unset, unavailable,
+            unparseable, or stale.
+        """
         if not entity_id:
             return None
         state = hass.states.get(entity_id)
@@ -120,6 +156,12 @@ class GridObserver:
             value = float(state.state)
         except (ValueError, TypeError):
             return None
+        if max_age_s != float("inf"):
+            last_updated = getattr(state, "last_updated", None)
+            if last_updated is not None and last_updated.tzinfo is not None:
+                age = (now - last_updated).total_seconds()
+                if age > max_age_s:
+                    return None
         unit = str((state.attributes or {}).get("unit_of_measurement") or "").strip()
         return normalize_power_to_kw(value, unit)
 
