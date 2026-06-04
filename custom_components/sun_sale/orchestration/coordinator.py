@@ -669,6 +669,17 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         inverter_platform = InverterPlatform(data[CONF_INVERTER_PLATFORM])
         if inverter_platform == InverterPlatform.SOLIS:
             solis_entry_id = data.get(CONF_SOLIS_CONFIG_ENTRY_ID)
+            # Legacy configs created before solis auto-detect existed don't have
+            # CONF_SOLIS_CONFIG_ENTRY_ID stored. Recover by scanning the registry
+            # for solis_modbus config entries — when exactly one is present the
+            # choice is unambiguous, so we run the resolver against it and let
+            # its findings (grid_power_net + today-counter slugs) override the
+            # legacy manual values. Avoids forcing every existing user through
+            # a reconfigure cycle.
+            if not solis_entry_id:
+                solis_entries = self.hass.config_entries.async_entries("solis_modbus")
+                if len(solis_entries) == 1:
+                    solis_entry_id = solis_entries[0].entry_id
             if solis_entry_id:
                 # Auto-detected path: resolve all entity IDs from the entity registry.
                 inverter_entity_ids = resolve_solis_entities(self.hass, solis_entry_id)
@@ -727,6 +738,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     data.get(CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY, ""),
             }
         inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
+        self._inverter_entity_ids = dict(inverter_entity_ids)
         self._grid_power_entity_id = inverter_entity_ids.get("grid_power", "")
         grid_power_fallback_entity_id = inverter_entity_ids.get("grid_power_fallback", "")
         grid_import_total_entity_id = inverter_entity_ids.get("grid_import_energy_today", "")

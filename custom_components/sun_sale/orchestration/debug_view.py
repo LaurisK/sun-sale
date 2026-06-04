@@ -66,6 +66,11 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
             "nordpool_entity": cfg.get(CONF_NORDPOOL_ENTITY, ""),
             "solar_forecast_entity": cfg.get(CONF_SOLAR_FORECAST_ENTITY, ""),
             "solar_forecast_entity_2": cfg.get(CONF_SOLAR_FORECAST_ENTITY_2, ""),
+            # Resolved entity-ID map that feeds GridObserver / InverterController.
+            # Useful to confirm whether the Solis auto-detect path actually landed
+            # on grid_power_net (vs. falling through to a legacy manual mapping).
+            "inverter_entity_ids": getattr(coordinator, "_inverter_entity_ids", {}),
+            "grid_power_entity_id": getattr(coordinator, "_grid_power_entity_id", ""),
         },
         "inputs": {
             "nordpool_prices": [
