@@ -82,6 +82,24 @@ _SWITCH_SUFFIXES: dict[str, tuple[str, str]] = {
 }
 
 
+# Roles that ``InverterController`` handles gracefully when their entity ID
+# is empty (the write is logged at debug-level and skipped — see
+# ``outbound/inverter.py`` class docstring). Listed here so the resolver
+# distinguishes "genuinely required for sunSale to work" from "use when
+# available". Missing optional roles log at DEBUG, not WARNING.
+_OPTIONAL_ROLES: frozenset[str] = frozenset({
+    # Some Solis firmware versions / hybrid models don't expose these. Their
+    # absence only constrains the storage-mode dispatcher's export-control
+    # options; cycle telemetry + bake-in still work.
+    "allow_export_under_self_use_switch",
+    "grid_feed_in_power_limit_switch",
+    # The AC-port fallback exists only when the user has configured it as
+    # a fallback for the meter chain — most installs use ``grid_power_net``
+    # alone.
+    "grid_power_fallback",
+})
+
+
 def _matches(uid: str, entity_id: str, suffix: str, entity_id_tail: str) -> bool:
     """Return True when an entry's identifiers match ``suffix``/``entity_id_tail``.
 
@@ -162,7 +180,17 @@ def resolve_solis_entities(hass: HomeAssistant, config_entry_id: str) -> dict[st
         set(_SENSOR_SUFFIXES) | set(_SWITCH_SUFFIXES) | set(_BIT_SWITCHES)
     )
     missing = sorted(all_roles - result.keys())
-    if missing:
-        _LOGGER.warning("solis_modbus auto-discovery: missing roles: %s", missing)
+    missing_required = [r for r in missing if r not in _OPTIONAL_ROLES]
+    missing_optional = [r for r in missing if r in _OPTIONAL_ROLES]
+    if missing_required:
+        _LOGGER.warning(
+            "solis_modbus auto-discovery: missing required roles: %s",
+            missing_required,
+        )
+    if missing_optional:
+        _LOGGER.debug(
+            "solis_modbus auto-discovery: missing optional roles (graceful skip): %s",
+            missing_optional,
+        )
 
     return result
