@@ -1317,8 +1317,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 )
                 snap_history = (
                     self._counter_snapshot_store.value
-                    if self._counter_snapshot_store else CounterSnapshotHistory(records=())
-                )
+                    if self._counter_snapshot_store else None
+                ) or CounterSnapshotHistory(records=())
                 pv_samples = primary.get(PvPowerHistory)
                 grid_import_samples = primary.get(GridImportPowerHistory)
                 grid_export_samples = primary.get(GridExportPowerHistory)
