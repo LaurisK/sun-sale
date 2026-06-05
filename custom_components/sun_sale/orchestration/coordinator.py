@@ -1240,14 +1240,23 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 )
                 if updated_snapshots is not current_snapshots:
                     await self._counter_snapshot_store.save(updated_snapshots)
-            primary[CounterSnapshotHistory] = (
+            # Default to an empty history when the store exists but holds no
+            # value yet (fresh install / first cycle). The DAG node consumes
+            # these via ``ctx.require`` so an explicit empty fallback is
+            # required — ``ctx.get`` returns the primary value via
+            # ``primary.get(t) or secondary.get(t)``, so a stored ``None``
+            # would raise ``MissingDependencyError``.
+            current_snapshots = (
                 self._counter_snapshot_store.value
-                if self._counter_snapshot_store else CounterSnapshotHistory(records=())
-            )
-            primary[BakedObservedHistory] = (
+                if self._counter_snapshot_store else None
+            ) or CounterSnapshotHistory(records=())
+            primary[CounterSnapshotHistory] = current_snapshots
+
+            current_baked = (
                 self._baked_observed_store.value
-                if self._baked_observed_store else BakedObservedHistory(records=())
-            )
+                if self._baked_observed_store else None
+            ) or BakedObservedHistory(records=())
+            primary[BakedObservedHistory] = current_baked
 
             primary[MonthlyBillState] = (
                 self._monthly_bill_store.value if self._monthly_bill_store else None
