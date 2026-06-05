@@ -1,33 +1,26 @@
-"""Grid stage: per-cycle grid-power reader + per-slot ObservedGridSeries builder.
+"""Grid stage: per-direction observers + ObservedGridSeries builder.
 
-Three translators feed the pipeline:
+Four translators feed the pipeline:
 
-* ``GridObserver`` snapshots the inverter's net AC grid power each cycle
-  (positive = import, negative = export). Persisted into ``GridPowerHistory``.
-* ``GridImportTotalTranslator`` and ``GridExportTotalTranslator`` snapshot the
-  daily-resetting cumulative import/export kWh counters. These update every
-  ~10 min and reset at local midnight, mirroring the today-total generation
-  counter; they anchor the end-of-day correction in ``ObservedGridSeries``.
+* ``GridImportPowerObserver`` snapshots the inverter's instantaneous grid
+  *import* power magnitude (kW, ≥ 0) and persists it as
+  ``GridImportPowerHistory``.
+* ``GridExportPowerObserver`` does the same for *export* (kW, ≥ 0).
+* ``GridImportTotalTranslator`` / ``GridExportTotalTranslator`` snapshot the
+  daily-resetting cumulative import / export kWh counters. Persisted for the
+  pre-rollover snapshot module and the once-per-day bake-in.
 
-``build_observed_grid_series`` averages the signed grid-power samples within
-each price-grid slot, but does the **gross flow split per sample**:
+``build_observed_grid_series`` averages each direction's samples within each
+price-grid slot independently. Because each stream is already non-negative
+and direction-pure, no sign split is needed — the ``grid_import`` engine side
+extracts directly from ``GridImportPowerHistory``, the ``grid_export`` side
+from ``GridExportPowerHistory``.
 
-    import_slot_kwh = (sum(max(0, kw)  for s in slot_samples) / n) * duration_h
-    export_slot_kwh = (sum(max(0,-kw)) for s in slot_samples) / n) * duration_h
-
-This preserves gross import + export even within a slot whose net averages to
-zero (a slot with 50% import and 50% export was previously billed as
-zero on both sides — that bug is fixed by splitting per sample first).
-
-Window: the series spans **two days back through now** in local time (day
-before yesterday 00:00 LOCAL → now). That extra day matters for the monthly
-bill module's day-rollover bake-in, which always reaches one local day
-further back than "yesterday" relative to the current cycle's `now`.
-
-End-of-day correction: when the today-total import/export counters are present,
-today's slot import/export are scaled independently so each side's sum matches
-the authoritative counter. The factor is clamped to ``[0.5, 2.0]``; outside
-that window the correction is skipped as a sensor-fault guard.
+Window: day-before-yesterday 00:00 local → now. The extra day beyond
+"yesterday" is required by ``MonthlyBillNode`` so its day-rollover bake-in
+window stays inside the series. Yesterday and the older day are sourced
+from ``BakedObservedHistory`` when present; otherwise from raw averaging.
+Today is always raw — the next-day bake-in finalises it.
 """
 from __future__ import annotations
 
@@ -36,151 +29,168 @@ from datetime import tzinfo as TzInfo
 from typing import Any
 
 from ..contract.models import (
-    GridExportTodayHistory,
+    BakedObservedHistory,
+    GridExportPowerHistory,
+    GridExportPowerReading,
     GridExportTodayReading,
-    GridImportTodayHistory,
+    GridImportPowerHistory,
+    GridImportPowerReading,
     GridImportTodayReading,
-    GridPowerHistory,
-    GridPowerReading,
     ObservedGridSeries,
     ObservedGridSlot,
+    SlotKwh,
     SunSaleConfig,
 )
 from ..outbound.inverter import normalize_power_to_kw
+from .observed_bake_in import baked_slots_by_date
+from .observed_engine import ObservedSeriesEngine, Side
+
+
+# Side identifiers for the grid engine. Stable across the codebase —
+# referenced by the bake-in store, the integration check, and the debug view
+# as the canonical keys for the import / export tracks.
+GRID_IMPORT_SIDE_ID = "grid_import"
+GRID_EXPORT_SIDE_ID = "grid_export"
 
 
 # Maximum age (seconds) for a grid power sample to be considered fresh.
 # The solis_modbus meter chain can silently stop polling (sensor state stays
-# numeric but ``last_updated`` freezes); when the freshness window is exceeded
-# we treat the entity as unavailable and fall back to the inverter port reading.
+# numeric but ``last_updated`` freezes); when the freshness window is
+# exceeded we treat the entity as unavailable.
 _GRID_POWER_MAX_AGE_S = 180
 
 
-class GridObserver:
-    """Reads the grid-power HA entity; produces GridPowerReading."""
+def _grid_sides() -> list[Side]:
+    """Return the two Side specs for grid import and export tracks.
 
-    output_type = GridPowerReading
+    Each side's extractor is the identity on its own non-negative sample
+    stream — the engine consumes ``GridImportPowerHistory.samples`` for the
+    import side and ``GridExportPowerHistory.samples`` for the export side.
+
+    Returns:
+        ``[Side("grid_import"), Side("grid_export")]``.
+    """
+    return [
+        Side(id=GRID_IMPORT_SIDE_ID, extract=lambda s: max(0.0, s.power_kw)),
+        Side(id=GRID_EXPORT_SIDE_ID, extract=lambda s: max(0.0, s.power_kw)),
+    ]
+
+
+def build_grid_engine(local_tz: TzInfo) -> ObservedSeriesEngine:
+    """Return a two-side engine instance for grid import + export.
+
+    Used by both the per-cycle series builder and the once-per-day bake-in
+    so they share the same side specs and timezone configuration. Each side
+    pulls from its own ``GridImport/ExportPowerHistory`` via the
+    ``samples_by_side`` argument.
+
+    Args:
+        local_tz: Local timezone for day-boundary handling.
+
+    Returns:
+        ``ObservedSeriesEngine`` registered with the import and export sides.
+    """
+    return ObservedSeriesEngine(_grid_sides(), local_tz=local_tz)
+
+
+# ---------------------------------------------------------------------------
+# Directional power observers
+# ---------------------------------------------------------------------------
+
+class _DirectionalPowerObserver:
+    """Shared parsing for a non-negative directional grid-power entity.
+
+    Reads one HA sensor whose value is the magnitude of grid flow in a single
+    direction (import or export) and produces a non-negative ``power_kw``.
+    A freshness check guards against stale states — the meter chain that
+    feeds these sensors can silently freeze (numeric value persists but
+    ``last_updated`` does not advance), at which point the reading is
+    treated as unavailable rather than continuing to bias the per-slot mean.
+    Subclasses bind it to a concrete reading type.
+    """
+
+    reading_cls: type
+    output_type: type
 
     def __init__(
         self,
         entity_id: str,
-        invert_sign: bool = False,
-        fallback_entity_id: str = "",
-        fallback_invert_sign: bool = False,
         max_age_s: float = _GRID_POWER_MAX_AGE_S,
     ) -> None:
-        """Initialise with primary + fallback grid-power entity IDs.
+        """Initialise with the HA entity ID + freshness window.
 
         Args:
-            entity_id: Entity ID of the primary grid power sensor (W or kW).
-            invert_sign: When True the primary value is multiplied by -1.
-                       Set when the primary entity uses the solis_modbus
-                       inverter-centric convention (positive = inverter→grid)
-                       rather than sunSale's positive=import contract. The
-                       derived ``grid_power_net`` sensor already matches the
-                       sunSale convention, so this is False for the default
-                       auto-detect target.
-            fallback_entity_id: Optional secondary entity consulted when the
-                       primary is missing, unavailable, or its state has not
-                       updated for ``max_age_s`` seconds (e.g. solis_modbus
-                       meter chain dropping out while the inverter port
-                       reading keeps polling).
-            fallback_invert_sign: When True the fallback value is multiplied
-                       by -1 — the AC port reading on Solis still uses the
-                       inverter-centric convention even though the derived
-                       net sensor doesn't.
-            max_age_s: Freshness window for the primary read; readings older
-                       than this fall back. ``float('inf')`` disables the
-                       freshness check (used by tests that inject states
-                       without realistic timestamps).
+            entity_id: Entity ID of the directional power sensor. Empty
+                string disables the observer (returns ``None``).
+            max_age_s: Maximum age (seconds) of ``state.last_updated`` for
+                the reading to be considered fresh; older states return
+                ``None``. ``float('inf')`` disables the freshness check
+                (used by tests that inject states without timestamps).
         """
         self._entity_id = entity_id
-        self._invert_sign = invert_sign
-        self._fallback_entity_id = fallback_entity_id
-        self._fallback_invert_sign = fallback_invert_sign
         self._max_age_s = max_age_s
 
-    def parse(self, hass: Any, now: datetime) -> GridPowerReading | None:
-        """Read the grid power entity and return a timestamped reading in kW.
-
-        Returns None (not a zero stub) when neither the primary nor fallback
-        entity yields a fresh numeric state, so the persisted history is
-        not polluted with false readings.
+    def _parse(self, hass: Any, now: datetime):
+        """Read the entity, normalise to non-negative kW, return a typed reading.
 
         Args:
             hass: Home Assistant instance.
-            now: Snapshot timestamp; also the reference for the freshness
-                 check applied to the primary read.
+            now: Snapshot timestamp; also the reference for the freshness check.
 
         Returns:
-            GridPowerReading in kW, or None when unavailable.
+            ``reading_cls`` instance, or ``None`` when missing, unparseable,
+            or stale. Negative numeric states are clamped to 0.0 (directional
+            magnitudes are non-negative by contract).
         """
-        power_kw = self._read_kw(hass, self._entity_id, now, self._max_age_s)
-        if power_kw is not None:
-            if self._invert_sign:
-                power_kw = -power_kw
-            return GridPowerReading(power_kw=power_kw, timestamp=now)
-        if not self._fallback_entity_id:
+        if not self._entity_id:
             return None
-        power_kw = self._read_kw(hass, self._fallback_entity_id, now, float("inf"))
-        if power_kw is None:
-            return None
-        if self._fallback_invert_sign:
-            power_kw = -power_kw
-        return GridPowerReading(power_kw=power_kw, timestamp=now)
-
-    @staticmethod
-    def _read_kw(
-        hass: Any, entity_id: str, now: datetime, max_age_s: float,
-    ) -> float | None:
-        """Read ``entity_id`` and normalise to kW; return None if missing or stale.
-
-        Args:
-            hass: Home Assistant instance.
-            entity_id: Entity to read; empty string returns None.
-            now: Reference time for the staleness check.
-            max_age_s: Maximum age (seconds) of ``state.last_updated`` for the
-                       reading to be considered fresh. Use ``float('inf')`` to
-                       disable the freshness check entirely.
-
-        Returns:
-            kW value, or None when the entity is unset, unavailable,
-            unparseable, or stale.
-        """
-        if not entity_id:
-            return None
-        state = hass.states.get(entity_id)
+        state = hass.states.get(self._entity_id)
         if state is None or state.state in ("unavailable", "unknown", ""):
             return None
         try:
             value = float(state.state)
         except (ValueError, TypeError):
             return None
-        if max_age_s != float("inf"):
+        if self._max_age_s != float("inf"):
             last_updated = getattr(state, "last_updated", None)
             if last_updated is not None and last_updated.tzinfo is not None:
                 age = (now - last_updated).total_seconds()
-                if age > max_age_s:
+                if age > self._max_age_s:
                     return None
         unit = str((state.attributes or {}).get("unit_of_measurement") or "").strip()
-        return normalize_power_to_kw(value, unit)
+        power_kw = normalize_power_to_kw(value, unit)
+        return self.reading_cls(power_kw=max(0.0, power_kw), timestamp=now)
+
+
+class GridImportPowerObserver(_DirectionalPowerObserver):
+    """Reads the directional grid-import power sensor; produces GridImportPowerReading."""
+
+    reading_cls = GridImportPowerReading
+    output_type = GridImportPowerReading
 
     async def translate(
-        self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
-    ) -> GridPowerReading | None:
-        """DAG translator entry-point; delegates to parse().
+        self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime,
+    ) -> GridImportPowerReading | None:
+        """DAG translator entry-point; delegates to ``_parse``."""
+        return self._parse(hass, now)
 
-        Args:
-            hass: Home Assistant instance.
-            config: Structured SunSale config (unused here).
-            raw_config: Raw config-entry dict (unused here).
-            now: Cycle timestamp.
 
-        Returns:
-            GridPowerReading or None when unavailable.
-        """
-        return self.parse(hass, now)
+class GridExportPowerObserver(_DirectionalPowerObserver):
+    """Reads the directional grid-export power sensor; produces GridExportPowerReading."""
 
+    reading_cls = GridExportPowerReading
+    output_type = GridExportPowerReading
+
+    async def translate(
+        self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime,
+    ) -> GridExportPowerReading | None:
+        """DAG translator entry-point; delegates to ``_parse``."""
+        return self._parse(hass, now)
+
+
+# ---------------------------------------------------------------------------
+# Daily today-total counter translators (kWh, reset at local midnight)
+# ---------------------------------------------------------------------------
 
 class _DailyTotalKwhTranslator:
     """Shared parsing for daily-resetting cumulative kWh sensors.
@@ -255,287 +265,169 @@ class GridExportTotalTranslator(_DailyTotalKwhTranslator):
 # ---------------------------------------------------------------------------
 
 def build_observed_grid_series(
-    grid_power_history: GridPowerHistory,
-    import_total_history: GridImportTodayHistory,
-    export_total_history: GridExportTodayHistory,
+    import_power_history: GridImportPowerHistory,
+    export_power_history: GridExportPowerHistory,
     price_slots: tuple,
     now: datetime | None = None,
     local_tz: TzInfo = timezone.utc,
+    baked_history: BakedObservedHistory | None = None,
 ) -> ObservedGridSeries:
-    """Derive per-slot observed grid import/export from power samples + counters.
+    """Derive per-slot gross import / export kWh from per-direction samples.
 
-    For each price slot in the [yesterday 00:00, now) window, splits the
-    signed grid-power samples into import and export buckets, averages each
-    bucket separately, and multiplies by the slot duration. End-of-day
-    correction then scales today's slots so each side's sum matches the
-    corresponding today-total counter (when present and within the
-    factor-bound guard).
+    The engine consumes the two history streams independently — no sign-
+    split needed because each stream is already direction-pure and
+    non-negative.
+
+    Window: day-before-yesterday 00:00 local → now. Today's slots are
+    always raw averages. Yesterday and the older day come from
+    ``baked_history`` when ``BakedDayRecord`` entries exist for the matching
+    ``side_id`` on the matching local date; otherwise they fall back to raw
+    averaging.
 
     Args:
-        grid_power_history: Rolling samples of net grid power in kW.
-        import_total_history: Rolling samples of the today-total imported-kWh counter.
-        export_total_history: Rolling samples of the today-total exported-kWh counter.
+        import_power_history: Rolling non-negative import-power samples (kW).
+        export_power_history: Rolling non-negative export-power samples (kW).
         price_slots: Price-grid slots defining the output resolution.
         now: Cycle timestamp; defaults to UTC now.
         local_tz: Local timezone for day-boundary calculations.
+        baked_history: Persisted baked-observed history. When omitted or
+            empty, past-day slots fall back to raw averaging.
 
     Returns:
-        ObservedGridSeries covering yesterday 00:00 local → now, grid-aligned.
+        ObservedGridSeries grid-aligned over the two-day-back window. Empty
+        when no price grid is supplied or both histories are empty.
     """
     if now is None:
         now = datetime.now(timezone.utc)
 
-    if not price_slots or not grid_power_history.samples:
+    if not price_slots or (
+        not import_power_history.samples and not export_power_history.samples
+    ):
         return ObservedGridSeries(slots=(), computed_at=now)
 
-    # Extend two local days back so the monthly_bill day-rollover bake-in
-    # window (always the LOCAL day before the current cycle's "yesterday")
-    # is still inside the series. Same data is already retained on the
-    # GridPowerHistory side (GRID_POWER_HISTORY_RETENTION_DAYS=2).
-    window_start = _day_start(now, local_tz) - timedelta(days=2)
-    slots = _build_slots_from_power(
-        grid_power_history.samples, price_slots, now, window_start
-    )
+    engine = build_grid_engine(local_tz=local_tz)
+    today_start = _day_start(now, local_tz)
+    yesterday_start = today_start - timedelta(days=1)
+    two_days_ago_start = today_start - timedelta(days=2)
 
-    today_import_total = _latest_today_total(import_total_history.samples, now, local_tz)
-    today_export_total = _latest_today_total(export_total_history.samples, now, local_tz)
-    slots = _apply_end_of_day_correction(
-        slots, today_import_total, today_export_total, now, local_tz,
-    )
-
-    totals = _compute_totals(slots, now, local_tz)
-    return ObservedGridSeries(
-        slots=tuple(slots),
-        computed_at=now,
-        total_yesterday_imported_kwh=totals["yesterday_imported"],
-        total_yesterday_exported_kwh=totals["yesterday_exported"],
-        total_today_imported_kwh=totals["today_imported"],
-        total_today_exported_kwh=totals["today_exported"],
-    )
-
-
-def _build_slots_from_power(
-    samples: tuple[GridPowerReading, ...],
-    price_slots: tuple,
-    now: datetime,
-    window_start: datetime,
-) -> list[ObservedGridSlot]:
-    """Average signed grid-power samples per slot into gross import + export kWh.
-
-    Args:
-        samples: All grid-power readings from the rolling history.
-        price_slots: Price-grid slots defining the output resolution.
-        now: Cycle timestamp used to clamp partial slots.
-        window_start: Earliest slot start to include.
-
-    Returns:
-        List of ObservedGridSlots with averaged imported / exported kWh values.
-    """
-    slots: list[ObservedGridSlot] = []
-    for ps in price_slots:
-        if ps.start < window_start or ps.start >= now:
-            continue
-        end_t = ps.end if ps.end < now else now
-        if end_t <= ps.start:
-            continue
-        imported_kwh, exported_kwh = _split_average_power_to_kwh(
-            samples, ps.start, end_t,
-        )
-        slots.append(ObservedGridSlot(
-            start=ps.start,
-            end=ps.end,
-            imported_kwh=imported_kwh,
-            exported_kwh=exported_kwh,
-            source="inverter",
-        ))
-    return slots
-
-
-def _split_average_power_to_kwh(
-    samples: tuple[GridPowerReading, ...],
-    slot_start: datetime,
-    slot_end: datetime,
-) -> tuple[float, float]:
-    """Average positive / negative samples in [slot_start, slot_end) into kWh.
-
-    A sample's positive part contributes to import; its negative part (as a
-    positive magnitude) contributes to export. Averaging the parts separately
-    over **all** samples in the window preserves gross flows even when the
-    signed mean is near zero — a slot equally split between 2 kW import and
-    2 kW export reports non-zero values on both sides rather than collapsing
-    to zero (which is what averaging signed values then splitting by sign of
-    the mean would have produced).
-
-    Args:
-        samples: All grid-power readings.
-        slot_start: Inclusive slot boundary.
-        slot_end: Exclusive slot boundary (already clamped to now).
-
-    Returns:
-        ``(imported_kwh, exported_kwh)`` — both non-negative, rounded to 6 dp.
-        Returns ``(0.0, 0.0)`` when no samples fall within the window.
-    """
-    relevant = [s for s in samples if slot_start <= s.timestamp < slot_end]
-    if not relevant:
-        return 0.0, 0.0
-    n = len(relevant)
-    avg_import_kw = sum(max(0.0, s.power_kw) for s in relevant) / n
-    avg_export_kw = sum(max(0.0, -s.power_kw) for s in relevant) / n
-    duration_h = (slot_end - slot_start).total_seconds() / 3600
-    return (
-        round(avg_import_kw * duration_h, 6),
-        round(avg_export_kw * duration_h, 6),
-    )
-
-
-def _latest_today_total(
-    samples: tuple,
-    now: datetime,
-    local_tz: TzInfo,
-) -> float | None:
-    """Return the most recent today-total counter reading from today's samples.
-
-    Args:
-        samples: Rolling counter readings (either Import or Export variant).
-        now: Reference time defining "today" in local timezone.
-        local_tz: Timezone for date classification.
-
-    Returns:
-        Most recent today_total_kwh for today, or None if no today samples exist.
-    """
-    if not samples:
-        return None
-    local_today = now.astimezone(local_tz).date()
-    today_samples = [
-        s for s in samples
-        if s.timestamp.astimezone(local_tz).date() == local_today
-    ]
-    if not today_samples:
-        return None
-    return max(today_samples, key=lambda s: s.timestamp).today_total_kwh
-
-
-def _apply_end_of_day_correction(
-    slots: list[ObservedGridSlot],
-    today_import_total_kwh: float | None,
-    today_export_total_kwh: float | None,
-    now: datetime,
-    local_tz: TzInfo,
-) -> list[ObservedGridSlot]:
-    """Scale today's import + export sums independently to match counter totals.
-
-    The counters update every ~10 min and are authoritative over the full day.
-    Import and export are scaled with independent factors so a deployment with
-    only one of the two counters (or with one of them stuck at zero before
-    sunrise) still benefits from the correction on the other side.
-
-    A side is skipped when:
-      - its counter is None or ≤ 0 (no reading / no flow yet)
-      - its slot sum is ≤ 0 (no averaged values to scale)
-      - its correction factor falls outside [0.5, 2.0] (sensor-fault guard)
-
-    Args:
-        slots: Per-slot import/export list (today's entries are modified in place).
-        today_import_total_kwh: Most recent today-total imported reading.
-        today_export_total_kwh: Most recent today-total exported reading.
-        now: Reference time defining "today" in local timezone.
-        local_tz: Timezone for date classification.
-
-    Returns:
-        New slot list with today's entries scaled per side; yesterday unchanged.
-    """
-    local_today = now.astimezone(local_tz).date()
-    today_indices = [
-        i for i, s in enumerate(slots)
-        if s.start.astimezone(local_tz).date() == local_today
-    ]
-    if not today_indices:
-        return slots
-
-    import_factor = _scale_factor(
-        today_import_total_kwh,
-        sum(slots[i].imported_kwh for i in today_indices),
-    )
-    export_factor = _scale_factor(
-        today_export_total_kwh,
-        sum(slots[i].exported_kwh for i in today_indices),
-    )
-    if import_factor is None and export_factor is None:
-        return slots
-
-    result = list(slots)
-    for i in today_indices:
-        s = result[i]
-        new_imp = (
-            round(s.imported_kwh * import_factor, 6)
-            if import_factor is not None else s.imported_kwh
-        )
-        new_exp = (
-            round(s.exported_kwh * export_factor, 6)
-            if export_factor is not None else s.exported_kwh
-        )
-        result[i] = ObservedGridSlot(
-            start=s.start,
-            end=s.end,
-            imported_kwh=new_imp,
-            exported_kwh=new_exp,
-            source=s.source,
-        )
-    return result
-
-
-def _scale_factor(total_kwh: float | None, slot_sum_kwh: float) -> float | None:
-    """Return the correction multiplier, or None when the side must be skipped.
-
-    Args:
-        total_kwh: Counter's today-total reading (None when no counter).
-        slot_sum_kwh: Sum of today's slot values for this side.
-
-    Returns:
-        Multiplier in [0.5, 2.0], or None when the scaling should be skipped.
-    """
-    if total_kwh is None or total_kwh <= 0:
-        return None
-    if slot_sum_kwh <= 0:
-        return None
-    factor = total_kwh / slot_sum_kwh
-    if not 0.5 <= factor <= 2.0:
-        return None
-    return factor
-
-
-def _compute_totals(
-    slots: list[ObservedGridSlot], now: datetime, local_tz: TzInfo,
-) -> dict[str, float]:
-    """Sum observed grid slots into yesterday/today import + export totals.
-
-    Args:
-        slots: ObservedGridSlots in any order.
-        now: Reference time used to determine today's and yesterday's local dates.
-        local_tz: Timezone for local-date classification.
-
-    Returns:
-        Dict with keys yesterday_imported / yesterday_exported /
-        today_imported / today_exported in kWh.
-    """
-    local_now = now.astimezone(local_tz)
-    today = local_now.date()
-    yesterday = today - timedelta(days=1)
-    yest_imp = yest_exp = today_imp = today_exp = 0.0
-    for s in slots:
-        d = s.start.astimezone(local_tz).date()
-        if d == yesterday:
-            yest_imp += s.imported_kwh
-            yest_exp += s.exported_kwh
-        elif d == today:
-            today_imp += s.imported_kwh
-            today_exp += s.exported_kwh
-    return {
-        "yesterday_imported": round(yest_imp, 4),
-        "yesterday_exported": round(yest_exp, 4),
-        "today_imported":     round(today_imp, 4),
-        "today_exported":     round(today_exp, 4),
+    samples_by_side = {
+        GRID_IMPORT_SIDE_ID: import_power_history.samples,
+        GRID_EXPORT_SIDE_ID: export_power_history.samples,
     }
+
+    local_today = now.astimezone(local_tz).date()
+    local_yesterday = local_today - timedelta(days=1)
+    local_two_days_ago = local_today - timedelta(days=2)
+
+    imp_baked = (
+        baked_slots_by_date(baked_history, GRID_IMPORT_SIDE_ID)
+        if baked_history is not None else {}
+    )
+    exp_baked = (
+        baked_slots_by_date(baked_history, GRID_EXPORT_SIDE_ID)
+        if baked_history is not None else {}
+    )
+
+    imp_two_days_ago, exp_two_days_ago = _resolve_past_day(
+        engine, samples_by_side, price_slots,
+        two_days_ago_start, yesterday_start,
+        local_two_days_ago, imp_baked, exp_baked,
+    )
+    imp_yesterday, exp_yesterday = _resolve_past_day(
+        engine, samples_by_side, price_slots,
+        yesterday_start, today_start,
+        local_yesterday, imp_baked, exp_baked,
+    )
+
+    today_per_side = engine.build_slots_for_window(
+        samples_by_side=samples_by_side,
+        price_slots=price_slots,
+        window_start=today_start,
+        window_end=now,
+    )
+    imp_today = today_per_side[GRID_IMPORT_SIDE_ID]
+    exp_today = today_per_side[GRID_EXPORT_SIDE_ID]
+
+    imp_all = imp_two_days_ago + imp_yesterday + imp_today
+    exp_all = exp_two_days_ago + exp_yesterday + exp_today
+
+    slots = tuple(
+        ObservedGridSlot(
+            start=i.start,
+            end=i.end,
+            imported_kwh=i.kwh,
+            exported_kwh=e.kwh,
+            source="inverter",
+        )
+        for i, e in zip(imp_all, exp_all)
+    )
+
+    yest_imp = round(sum(s.kwh for s in imp_yesterday), 4)
+    yest_exp = round(sum(s.kwh for s in exp_yesterday), 4)
+    today_imp = round(sum(s.kwh for s in imp_today), 4)
+    today_exp = round(sum(s.kwh for s in exp_today), 4)
+
+    return ObservedGridSeries(
+        slots=slots,
+        computed_at=now,
+        total_yesterday_imported_kwh=yest_imp,
+        total_yesterday_exported_kwh=yest_exp,
+        total_today_imported_kwh=today_imp,
+        total_today_exported_kwh=today_exp,
+    )
+
+
+def _resolve_past_day(
+    engine: ObservedSeriesEngine,
+    samples_by_side: dict[str, tuple],
+    price_slots: tuple,
+    window_start: datetime,
+    window_end: datetime,
+    local_date,
+    imp_baked: dict,
+    exp_baked: dict,
+) -> tuple[list[SlotKwh], list[SlotKwh]]:
+    """Return ``(import_slots, export_slots)`` for a past local day.
+
+    For each side independently: if a baked record exists for ``local_date``,
+    use its ``baked_slots``; otherwise compute raw averaged slots from the
+    engine. Sides are independent — a day where only one side has a baked
+    record uses the baked slots for that side and raw averages for the other.
+
+    Args:
+        engine: Two-side grid engine.
+        samples_by_side: ``side_id → samples`` mapping covering both directions.
+        price_slots: Price grid.
+        window_start: Inclusive UTC start of the past day.
+        window_end: Exclusive UTC end of the past day.
+        local_date: The local date the window covers.
+        imp_baked: ``date_str → BakedDayRecord`` index for import side.
+        exp_baked: ``date_str → BakedDayRecord`` index for export side.
+
+    Returns:
+        ``(import_slots, export_slots)`` covering the past day.
+    """
+    date_str = local_date.isoformat()
+    imp_rec = imp_baked.get(date_str)
+    exp_rec = exp_baked.get(date_str)
+    if imp_rec is not None and exp_rec is not None:
+        return list(imp_rec.baked_slots), list(exp_rec.baked_slots)
+
+    raw_per_side = engine.build_slots_for_window(
+        samples_by_side=samples_by_side,
+        price_slots=price_slots,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    imp_slots = (
+        list(imp_rec.baked_slots) if imp_rec is not None
+        else raw_per_side[GRID_IMPORT_SIDE_ID]
+    )
+    exp_slots = (
+        list(exp_rec.baked_slots) if exp_rec is not None
+        else raw_per_side[GRID_EXPORT_SIDE_ID]
+    )
+    return imp_slots, exp_slots
 
 
 def _day_start(t: datetime, local_tz: TzInfo) -> datetime:

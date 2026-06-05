@@ -9,10 +9,9 @@ except ImportError:    # pragma: no cover
     from backports.zoneinfo import ZoneInfo    # type: ignore[no-redef]
 
 from custom_components.sun_sale.contract.models import (
-    GridExportTodayHistory,
-    GridImportTodayHistory,
-    GridPowerHistory,
-    GridPowerReading,
+    GridExportPowerHistory,
+    GridImportPowerHistory,
+    GridImportPowerReading,
     MonthlyBillState,
     ObservedGridSeries,
     ObservedGridSlot,
@@ -48,28 +47,31 @@ def _price_series(slots: list[PriceSlot]) -> PriceSeries:
     )
 
 
-def _samples_every_minute(start: datetime, count: int, power_kw: float) -> list[GridPowerReading]:
+def _samples_every_minute(
+    start: datetime, count: int, power_kw: float,
+) -> list[GridImportPowerReading]:
+    """Build per-minute import-power readings. Positive power → import side."""
     return [
-        GridPowerReading(power_kw=power_kw, timestamp=start + timedelta(minutes=i))
+        GridImportPowerReading(
+            power_kw=max(0.0, power_kw),
+            timestamp=start + timedelta(minutes=i),
+        )
         for i in range(count)
     ]
 
 
-_NO_IMPORT = GridImportTodayHistory(samples=())
-_NO_EXPORT = GridExportTodayHistory(samples=())
-
-
 def _grid_series_from_samples(
-    samples: list[GridPowerReading], price_series: PriceSeries, now: datetime,
+    samples: list[GridImportPowerReading], price_series: PriceSeries, now: datetime,
 ) -> ObservedGridSeries:
-    """Wrap raw grid-power samples into an ObservedGridSeries via the real builder.
+    """Wrap raw import-power samples into an ObservedGridSeries via the real builder.
 
-    Tests use this so they exercise the same path the DAG uses in production.
-    `now` must be on or after the last sample.
+    All current monthly_bill tests use positive (import) flow only, so the
+    export history is always empty here. Tests for mixed flows would
+    populate both histories.
     """
     return build_observed_grid_series(
-        GridPowerHistory(samples=tuple(samples)),
-        _NO_IMPORT, _NO_EXPORT,
+        GridImportPowerHistory(samples=tuple(samples)),
+        GridExportPowerHistory(samples=()),
         price_series.slots,
         now=now,
         local_tz=LOCAL_TZ,

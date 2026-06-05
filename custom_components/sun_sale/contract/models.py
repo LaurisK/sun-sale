@@ -680,24 +680,45 @@ class ForecastQualityStore:
 
 
 @dataclass(frozen=True)
-class GridPowerReading:
-    """Primary data: one snapshot of instantaneous grid power.
+class GridImportPowerReading:
+    """Primary data: instantaneous grid-import power magnitude (kW, ≥ 0).
 
-    Positive values indicate import from grid; negative values indicate export.
+    Produced by ``GridImportPowerObserver``. At any real-world moment only
+    one of import / export power is non-zero — grid flow is one-way.
     """
     power_kw: float
     timestamp: datetime
 
 
 @dataclass(frozen=True)
-class GridPowerHistory:
-    """Primary data: ordered snapshots of instantaneous grid power.
+class GridExportPowerReading:
+    """Primary data: instantaneous grid-export power magnitude (kW, ≥ 0).
 
-    Coordinator appends each cycle's GridPowerReading and persists the
-    rolling list (2 days) so per-slot net import/export can be derived
-    for electricity bill computation.
+    Produced by ``GridExportPowerObserver``. Mirror of
+    ``GridImportPowerReading``.
     """
-    samples: tuple[GridPowerReading, ...]
+    power_kw: float
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class GridImportPowerHistory:
+    """Primary data: rolling samples of grid-import power (kW, ≥ 0).
+
+    Coordinator appends each cycle's ``GridImportPowerReading`` and persists
+    the rolling list (2 days). Feeds the ``grid_import`` side of the
+    observed-series engine directly — no sign-split required.
+    """
+    samples: tuple[GridImportPowerReading, ...]
+
+
+@dataclass(frozen=True)
+class GridExportPowerHistory:
+    """Primary data: rolling samples of grid-export power (kW, ≥ 0).
+
+    Mirror of ``GridImportPowerHistory`` for the export direction.
+    """
+    samples: tuple[GridExportPowerReading, ...]
 
 
 @dataclass(frozen=True)
@@ -771,6 +792,89 @@ class ObservedGridSeries:
     total_yesterday_exported_kwh: float = 0.0
     total_today_imported_kwh: float = 0.0
     total_today_exported_kwh: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Observed-series engine contracts (bake-in + snapshot persistence)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SlotKwh:
+    """Single side's non-negative kWh for one price-grid slot.
+
+    Used as both the raw per-cycle engine output (today) and the persisted
+    baked output (yesterday and older). The wrapping record carries the side
+    identity and provenance; this dataclass is identity-free per slot.
+    """
+    start: datetime
+    end: datetime
+    kwh: float
+
+
+@dataclass(frozen=True)
+class BakedDayRecord:
+    """Per-day, per-side outcome of the once-per-day bake-in operation.
+
+    Captures both the inputs and outputs of the bake so integration checks can
+    surface divergence: `counter_total_used` is the inverter-side authoritative
+    total we baked against, `baked_sum` is the sum of `baked_slots`. When
+    `source_kind == "failed_no_source"` the slots equal the raw averaged
+    values and `counter_total_used` is 0.0 (no comparison is possible).
+    """
+    date_str: str               # local ISO date "YYYY-MM-DD" the slots cover
+    side_id: str                # matches Side.id in the engine
+    counter_total_used: float    # authoritative daily total used for bake
+    source_kind: str            # "dedicated_sensor" | "snapshot" | "failed_no_source"
+    baked_slots: tuple[SlotKwh, ...]
+    baked_sum: float            # sum of baked_slots kwh, after rounding
+    baked_at: datetime          # UTC timestamp when this record was written
+
+
+@dataclass(frozen=True)
+class BakedObservedHistory:
+    """All baked day records across all sides, sorted by (date_str, side_id).
+
+    Coordinator persists the whole tuple under a single storage key and trims
+    older records on each save according to retention policy.
+    """
+    records: tuple[BakedDayRecord, ...]
+
+
+@dataclass(frozen=True)
+class CounterSnapshotRecord:
+    """One pre-rollover snapshot of a single side's today-total counter.
+
+    Captured within the rollover window (configurable, typically last 30 min
+    of the local day) so the next-day bake-in has an authoritative value when
+    no dedicated yesterday-total sensor is configured for the side.
+    """
+    side_id: str
+    captured_at: datetime       # UTC timestamp of capture
+    today_total_kwh: float
+
+
+@dataclass(frozen=True)
+class CounterSnapshotHistory:
+    """Rolling history of pre-rollover counter snapshots across all sides.
+
+    Coordinator appends within the rollover window each cycle and trims older
+    snapshots on save.
+    """
+    records: tuple[CounterSnapshotRecord, ...]
+
+
+@dataclass(frozen=True)
+class InverterTimeReading:
+    """One paired snapshot of the inverter clock and HA's UTC clock.
+
+    The inverter clock is reported as a local-time datetime — the translator
+    attaches HA's local timezone and converts to UTC before constructing the
+    reading. ``skew = inverter_now - ha_now`` (positive means inverter is
+    ahead of HA).
+    """
+    ha_now: datetime          # UTC
+    inverter_now: datetime    # UTC, normalised from the inverter's local-time entity
 
 
 @dataclass(frozen=True)

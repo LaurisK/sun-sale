@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .contract.const import CONF_INVERTER_ENTITY_SOLAR_ENERGY, DOMAIN
 from .orchestration.coordinator import SunSaleCoordinator
 from .contract.models import (
+    BakedObservedHistory,
     BaseLoadProfile,
     BatteryRuntimeEstimate,
     CalculationResult,
@@ -30,6 +31,7 @@ from .contract.models import (
     InverterModeReading,
     MonthlyBillResult,
     ObservedGenerationSeries,
+    ObservedGridSeries,
     PriceSeries,
     PriceSlot,
     Schedule,
@@ -71,6 +73,15 @@ async def async_setup_entry(
         BatteryDrainUntilSensor(coordinator, entry),
         BaseloadConfidenceSensor(coordinator, entry),
         MonthlyBillSensor(coordinator, entry),
+        TodayGenerationLiveSensor(coordinator, entry),
+        TodayImportedLiveSensor(coordinator, entry),
+        TodayExportedLiveSensor(coordinator, entry),
+        TodayGenerationSlotSumSensor(coordinator, entry),
+        TodayImportedSlotSumSensor(coordinator, entry),
+        TodayExportedSlotSumSensor(coordinator, entry),
+        YesterdayGenerationBakedSensor(coordinator, entry),
+        YesterdayImportedBakedSensor(coordinator, entry),
+        YesterdayExportedBakedSensor(coordinator, entry),
     ])
 
 
@@ -972,3 +983,237 @@ class MonthlyBillSensor(_BaseSensor):
                 for s in result.slots
             ],
         }
+
+
+# ---------------------------------------------------------------------------
+# Observed-series sensors (live counter / slot-sum / baked yesterday)
+# ---------------------------------------------------------------------------
+
+class _ObservedKwhSensorBase(_BaseSensor):
+    """Shared kWh sensor base — energy class + native unit + non-negative round."""
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_suggested_display_precision = 3
+
+
+class _TodayLiveKwhSensor(_ObservedKwhSensorBase):
+    """Sensor reading a live today-total kWh counter from coordinator.data.
+
+    The value is the inverter's daily-resetting counter as last sampled,
+    matched directly to what the inverter app shows. State class
+    ``TOTAL_INCREASING`` because the counter monotonically rises within a
+    day and resets to 0 at local midnight (HA recognises the reset).
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    # Subclasses set _data_key (the coordinator.data dict key to read).
+    _data_key: str = ""
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the live counter value, or ``None`` when unavailable."""
+        data = self.coordinator.data or {}
+        value = data.get(self._data_key)
+        if value is None:
+            return None
+        return round(float(value), 3)
+
+
+class TodayGenerationLiveSensor(_TodayLiveKwhSensor):
+    """Today's solar generation total reported live by the inverter counter."""
+
+    _attr_name = "sunSale Today Generation"
+    _attr_icon = "mdi:solar-power"
+    _data_key = "today_generation_live_kwh"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the today-generation live counter sensor."""
+        super().__init__(coordinator, entry, "today_generation_live")
+
+
+class TodayImportedLiveSensor(_TodayLiveKwhSensor):
+    """Today's grid-imported total reported live by the inverter counter."""
+
+    _attr_name = "sunSale Today Imported"
+    _attr_icon = "mdi:transmission-tower-import"
+    _data_key = "today_imported_live_kwh"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the today-imported live counter sensor."""
+        super().__init__(coordinator, entry, "today_imported_live")
+
+
+class TodayExportedLiveSensor(_TodayLiveKwhSensor):
+    """Today's grid-exported total reported live by the inverter counter."""
+
+    _attr_name = "sunSale Today Exported"
+    _attr_icon = "mdi:transmission-tower-export"
+    _data_key = "today_exported_live_kwh"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the today-exported live counter sensor."""
+        super().__init__(coordinator, entry, "today_exported_live")
+
+
+class _TodaySlotSumKwhSensor(_ObservedKwhSensorBase):
+    """Diagnostic sensor exposing the sum of today's raw averaged slots.
+
+    Mid-day this can drift from the live inverter counter because today's
+    slots are raw power averages with no per-cycle correction; both are
+    expected to align at end-of-day when the bake-in finalises yesterday.
+    State class ``MEASUREMENT`` (not for energy-dashboard integration).
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_registry_enabled_default = False  # diagnostic; opt-in
+
+
+class TodayGenerationSlotSumSensor(_TodaySlotSumKwhSensor):
+    """Slot-sum of today's observed-generation series (diagnostic)."""
+
+    _attr_name = "sunSale Today Generation (slot sum)"
+    _attr_icon = "mdi:chart-line"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the today-generation slot-sum diagnostic sensor."""
+        super().__init__(coordinator, entry, "today_generation_slot_sum")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return ``ObservedGenerationSeries.total_today_so_far_kwh`` or ``None``."""
+        observed: ObservedGenerationSeries | None = (
+            self.coordinator.data or {}
+        ).get("observed_generation")
+        if observed is None:
+            return None
+        return round(observed.total_today_so_far_kwh, 3)
+
+
+class TodayImportedSlotSumSensor(_TodaySlotSumKwhSensor):
+    """Slot-sum of today's observed grid-import series (diagnostic)."""
+
+    _attr_name = "sunSale Today Imported (slot sum)"
+    _attr_icon = "mdi:chart-line"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the today-imported slot-sum diagnostic sensor."""
+        super().__init__(coordinator, entry, "today_imported_slot_sum")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return ``ObservedGridSeries.total_today_imported_kwh`` or ``None``."""
+        observed: ObservedGridSeries | None = (
+            self.coordinator.data or {}
+        ).get("observed_grid")
+        if observed is None:
+            return None
+        return round(observed.total_today_imported_kwh, 3)
+
+
+class TodayExportedSlotSumSensor(_TodaySlotSumKwhSensor):
+    """Slot-sum of today's observed grid-export series (diagnostic)."""
+
+    _attr_name = "sunSale Today Exported (slot sum)"
+    _attr_icon = "mdi:chart-line"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the today-exported slot-sum diagnostic sensor."""
+        super().__init__(coordinator, entry, "today_exported_slot_sum")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return ``ObservedGridSeries.total_today_exported_kwh`` or ``None``."""
+        observed: ObservedGridSeries | None = (
+            self.coordinator.data or {}
+        ).get("observed_grid")
+        if observed is None:
+            return None
+        return round(observed.total_today_exported_kwh, 3)
+
+
+class _YesterdayBakedKwhSensor(_ObservedKwhSensorBase):
+    """Sensor reading the baked yesterday total for one side.
+
+    Sources from ``coordinator.data["baked_observed_history"]``. State class
+    ``TOTAL`` because the value finalises once per day and never updates
+    again for that date. Exposes ``source_kind``, ``counter_total_used``,
+    and ``date_str`` as attributes so dashboards can branch on provenance.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL
+
+    _side_id: str = ""
+
+    def _yesterday_record(self):
+        """Return the BakedDayRecord for yesterday + ``_side_id``, or ``None``."""
+        history: BakedObservedHistory | None = (
+            self.coordinator.data or {}
+        ).get("baked_observed_history")
+        if history is None:
+            return None
+        local_tz = self.coordinator._sun_sale_config.local_tz  # noqa: SLF001
+        local_today = datetime.now(timezone.utc).astimezone(local_tz).date()
+        yesterday_str = (local_today - timedelta(days=1)).isoformat()
+        for r in history.records:
+            if r.date_str == yesterday_str and r.side_id == self._side_id:
+                return r
+        return None
+
+    @property
+    def native_value(self) -> float | None:
+        """Return ``baked_sum`` for yesterday on this side, or ``None``."""
+        record = self._yesterday_record()
+        if record is None:
+            return None
+        return round(record.baked_sum, 3)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the bake provenance fields as attributes."""
+        record = self._yesterday_record()
+        if record is None:
+            return {}
+        return {
+            "date":               record.date_str,
+            "source_kind":        record.source_kind,
+            "counter_total_used": round(record.counter_total_used, 3),
+            "baked_at":           record.baked_at.isoformat(),
+        }
+
+
+class YesterdayGenerationBakedSensor(_YesterdayBakedKwhSensor):
+    """Yesterday's solar generation total, finalised by the once-per-day bake-in."""
+
+    _attr_name = "sunSale Yesterday Generation"
+    _attr_icon = "mdi:solar-power-variant"
+    _side_id = "generation"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the yesterday-generation baked sensor."""
+        super().__init__(coordinator, entry, "yesterday_generation_baked")
+
+
+class YesterdayImportedBakedSensor(_YesterdayBakedKwhSensor):
+    """Yesterday's grid-imported total, finalised by the once-per-day bake-in."""
+
+    _attr_name = "sunSale Yesterday Imported"
+    _attr_icon = "mdi:transmission-tower-import"
+    _side_id = "grid_import"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the yesterday-imported baked sensor."""
+        super().__init__(coordinator, entry, "yesterday_imported_baked")
+
+
+class YesterdayExportedBakedSensor(_YesterdayBakedKwhSensor):
+    """Yesterday's grid-exported total, finalised by the once-per-day bake-in."""
+
+    _attr_name = "sunSale Yesterday Exported"
+    _attr_icon = "mdi:transmission-tower-export"
+    _side_id = "grid_export"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the yesterday-exported baked sensor."""
+        super().__init__(coordinator, entry, "yesterday_exported_baked")

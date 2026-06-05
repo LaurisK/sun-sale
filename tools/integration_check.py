@@ -1106,6 +1106,127 @@ def check_battery(snap: Snapshot) -> BatteryCheckResult:
 
 
 # ---------------------------------------------------------------------------
+# Baked observed deep check — counter_total_used vs baked_sum per (date, side)
+# ---------------------------------------------------------------------------
+
+# Per-side tolerances for the bake-in fault threshold. A record is flagged
+# only when both the absolute and relative thresholds are exceeded; the
+# combined rule is ``|counter - baked| > max(abs_tol, rel_tol × counter)``.
+_BAKE_CHECK_TOLERANCES: dict[str, tuple[float, float]] = {
+    "generation":  (0.2, 0.02),
+    "grid_import": (0.1, 0.02),
+    "grid_export": (0.1, 0.02),
+}
+
+
+@dataclass
+class BakedObservedCheckRow:
+    """Per-record summary line surfaced in the bake-in deep-check widget."""
+
+    date_str: str = ""
+    side_id: str = ""
+    source_kind: str = ""
+    counter_total_used: float = 0.0
+    baked_sum: float = 0.0
+    delta: float = 0.0
+    threshold: float = 0.0
+    status: str = ""    # "ok" | "fault" | "no_source"
+
+
+@dataclass
+class BakedObservedCheckResult:
+    """Aggregate result of ``check_baked_observed``.
+
+    Reports per-record status plus rollup counts. The bake-in is the
+    authoritative pipeline-vs-inverter comparison; ``fault_count`` is the
+    number of records whose ``|counter - baked| > max(abs, rel × counter)``.
+    ``no_source_count`` covers records where the resolver failed and no
+    comparison is possible.
+    """
+
+    skipped: bool = False
+    skip_reason: str = ""
+    record_count: int = 0
+    fault_count: int = 0
+    no_source_count: int = 0
+    rows: list[BakedObservedCheckRow] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
+    overall_ok: bool = True
+
+
+def check_baked_observed(snap: Snapshot) -> BakedObservedCheckResult:
+    """Compare ``counter_total_used`` against ``baked_sum`` per baked record.
+
+    Per record:
+      * ``source_kind == "failed_no_source"`` → status ``no_source`` (not a fault,
+        but counted separately so the rollup surfaces resolver failures).
+      * otherwise: ``delta = |counter_total_used - baked_sum|``;
+        ``threshold = max(abs_tol, rel_tol × counter_total_used)``;
+        ``status = "fault"`` when ``delta > threshold``, else ``"ok"``.
+
+    Args:
+        snap: Coordinator snapshot containing ``pipeline.baked_observed_history``.
+
+    Returns:
+        ``BakedObservedCheckResult`` with per-record rows + aggregate counts.
+    """
+    result = BakedObservedCheckResult()
+
+    baked = snap.pipeline.get("baked_observed_history")
+    if not baked:
+        result.skipped = True
+        result.skip_reason = (
+            "pipeline.baked_observed_history is null "
+            "(no bake-in has run yet on this entry)"
+        )
+        return result
+
+    records = baked.get("records") or []
+    result.record_count = len(records)
+
+    for r in records:
+        side_id = r.get("side_id", "")
+        source_kind = r.get("source_kind", "")
+        counter_total = float(r.get("counter_total_used", 0.0))
+        baked_sum = float(r.get("baked_sum", 0.0))
+
+        if source_kind == "failed_no_source":
+            result.no_source_count += 1
+            result.rows.append(BakedObservedCheckRow(
+                date_str=r.get("date", ""),
+                side_id=side_id,
+                source_kind=source_kind,
+                counter_total_used=counter_total,
+                baked_sum=baked_sum,
+                delta=0.0,
+                threshold=0.0,
+                status="no_source",
+            ))
+            continue
+
+        abs_tol, rel_tol = _BAKE_CHECK_TOLERANCES.get(side_id, (0.2, 0.02))
+        threshold = max(abs_tol, rel_tol * counter_total)
+        delta = abs(counter_total - baked_sum)
+        is_fault = delta > threshold
+        if is_fault:
+            result.fault_count += 1
+            result.mismatches.append(f"{r.get('date', '')}:{side_id}")
+            result.overall_ok = False
+        result.rows.append(BakedObservedCheckRow(
+            date_str=r.get("date", ""),
+            side_id=side_id,
+            source_kind=source_kind,
+            counter_total_used=counter_total,
+            baked_sum=baked_sum,
+            delta=delta,
+            threshold=threshold,
+            status="fault" if is_fault else "ok",
+        ))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Observed generation deep check
 # ---------------------------------------------------------------------------
 
@@ -1220,19 +1341,18 @@ def check_observed_grid(snap: Snapshot) -> ObservedGridCheckResult:
 
     Cross-checks every ObservedGridSlot:
       * imported_kwh ≥ 0 and exported_kwh ≥ 0
-      * per-slot import/export reconstructed from ``inputs.grid_power_history``
-        samples within [slot.start, slot.end), splitting each sample by sign
-        before averaging. After today's end-of-day correction is applied
-        the reconstructed values may differ by a scalar factor — a mismatch
-        only fails the check when *both* the declared and the reconstructed
-        value are zero on opposite sides, or when neither side has a counter
-        explanation for the divergence.
+      * per-slot import/export reconstructed from
+        ``inputs.grid_import_power_history`` and
+        ``inputs.grid_export_power_history`` — each direction averages its
+        own stream within [slot.start, slot.end). Per-cycle correction is
+        gone in the redesign, so the reconstructed values should match the
+        declared ones modulo rounding outside the today + bake-in window.
       * Sum of slot imports / exports matches each declared total for both
         yesterday and today_so_far.
 
     Args:
-        snap: Coordinator snapshot containing pipeline.observed_grid and
-            inputs.grid_power_history.
+        snap: Coordinator snapshot containing ``pipeline.observed_grid`` and
+            both ``inputs.grid_*_power_history`` entries.
 
     Returns:
         ObservedGridCheckResult with per-slot data and overall pass/fail.
@@ -1252,17 +1372,25 @@ def check_observed_grid(snap: Snapshot) -> ObservedGridCheckResult:
     result.total_today_exported_kwh = og.get("total_today_exported_kwh", 0.0)
     result.computed_at = og.get("computed_at", "")
 
-    history = snap.inputs.get("grid_power_history") or {}
-    raw_samples = history.get("samples") or []
-    parsed_samples: list[tuple[datetime, float]] = []
-    for s in raw_samples:
-        try:
-            parsed_samples.append((
-                datetime.fromisoformat(s.get("timestamp", "")),
-                float(s.get("power_kw", 0.0)),
-            ))
-        except (ValueError, TypeError):
-            continue
+    def _parse_history(key: str) -> list[tuple[datetime, float]]:
+        """Parse a directional-power history payload into ``[(ts, kw)]``."""
+        history = snap.inputs.get(key) or {}
+        raw_samples = history.get("samples") or []
+        parsed: list[tuple[datetime, float]] = []
+        for s in raw_samples:
+            try:
+                parsed.append((
+                    datetime.fromisoformat(s.get("timestamp", "")),
+                    float(s.get("power_kw", 0.0)),
+                ))
+            except (ValueError, TypeError):
+                continue
+        parsed.sort(key=lambda x: x[0])
+        return parsed
+
+    imp_samples = _parse_history("grid_import_power_history")
+    exp_samples = _parse_history("grid_export_power_history")
+    parsed_samples = imp_samples + exp_samples
     parsed_samples.sort(key=lambda x: x[0])
     result.grid_history_sample_count = len(parsed_samples)
     if parsed_samples:
@@ -1296,15 +1424,13 @@ def check_observed_grid(snap: Snapshot) -> ObservedGridCheckResult:
         exp_exp = 0.0
         energy_ok = True
         if bs_start is not None and bs_end is not None:
-            samples_in_slot = [
-                kw for (ts, kw) in parsed_samples if bs_start <= ts < bs_end
-            ]
-            sample_count = len(samples_in_slot)
-            if samples_in_slot:
+            imp_in_slot = [kw for (ts, kw) in imp_samples if bs_start <= ts < bs_end]
+            exp_in_slot = [kw for (ts, kw) in exp_samples if bs_start <= ts < bs_end]
+            sample_count = len(imp_in_slot) + len(exp_in_slot)
+            if imp_in_slot or exp_in_slot:
                 duration_h = (bs_end - bs_start).total_seconds() / 3600.0
-                n = len(samples_in_slot)
-                avg_imp_kw = sum(max(0.0, k) for k in samples_in_slot) / n
-                avg_exp_kw = sum(max(0.0, -k) for k in samples_in_slot) / n
+                avg_imp_kw = (sum(max(0.0, k) for k in imp_in_slot) / len(imp_in_slot)) if imp_in_slot else 0.0
+                avg_exp_kw = (sum(max(0.0, k) for k in exp_in_slot) / len(exp_in_slot)) if exp_in_slot else 0.0
                 exp_imp = avg_imp_kw * duration_h
                 exp_exp = avg_exp_kw * duration_h
             # Today's slot values may be scaled by the end-of-day counter
@@ -2215,7 +2341,7 @@ class ObservedGridCheckWidget(Static):
                 markup=True,
             )
             yield Static(
-                f"  grid_power_history: {og.grid_history_sample_count} sample(s)"
+                f"  grid_*_power_history: {og.grid_history_sample_count} sample(s)"
                 + (
                     f"  first={og.grid_history_first_sample}  last={og.grid_history_last_sample}"
                     if og.grid_history_sample_count else ""
@@ -2223,6 +2349,86 @@ class ObservedGridCheckWidget(Static):
             )
             with Collapsible(title="Slots", collapsed=False):
                 yield ObservedGridSlotsTable(og)
+
+
+class BakedObservedRowsTable(Static):
+    """DataTable: Date | Side | Source | Counter | Baked | |Δ| | Threshold | Status."""
+
+    DEFAULT_CSS = """
+    BakedObservedRowsTable { height: auto; }
+    BakedObservedRowsTable DataTable { height: 20; }
+    """
+
+    def __init__(self, bk: BakedObservedCheckResult) -> None:
+        """Initialise with the baked-observed check result.
+
+        Args:
+            bk: Result of ``check_baked_observed`` containing per-record rows.
+        """
+        super().__init__()
+        self._bk = bk
+
+    def compose(self) -> ComposeResult:
+        """Yield the DataTable placeholder; rows are added in on_mount."""
+        yield DataTable(show_cursor=False, zebra_stripes=True)
+
+    def on_mount(self) -> None:
+        """Populate the table with one row per BakedDayRecord."""
+        table = self.query_one(DataTable)
+        table.add_columns("Date", "Side", "Source", "Counter", "Baked", "|Δ|", "Thr", "✓/✗")
+        for r in self._bk.rows:
+            style = "green" if r.status == "ok" else (
+                "yellow" if r.status == "no_source" else "red"
+            )
+            mark = "✓" if r.status == "ok" else (
+                "—" if r.status == "no_source" else "✗"
+            )
+            table.add_row(
+                Text(r.date_str),
+                Text(r.side_id),
+                Text(r.source_kind, style="dim"),
+                Text(f"{r.counter_total_used:.3f}"),
+                Text(f"{r.baked_sum:.3f}"),
+                Text(f"{r.delta:.3f}", style=style),
+                Text(f"{r.threshold:.3f}", style="dim"),
+                Text(mark, style=style),
+            )
+
+
+class BakedObservedCheckWidget(Static):
+    """Collapsible bake-in deep-check: per (date, side) counter-vs-baked divergence."""
+
+    DEFAULT_CSS = "BakedObservedCheckWidget { height: auto; }"
+
+    def __init__(self, bk: BakedObservedCheckResult) -> None:
+        """Initialise with the pre-computed baked-observed check result.
+
+        Args:
+            bk: Result of ``check_baked_observed`` for one coordinator.
+        """
+        super().__init__()
+        self._bk = bk
+
+    def compose(self) -> ComposeResult:
+        """Render aggregate counts and the per-record table."""
+        bk = self._bk
+
+        if bk.skipped:
+            yield Static(f"  ⚠  baked_observed_check   SKIP   {bk.skip_reason}")
+            return
+
+        color = "green" if bk.overall_ok and bk.no_source_count == 0 else (
+            "yellow" if bk.overall_ok else "red"
+        )
+        mark = "✓" if bk.overall_ok else "✗"
+        status = "PASS" if bk.overall_ok else "FAIL"
+        title = (
+            f"[{color}]{mark}[/{color}]  baked_observed_check   [{color}]{status}[/{color}]"
+            f"   {bk.record_count} record(s)"
+            f"   faults={bk.fault_count}   no_source={bk.no_source_count}"
+        )
+        with Collapsible(title=title, collapsed=True):
+            yield BakedObservedRowsTable(bk)
 
 
 class ForecastAccuracySlotsTable(Static):
@@ -3005,7 +3211,8 @@ def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
 
     Args:
         snap: Coordinator snapshot containing pipeline.monthly_bill,
-            pipeline.pricing, pipeline.observed_grid, and inputs.grid_power_history.
+            pipeline.pricing, pipeline.observed_grid, and
+            ``inputs.grid_import_power_history`` / ``grid_export_power_history``.
 
     Returns:
         MonthlyBillCheckResult with aggregation cross-checks, dense per-slot
@@ -3051,17 +3258,17 @@ def check_monthly_bill(snap: Snapshot) -> MonthlyBillCheckResult:
             continue
     parsed_pricing.sort(key=lambda x: x[0])
 
-    history = snap.inputs.get("grid_power_history") or {}
-    raw_samples = history.get("samples") or []
     parsed_samples: list[tuple[datetime, float]] = []
-    for s in raw_samples:
-        try:
-            parsed_samples.append((
-                datetime.fromisoformat(s.get("timestamp", "")),
-                float(s.get("power_kw", 0.0)),
-            ))
-        except (ValueError, TypeError):
-            continue
+    for key in ("grid_import_power_history", "grid_export_power_history"):
+        history = snap.inputs.get(key) or {}
+        for s in history.get("samples") or []:
+            try:
+                parsed_samples.append((
+                    datetime.fromisoformat(s.get("timestamp", "")),
+                    float(s.get("power_kw", 0.0)),
+                ))
+            except (ValueError, TypeError):
+                continue
     parsed_samples.sort(key=lambda x: x[0])
     result.grid_history_sample_count = len(parsed_samples)
     if parsed_samples:
@@ -3172,8 +3379,8 @@ class MonthlyBillSlotsTable(Static):
     """DataTable: Time | Imp kWh | Exp kWh | Buy € | Sell € | Net € | Samples | ✓/✗.
 
     Renders every slot — including those with zero imported/exported — so
-    gaps in the source GridPowerHistory are visible to the reviewer instead
-    of being silently dropped from the breakdown.
+    gaps in the source import / export histories are visible to the reviewer
+    instead of being silently dropped from the breakdown.
     """
 
     DEFAULT_CSS = """
@@ -3306,7 +3513,7 @@ _DEEP_CATS: frozenset[str] = frozenset({
     "observed_generation", "observed_grid", "forecast_accuracy",
     "charging_profile", "base_load", "battery_runtime",
     "household_consumption", "profitability", "forecast_quality",
-    "monthly_bill",
+    "monthly_bill", "baked_observed",
 })
 
 
@@ -3743,6 +3950,8 @@ class IntegrationCheckApp(App):
     ObservedGenerationSlotsTable DataTable { height: 18; }
     ObservedGridCheckWidget { height: auto; }
     ObservedGridSlotsTable DataTable { height: 22; }
+    BakedObservedCheckWidget { height: auto; }
+    BakedObservedRowsTable DataTable { height: 20; }
     ForecastAccuracyCheckWidget { height: auto; }
     ForecastAccuracySlotsTable DataTable { height: 18; }
     ChargingProfileCheckWidget { height: auto; }
@@ -3767,6 +3976,7 @@ class IntegrationCheckApp(App):
         battery_results: dict[str, BatteryCheckResult],
         observed_gen_results: dict[str, ObservedGenerationCheckResult],
         observed_grid_results: dict[str, ObservedGridCheckResult],
+        baked_observed_results: dict[str, BakedObservedCheckResult],
         forecast_acc_results: dict[str, ForecastAccuracyCheckResult],
         charging_profile_results: dict[str, ChargingProfileCheckResult],
         base_load_results: dict[str, BaseLoadCheckResult],
@@ -3787,6 +3997,7 @@ class IntegrationCheckApp(App):
             battery_results: Per-entry battery state/status deep-check results.
             observed_gen_results: Per-entry observed generation deep-check results.
             observed_grid_results: Per-entry observed grid import/export deep-check results.
+            baked_observed_results: Per-entry bake-in (counter vs baked) deep-check results.
             forecast_acc_results: Per-entry forecast accuracy deep-check results.
             charging_profile_results: Per-entry charging profile deep-check results.
             base_load_results: Per-entry base load profile deep-check results.
@@ -3805,6 +4016,7 @@ class IntegrationCheckApp(App):
         self._battery_results = battery_results
         self._observed_gen_results = observed_gen_results
         self._observed_grid_results = observed_grid_results
+        self._baked_observed_results = baked_observed_results
         self._forecast_acc_results = forecast_acc_results
         self._charging_profile_results = charging_profile_results
         self._base_load_results = base_load_results
@@ -3829,6 +4041,7 @@ class IntegrationCheckApp(App):
             + list(self._battery_results.values())
             + list(self._observed_gen_results.values())
             + list(self._observed_grid_results.values())
+            + list(self._baked_observed_results.values())
             + list(self._forecast_acc_results.values())
             + list(self._charging_profile_results.values())
             + list(self._base_load_results.values())
@@ -3865,6 +4078,7 @@ class IntegrationCheckApp(App):
                 ("battery",                 BatteryCheckWidget,                 self._battery_results),
                 ("observed_generation",     ObservedGenerationCheckWidget,      self._observed_gen_results),
                 ("observed_grid",           ObservedGridCheckWidget,            self._observed_grid_results),
+                ("baked_observed",          BakedObservedCheckWidget,           self._baked_observed_results),
                 ("forecast_accuracy",       ForecastAccuracyCheckWidget,        self._forecast_acc_results),
                 ("charging_profile",        ChargingProfileCheckWidget,         self._charging_profile_results),
                 ("base_load",               BaseLoadCheckWidget,                self._base_load_results),
@@ -4114,6 +4328,7 @@ def main(argv: list[str] | None = None) -> int:
     battery_results                = {s.entry_id: check_battery(s)                   for s in snapshots}
     observed_gen_results           = {s.entry_id: check_observed_generation(s)       for s in snapshots}
     observed_grid_results          = {s.entry_id: check_observed_grid(s)             for s in snapshots}
+    baked_observed_results         = {s.entry_id: check_baked_observed(s)            for s in snapshots}
     forecast_acc_results           = {s.entry_id: check_forecast_accuracy(s)         for s in snapshots}
     charging_profile_results       = {s.entry_id: check_charging_profile(s)          for s in snapshots}
     base_load_results              = {s.entry_id: check_base_load(s)                 for s in snapshots}
@@ -4127,6 +4342,7 @@ def main(argv: list[str] | None = None) -> int:
         forecast_results, pricing_results, calculation_results,
         schedule_results, battery_results,
         observed_gen_results, observed_grid_results,
+        baked_observed_results,
         forecast_acc_results, charging_profile_results,
         base_load_results, battery_runtime_results,
         household_consumption_results, profitability_results,

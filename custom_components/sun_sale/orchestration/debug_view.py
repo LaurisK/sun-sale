@@ -44,6 +44,8 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     pricing = data.get("pricing")
     forecast = data.get("forecast")
     calculation = data.get("calculation")
+    baked_history = data.get("baked_observed_history")
+    snapshot_history = data.get("counter_snapshot_history")
     observed_gen = data.get("observed_generation")
     forecast_err = data.get("forecast_error")
     charging_prof = data.get("charging_profile")
@@ -54,7 +56,8 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     forecast_quality = data.get("forecast_quality")
     sun_times = data.get("sun_times")
     monthly_bill = data.get("monthly_bill")
-    grid_power_history = data.get("grid_power_history")
+    grid_import_power_history = data.get("grid_import_power_history")
+    grid_export_power_history = data.get("grid_export_power_history")
     observed_grid = data.get("observed_grid")
 
     cfg = coordinator._config  # noqa: SLF001
@@ -66,11 +69,12 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
             "nordpool_entity": cfg.get(CONF_NORDPOOL_ENTITY, ""),
             "solar_forecast_entity": cfg.get(CONF_SOLAR_FORECAST_ENTITY, ""),
             "solar_forecast_entity_2": cfg.get(CONF_SOLAR_FORECAST_ENTITY_2, ""),
-            # Resolved entity-ID map that feeds GridObserver / InverterController.
-            # Useful to confirm whether the Solis auto-detect path actually landed
-            # on grid_power_net (vs. falling through to a legacy manual mapping).
+            # Resolved entity-ID map that feeds InverterController. Useful to
+            # confirm whether the Solis auto-detect path actually landed on the
+            # expected entities (vs. falling through to a legacy manual mapping).
             "inverter_entity_ids": getattr(coordinator, "_inverter_entity_ids", {}),
-            "grid_power_entity_id": getattr(coordinator, "_grid_power_entity_id", ""),
+            "grid_import_power_entity_id": getattr(coordinator, "_grid_import_power_entity_id", ""),
+            "grid_export_power_entity_id": getattr(coordinator, "_grid_export_power_entity_id", ""),
         },
         "inputs": {
             "nordpool_prices": [
@@ -83,13 +87,20 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "estimated_capacity_kwh": data.get("estimated_capacity"),
             } if battery_state is not None else None,
             "grid_power_kw": data.get("grid_power_kw"),
-            "grid_power_history": {
-                "sample_count": len(grid_power_history.samples),
+            "grid_import_power_history": {
+                "sample_count": len(grid_import_power_history.samples),
                 "samples": [
                     {"timestamp": s.timestamp.isoformat(), "power_kw": round(s.power_kw, 4)}
-                    for s in grid_power_history.samples
+                    for s in grid_import_power_history.samples
                 ],
-            } if grid_power_history is not None else None,
+            } if grid_import_power_history is not None else None,
+            "grid_export_power_history": {
+                "sample_count": len(grid_export_power_history.samples),
+                "samples": [
+                    {"timestamp": s.timestamp.isoformat(), "power_kw": round(s.power_kw, 4)}
+                    for s in grid_export_power_history.samples
+                ],
+            } if grid_export_power_history is not None else None,
             "tariff_config": (
                 dataclasses.asdict(coordinator.tariff_config)
                 if coordinator.tariff_config is not None else None
@@ -106,6 +117,17 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for e in getattr(coordinator, "_yesterday_solar", [])
                 ],
             },
+            "counter_snapshot_history": {
+                "record_count": len(snapshot_history.records),
+                "records": [
+                    {
+                        "side_id":         r.side_id,
+                        "captured_at":     r.captured_at.isoformat(),
+                        "today_total_kwh": round(r.today_total_kwh, 4),
+                    }
+                    for r in snapshot_history.records
+                ],
+            } if snapshot_history is not None else None,
         },
         "pipeline": {
             "pricing": {
@@ -188,6 +210,29 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for s in observed_grid.slots
                 ],
             } if observed_grid is not None else None,
+            "baked_observed_history": {
+                "record_count": len(baked_history.records),
+                "records": [
+                    {
+                        "date":               r.date_str,
+                        "side_id":            r.side_id,
+                        "counter_total_used": round(r.counter_total_used, 4),
+                        "source_kind":        r.source_kind,
+                        "baked_sum":          round(r.baked_sum, 4),
+                        "baked_at":           r.baked_at.isoformat(),
+                        "slot_count":         len(r.baked_slots),
+                        "slots": [
+                            {
+                                "start": s.start.isoformat(),
+                                "end":   s.end.isoformat(),
+                                "kwh":   round(s.kwh, 4),
+                            }
+                            for s in r.baked_slots
+                        ],
+                    }
+                    for r in baked_history.records
+                ],
+            } if baked_history is not None else None,
             "forecast_error": {
                 "slot_count": len(forecast_err.slots),
                 "total_forecast_kwh": round(forecast_err.total_forecast_kwh, 4),

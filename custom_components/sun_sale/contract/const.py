@@ -62,6 +62,18 @@ CONF_INVERTER_ENTITY_SOLAR_ENERGY = "inverter_entity_solar_energy"
 CONF_INVERTER_ENTITY_PV_POWER = "inverter_entity_pv_power"
 CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY = "inverter_entity_grid_import_energy"
 CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY = "inverter_entity_grid_export_energy"
+# Per-direction instantaneous grid-power entities (preferred). When both are
+# configured, the coordinator uses these in place of the legacy signed
+# ``CONF_INVERTER_ENTITY_GRID_POWER``. Each entity must report a
+# non-negative magnitude in W or kW for its direction only — the other
+# direction reads ~0 at any moment because grid flow is one-way.
+CONF_INVERTER_ENTITY_GRID_IMPORT_POWER = "inverter_entity_grid_import_power"
+CONF_INVERTER_ENTITY_GRID_EXPORT_POWER = "inverter_entity_grid_export_power"
+# Optional: HA entity exposing the inverter's own clock (local-time
+# datetime). When set, the inverter_time module tracks HA↔inverter skew so
+# the pre-rollover snapshot fires relative to the inverter's idea of midnight
+# instead of HA's. Leaving this empty disables skew correction.
+CONF_INVERTER_ENTITY_INVERTER_CLOCK = "inverter_entity_inverter_clock"
 
 # Persistent storage
 STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"
@@ -71,7 +83,8 @@ STORAGE_KEY_PV_POWER = f"{DOMAIN}_pv_power"
 STORAGE_KEY_HOUSEHOLD_LOAD = f"{DOMAIN}_household_load"
 STORAGE_KEY_PRICE_HISTORY = f"{DOMAIN}_price_history"
 STORAGE_KEY_FORECAST_QUALITY = f"{DOMAIN}_forecast_quality"
-STORAGE_KEY_GRID_POWER = f"{DOMAIN}_grid_power"
+STORAGE_KEY_GRID_IMPORT_POWER = f"{DOMAIN}_grid_import_power"
+STORAGE_KEY_GRID_EXPORT_POWER = f"{DOMAIN}_grid_export_power"
 STORAGE_KEY_GRID_IMPORT_TOTAL = f"{DOMAIN}_grid_import_total"
 STORAGE_KEY_GRID_EXPORT_TOTAL = f"{DOMAIN}_grid_export_total"
 STORAGE_KEY_MONTHLY_BILL = f"{DOMAIN}_monthly_bill"
@@ -85,7 +98,9 @@ GENERATION_HISTORY_RETENTION_DAYS = 2
 # Rolling PV-power-sample retention (days). Covers yesterday + today slots.
 PV_POWER_HISTORY_RETENTION_DAYS = 2
 
-# Rolling grid-power-sample retention (days). Covers yesterday + today for billing.
+# Rolling per-direction grid-power-sample retention (days). One value applies
+# to both the import and export history stores. Covers yesterday + today for
+# billing.
 GRID_POWER_HISTORY_RETENTION_DAYS = 2
 
 # Rolling import/export today-total counter retention (days). Same window as
@@ -93,6 +108,45 @@ GRID_POWER_HISTORY_RETENTION_DAYS = 2
 # available alongside today's samples.
 GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS = 2
 GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS = 2
+
+# Baked observed history retention (days). Keeps enough history for the
+# integration check's rollup window (per-side faults over the last month).
+BAKED_OBSERVED_HISTORY_RETENTION_DAYS = 35
+
+# Pre-rollover counter snapshot retention (days). Snapshots only need to
+# survive long enough for the next-day bake-in to consume them.
+COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS = 2
+
+# Persistent storage keys for the new observed-series stores.
+STORAGE_KEY_BAKED_OBSERVED = f"{DOMAIN}_baked_observed"
+STORAGE_KEY_COUNTER_SNAPSHOT = f"{DOMAIN}_counter_snapshot"
+
+# Bake-in source-kind discriminator values stored in BakedDayRecord.source_kind.
+SOURCE_KIND_DEDICATED_SENSOR = "dedicated_sensor"
+SOURCE_KIND_SNAPSHOT = "snapshot"
+SOURCE_KIND_FAILED_NO_SOURCE = "failed_no_source"
+
+# Bake-in hard cutoff — local time after which a bake-in attempt records
+# failed_no_source if no source value has materialised. Expressed as
+# (hour, minute) tuple in the local timezone.
+BAKE_IN_HARD_CUTOFF_LOCAL = (6, 0)
+
+# Pre-rollover snapshot window — local time range during which the snapshot
+# module captures the current today-total counter values. Expressed as
+# ((start_hour, start_minute), (end_hour, end_minute)) in local time.
+SNAPSHOT_WINDOW_LOCAL = ((23, 30), (23, 59))
+
+# Inverter clock-skew tracker: minimum samples in the rolling window before
+# ``current_skew_seconds`` returns a value. Until then, the snapshot module
+# uses HA local time directly (no shift).
+INVERTER_TIME_MIN_SAMPLES = 5
+
+# Inverter clock-skew tracker: maximum samples retained in the rolling
+# window. Older samples are trimmed each cycle. Sized so a 5 min coordinator
+# cadence yields roughly four hours of history — enough for the median to
+# track gradual drift but small enough that a one-shot bad reading washes
+# out quickly.
+INVERTER_TIME_MAX_SAMPLES = 50
 
 # Rolling household-load retention (days). Sized at ~1.5× the baseload
 # profile window (30d) so a few stale samples at the tail don't strand

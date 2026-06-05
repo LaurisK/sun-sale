@@ -1,15 +1,24 @@
-"""Tests for inbound/generation.py — pure Python, no HA required."""
+"""Tests for inbound/generation.py — pure Python, no HA required.
+
+After the bake-in redesign, the per-cycle counter correction and the
+counter-difference fallback have been removed; only the PV-power averaging
+path remains. Yesterday's slots are raw averages until the once-per-day
+bake-in (Phase 3) replaces them with proportionally-corrected values.
+"""
 from datetime import datetime, timedelta, timezone
 
+from custom_components.sun_sale.contract.const import SOURCE_KIND_DEDICATED_SENSOR
 from custom_components.sun_sale.contract.models import (
-    GenerationHistory,
-    GenerationReading,
+    BakedDayRecord,
+    BakedObservedHistory,
     PriceEntry,
     PriceSeries,
     PvPowerHistory,
     PvPowerReading,
+    SlotKwh,
 )
 from custom_components.sun_sale.inbound.generation import (
+    GENERATION_SIDE_ID,
     build_observed_generation_series,
 )
 from custom_components.sun_sale.inbound.pricing import build_price_series
@@ -21,7 +30,6 @@ TODAY = NOW.date()
 YESTERDAY = TODAY - timedelta(days=1)
 
 _NO_POWER = PvPowerHistory(samples=())
-_NO_GEN = GenerationHistory(samples=())
 
 
 def _hourly_72h_price_series() -> PriceSeries:
@@ -46,10 +54,6 @@ def _empty_hourly_today() -> PriceSeries:
     )
 
 
-def _reading(t: datetime, kwh: float) -> GenerationReading:
-    return GenerationReading(today_total_kwh=kwh, timestamp=t)
-
-
 def _power(t: datetime, w: float) -> PvPowerReading:
     return PvPowerReading(power_w=w, timestamp=t)
 
@@ -60,127 +64,91 @@ def _power(t: datetime, w: float) -> PvPowerReading:
 
 def test_empty_history_yields_empty_series():
     series = build_observed_generation_series(
-        _NO_POWER, _NO_GEN, _empty_hourly_today().slots, now=NOW
+        _NO_POWER, _empty_hourly_today().slots, now=NOW
     )
     assert series.slots == ()
     assert series.total_yesterday_kwh == 0.0
     assert series.total_today_so_far_kwh == 0.0
 
 
-def test_single_counter_sample_cannot_be_differenced():
-    history = GenerationHistory(samples=(_reading(NOW.replace(hour=10), 1.0),))
-    series = build_observed_generation_series(
-        _NO_POWER, history, _empty_hourly_today().slots, now=NOW
-    )
-    assert series.slots == ()
-
-
 def test_empty_price_grid_yields_empty_series():
-    base = NOW
-    history = GenerationHistory(samples=(
-        _reading(base, 0.0),
-        _reading(base + timedelta(hours=1), 2.0),
-    ))
-    series = build_observed_generation_series(_NO_POWER, history, (), now=NOW)
+    history = PvPowerHistory(samples=(_power(NOW, 2000.0),))
+    series = build_observed_generation_series(history, (), now=NOW)
     assert series.slots == ()
 
 
 # ---------------------------------------------------------------------------
-# Counter fallback: per-slot differencing on a single day
+# PV power averaging — slot kWh
 # ---------------------------------------------------------------------------
 
-def test_one_interval_fully_inside_one_slot():
-    # samples at 10:00 and 11:00 with delta = 2 kWh → today hour-10 slot gets 2 kWh
+def test_power_averaging_one_sample_per_slot():
+    """2000 W reading at 10:30 → 1h slot → 2.0 kWh."""
     now = NOW.replace(hour=12)
-    history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=10), 0.0),
-        _reading(NOW.replace(hour=11), 2.0),
+    power_history = PvPowerHistory(samples=(
+        _power(NOW.replace(hour=10, minute=30), 2000.0),
     ))
     series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
-    )
-    by_hour = {(s.start.date(), s.start.hour): s.generated_kwh for s in series.slots}
-    assert abs(by_hour[(TODAY, 10)] - 2.0) < 1e-6
-    # Other today slots are zero
-    assert by_hour[(TODAY, 11)] == 0.0
-
-
-def test_interval_spanning_two_slots_split_by_overlap():
-    # Sample at 10:30 → 11:30, delta 4 kWh; half lands in hour-10, half in hour-11
-    now = NOW.replace(hour=12)
-    history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=10, minute=30), 0.0),
-        _reading(NOW.replace(hour=11, minute=30), 4.0),
-    ))
-    series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
-    )
-    by_hour = {(s.start.date(), s.start.hour): s.generated_kwh for s in series.slots}
-    assert abs(by_hour[(TODAY, 10)] - 2.0) < 1e-6
-    assert abs(by_hour[(TODAY, 11)] - 2.0) < 1e-6
-
-
-def test_multiple_intervals_aggregate_within_slot():
-    # Two consecutive 15-min intervals inside hour-10 add up.
-    now = NOW.replace(hour=11)
-    history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=10, minute=0), 0.0),
-        _reading(NOW.replace(hour=10, minute=15), 0.5),
-        _reading(NOW.replace(hour=10, minute=30), 1.2),
-    ))
-    series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
+        power_history, _hourly_72h_price_series().slots, now=now
     )
     slot_10 = next(s for s in series.slots if s.start == NOW.replace(hour=10))
-    assert abs(slot_10.generated_kwh - 1.2) < 1e-6
+    assert abs(slot_10.generated_kwh - 2.0) < 1e-6
 
 
-# ---------------------------------------------------------------------------
-# Counter fallback: midnight reset handling
-# ---------------------------------------------------------------------------
-
-def test_reset_handled_by_per_day_grouping():
-    # Yesterday ended at 8.0 kWh; today began at 0.5 kWh. With the
-    # today_total(end) − today_total(start) semantics, the reset is handled
-    # implicitly: yesterday's counter is treated as 0 at UTC midnight, and so
-    # is today's.
-    yesterday_dt = NOW - timedelta(days=1)
-    now = NOW.replace(hour=2)
-    history = GenerationHistory(samples=(
-        _reading(yesterday_dt.replace(hour=20), 6.0),
-        _reading(yesterday_dt.replace(hour=21), 8.0),
-        _reading(NOW.replace(hour=0, minute=30), 0.5),
-        _reading(NOW.replace(hour=1, minute=30), 1.5),
+def test_power_averaging_multiple_samples_averaged():
+    """1000 W and 3000 W in hour-10 → average 2000 W → 2.0 kWh."""
+    now = NOW.replace(hour=12)
+    power_history = PvPowerHistory(samples=(
+        _power(NOW.replace(hour=10, minute=10), 1000.0),
+        _power(NOW.replace(hour=10, minute=50), 3000.0),
     ))
     series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
+        power_history, _hourly_72h_price_series().slots, now=now
     )
-    by_hour = {(s.start.date(), s.start.hour): s.generated_kwh for s in series.slots}
-    # Yesterday hour-20 covered the 6→8 delta = 2 kWh
-    assert abs(by_hour[(YESTERDAY, 20)] - 2.0) < 1e-6
-    # No samples past 21:00 yesterday → counter is clamped to last value,
-    # so no further kWh is attributed to yesterday's late hours.
-    assert by_hour[(YESTERDAY, 21)] == 0.0
-    assert by_hour[(YESTERDAY, 22)] == 0.0
-    assert by_hour[(YESTERDAY, 23)] == 0.0
-    # Today hour-0: counter goes from 0 (midnight anchor) to interp(01:00)=1.0
-    assert abs(by_hour[(TODAY, 0)] - 1.0) < 1e-6
-    # Today hour-1: interp(01:00)=1.0 → clamp(02:00)=1.5 = 0.5
-    assert abs(by_hour[(TODAY, 1)] - 0.5) < 1e-6
+    slot_10 = next(s for s in series.slots if s.start == NOW.replace(hour=10))
+    assert abs(slot_10.generated_kwh - 2.0) < 1e-6
+
+
+def test_power_slot_with_no_samples_gives_zero():
+    """Only hour-10 has a reading; hour-11 reports 0."""
+    now = NOW.replace(hour=12)
+    power_history = PvPowerHistory(samples=(
+        _power(NOW.replace(hour=10, minute=30), 1000.0),
+    ))
+    series = build_observed_generation_series(
+        power_history, _hourly_72h_price_series().slots, now=now
+    )
+    slot_11 = next(s for s in series.slots if s.start == NOW.replace(hour=11))
+    assert slot_11.generated_kwh == 0.0
 
 
 # ---------------------------------------------------------------------------
 # Window: yesterday 00:00 → now
 # ---------------------------------------------------------------------------
 
-def test_slots_in_tomorrow_excluded():
-    now = NOW.replace(hour=10)
-    history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=8), 0.0),
-        _reading(NOW.replace(hour=9), 1.5),
+def test_power_path_covers_yesterday_slots():
+    """Power readings from yesterday produce kWh for yesterday's slots."""
+    yesterday_dt = NOW - timedelta(days=1)
+    now = NOW.replace(hour=12)
+    power_history = PvPowerHistory(samples=(
+        _power(yesterday_dt.replace(hour=10, minute=30), 4000.0),
     ))
     series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
+        power_history, _hourly_72h_price_series().slots, now=now
+    )
+    slot = next(
+        s for s in series.slots
+        if s.start.date() == YESTERDAY and s.start.hour == 10
+    )
+    assert abs(slot.generated_kwh - 4.0) < 1e-6
+
+
+def test_slots_in_tomorrow_excluded():
+    now = NOW.replace(hour=10)
+    power_history = PvPowerHistory(samples=(
+        _power(NOW.replace(hour=8, minute=30), 1000.0),
+    ))
+    series = build_observed_generation_series(
+        power_history, _hourly_72h_price_series().slots, now=now
     )
     tomorrow_date = (TODAY + timedelta(days=1))
     assert all(s.start.date() != tomorrow_date for s in series.slots)
@@ -188,12 +156,11 @@ def test_slots_in_tomorrow_excluded():
 
 def test_slots_starting_at_or_after_now_excluded():
     now = NOW.replace(hour=10, minute=30)
-    history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=9), 0.0),
-        _reading(NOW.replace(hour=10), 1.0),
+    power_history = PvPowerHistory(samples=(
+        _power(NOW.replace(hour=9, minute=30), 1000.0),
     ))
     series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
+        power_history, _hourly_72h_price_series().slots, now=now
     )
     # Hour-10 slot starts at 10:00 (< 10:30), so it's included.
     # Hour-11 starts at 11:00 (>= 10:30), so it's excluded.
@@ -203,36 +170,32 @@ def test_slots_starting_at_or_after_now_excluded():
 
 
 def test_slots_before_yesterday_midnight_excluded():
-    # Sample two days ago shouldn't produce a slot.
+    """A sample two days back must not produce a slot in the series."""
     two_days_ago = NOW - timedelta(days=2)
     now = NOW.replace(hour=12)
-    history = GenerationHistory(samples=(
-        _reading(two_days_ago.replace(hour=10), 0.0),
-        _reading(two_days_ago.replace(hour=11), 2.0),
-        _reading(NOW.replace(hour=8), 0.0),
-        _reading(NOW.replace(hour=9), 1.0),
+    power_history = PvPowerHistory(samples=(
+        _power(two_days_ago.replace(hour=10, minute=30), 1000.0),
+        _power(NOW.replace(hour=10, minute=30), 1000.0),
     ))
     series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
+        power_history, _hourly_72h_price_series().slots, now=now
     )
     assert all(s.start >= NOW - timedelta(days=1) for s in series.slots)
 
 
 # ---------------------------------------------------------------------------
-# Per-day totals (counter fallback)
+# Per-day totals
 # ---------------------------------------------------------------------------
 
 def test_totals_split_between_yesterday_and_today():
     yesterday_dt = NOW - timedelta(days=1)
     now = NOW.replace(hour=12)
-    history = GenerationHistory(samples=(
-        _reading(yesterday_dt.replace(hour=10), 0.0),
-        _reading(yesterday_dt.replace(hour=11), 3.0),
-        _reading(NOW.replace(hour=10), 0.0),
-        _reading(NOW.replace(hour=11), 2.0),
+    power_history = PvPowerHistory(samples=(
+        _power(yesterday_dt.replace(hour=10, minute=30), 3000.0),
+        _power(NOW.replace(hour=10, minute=30), 2000.0),
     ))
     series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
+        power_history, _hourly_72h_price_series().slots, now=now
     )
     assert abs(series.total_yesterday_kwh - 3.0) < 1e-6
     assert abs(series.total_today_so_far_kwh - 2.0) < 1e-6
@@ -240,22 +203,55 @@ def test_totals_split_between_yesterday_and_today():
 
 def test_source_is_inverter_on_every_slot():
     now = NOW.replace(hour=12)
-    history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=10), 0.0),
-        _reading(NOW.replace(hour=11), 1.0),
+    power_history = PvPowerHistory(samples=(
+        _power(NOW.replace(hour=10, minute=30), 1000.0),
     ))
     series = build_observed_generation_series(
-        _NO_POWER, history, _hourly_72h_price_series().slots, now=now
+        power_history, _hourly_72h_price_series().slots, now=now
     )
     assert all(s.source == "inverter" for s in series.slots)
 
 
-# ---------------------------------------------------------------------------
-# Counter fallback: quarter-hour price grid
-# ---------------------------------------------------------------------------
+def test_yesterday_slots_substituted_from_baked_history():
+    """When baked_history holds a record for yesterday, those slots are used."""
+    yesterday_dt = NOW - timedelta(days=1)
+    now = NOW.replace(hour=12)
+    # Raw averaging would give yesterday hour-10 = 2.0 kWh; baked says 3.5.
+    power_history = PvPowerHistory(samples=(
+        _power(yesterday_dt.replace(hour=10, minute=30), 2000.0),
+        _power(NOW.replace(hour=10, minute=30), 1000.0),
+    ))
+    baked_slot = SlotKwh(
+        start=yesterday_dt.replace(hour=10),
+        end=yesterday_dt.replace(hour=11),
+        kwh=3.5,
+    )
+    baked_record = BakedDayRecord(
+        date_str=YESTERDAY.isoformat(),
+        side_id=GENERATION_SIDE_ID,
+        counter_total_used=3.5,
+        source_kind=SOURCE_KIND_DEDICATED_SENSOR,
+        baked_slots=(baked_slot,),
+        baked_sum=3.5,
+        baked_at=now,
+    )
+    baked_history = BakedObservedHistory(records=(baked_record,))
+
+    series = build_observed_generation_series(
+        power_history, _hourly_72h_price_series().slots, now=now,
+        baked_history=baked_history,
+    )
+    yest_slot = next(
+        s for s in series.slots
+        if s.start.date() == YESTERDAY and s.start.hour == 10
+    )
+    assert abs(yest_slot.generated_kwh - 3.5) < 1e-6
+    # total_yesterday_kwh should reflect the baked sum, not the raw 2.0.
+    assert abs(series.total_yesterday_kwh - 3.5) < 1e-3
+
 
 def test_resamples_onto_quarter_hour_grid():
-    # 1h interval (10:00–11:00) carrying 4 kWh → on 15-min grid: 4 × 1 kWh
+    """A 1h-flat reading at 10:30 produces four 0.25 kWh slots on a 15-min grid."""
     quarter_entries = [
         PriceEntry(
             start=NOW + timedelta(minutes=15 * q),
@@ -266,180 +262,28 @@ def test_resamples_onto_quarter_hour_grid():
     ]
     ps = build_price_series(quarter_entries, default_tariff_config(), now=NOW)
     now = NOW.replace(hour=12)
-    history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=10), 0.0),
-        _reading(NOW.replace(hour=11), 4.0),
+    # Five samples within hour-10 — one in each quarter — all at 1000 W. Each
+    # 15-min slot averages 1 kW × 0.25 h = 0.25 kWh.
+    power_history = PvPowerHistory(samples=tuple(
+        _power(NOW.replace(hour=10, minute=m), 1000.0) for m in (5, 20, 35, 50)
     ))
-    series = build_observed_generation_series(
-        _NO_POWER, history, ps.slots, now=now
-    )
+    series = build_observed_generation_series(power_history, ps.slots, now=now)
     slots_10 = [s for s in series.slots if NOW.replace(hour=10) <= s.start < NOW.replace(hour=11)]
     assert len(slots_10) == 4
     for s in slots_10:
-        assert abs(s.generated_kwh - 1.0) < 1e-6
-
-
-# ---------------------------------------------------------------------------
-# PV power averaging (primary path)
-# ---------------------------------------------------------------------------
-
-def test_power_averaging_one_sample_per_slot():
-    # 2000 W reading at 10:30 → 1h slot → 2.0 kWh
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(NOW.replace(hour=10, minute=30), 2000.0),
-    ))
-    series = build_observed_generation_series(
-        power_history, _NO_GEN, _hourly_72h_price_series().slots, now=now
-    )
-    slot_10 = next(s for s in series.slots if s.start == NOW.replace(hour=10))
-    assert abs(slot_10.generated_kwh - 2.0) < 1e-6
-
-
-def test_power_averaging_multiple_samples_averaged():
-    # 1000 W and 3000 W in hour-10 → average 2000 W → 2.0 kWh
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(NOW.replace(hour=10, minute=10), 1000.0),
-        _power(NOW.replace(hour=10, minute=50), 3000.0),
-    ))
-    series = build_observed_generation_series(
-        power_history, _NO_GEN, _hourly_72h_price_series().slots, now=now
-    )
-    slot_10 = next(s for s in series.slots if s.start == NOW.replace(hour=10))
-    assert abs(slot_10.generated_kwh - 2.0) < 1e-6
-
-
-def test_power_slot_with_no_samples_gives_zero():
-    # Only hour-10 has a reading; hour-11 should be 0.
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(NOW.replace(hour=10, minute=30), 1000.0),
-    ))
-    series = build_observed_generation_series(
-        power_history, _NO_GEN, _hourly_72h_price_series().slots, now=now
-    )
-    slot_11 = next(s for s in series.slots if s.start == NOW.replace(hour=11))
-    assert slot_11.generated_kwh == 0.0
-
-
-def test_power_path_covers_yesterday_slots():
-    # Power readings from yesterday should produce kWh for yesterday's slots.
-    yesterday_dt = NOW - timedelta(days=1)
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(yesterday_dt.replace(hour=10, minute=30), 4000.0),
-    ))
-    series = build_observed_generation_series(
-        power_history, _NO_GEN, _hourly_72h_price_series().slots, now=now
-    )
-    slot = next(
-        s for s in series.slots
-        if s.start.date() == YESTERDAY and s.start.hour == 10
-    )
-    assert abs(slot.generated_kwh - 4.0) < 1e-6
-
-
-def test_power_path_takes_precedence_over_counter():
-    # Both available: power path should win (counter only used for correction).
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(NOW.replace(hour=10, minute=30), 1000.0),
-    ))
-    # Counter says 5.0 kWh in the same window — should NOT become slot value
-    # (correction is outside [0.5, 2.0] of 1.0, so it's skipped).
-    gen_history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=11), 5.0),
-    ))
-    series = build_observed_generation_series(
-        power_history, gen_history, _hourly_72h_price_series().slots, now=now
-    )
-    slot_10 = next(s for s in series.slots if s.start == NOW.replace(hour=10))
-    # 1000 W × 1 h / 1000 = 1.0 kWh (counter not used as slot value)
-    assert abs(slot_10.generated_kwh - 1.0) < 1e-6
-
-
-# ---------------------------------------------------------------------------
-# End-of-day correction
-# ---------------------------------------------------------------------------
-
-def test_correction_scales_today_slots_to_counter_total():
-    # Power says 1.0 kWh; counter says 1.1 kWh → 10% upward correction.
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(NOW.replace(hour=10, minute=30), 1000.0),
-    ))
-    gen_history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=11), 1.1),
-    ))
-    series = build_observed_generation_series(
-        power_history, gen_history, _hourly_72h_price_series().slots, now=now
-    )
-    today_sum = sum(
-        s.generated_kwh for s in series.slots if s.start.date() == TODAY
-    )
-    assert abs(today_sum - 1.1) < 1e-3
-
-
-def test_correction_does_not_modify_yesterday_slots():
-    # Counter is only for today; yesterday should remain at raw power average.
-    yesterday_dt = NOW - timedelta(days=1)
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(yesterday_dt.replace(hour=10, minute=30), 2000.0),
-        _power(NOW.replace(hour=10, minute=30), 1000.0),
-    ))
-    gen_history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=11), 1.5),
-    ))
-    series = build_observed_generation_series(
-        power_history, gen_history, _hourly_72h_price_series().slots, now=now
-    )
-    yest_slot = next(
-        s for s in series.slots
-        if s.start.date() == YESTERDAY and s.start.hour == 10
-    )
-    # Yesterday slot unchanged: 2000 W × 1 h / 1000 = 2.0 kWh
-    assert abs(yest_slot.generated_kwh - 2.0) < 1e-6
-
-
-def test_correction_skipped_when_factor_out_of_range():
-    # Counter says 5× the power average → factor = 5.0 > 2.0, correction skipped.
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(NOW.replace(hour=10, minute=30), 1000.0),
-    ))
-    gen_history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=11), 5.0),
-    ))
-    series = build_observed_generation_series(
-        power_history, gen_history, _hourly_72h_price_series().slots, now=now
-    )
-    slot_10 = next(s for s in series.slots if s.start == NOW.replace(hour=10))
-    # Raw power average: 1.0 kWh (no correction applied)
-    assert abs(slot_10.generated_kwh - 1.0) < 1e-6
-
-
-def test_correction_skipped_when_no_counter_reading():
-    now = NOW.replace(hour=12)
-    power_history = PvPowerHistory(samples=(
-        _power(NOW.replace(hour=10, minute=30), 1000.0),
-    ))
-    series = build_observed_generation_series(
-        power_history, _NO_GEN, _hourly_72h_price_series().slots, now=now
-    )
-    slot_10 = next(s for s in series.slots if s.start == NOW.replace(hour=10))
-    assert abs(slot_10.generated_kwh - 1.0) < 1e-6
+        assert abs(s.generated_kwh - 0.25) < 1e-6
 
 
 # ---------------------------------------------------------------------------
 # Node wiring
 # ---------------------------------------------------------------------------
 
-def test_observed_generation_node_produces_series_from_primary_and_secondary():
+def test_observed_generation_node_produces_series_from_pv_power():
+    """The DAG node reads PvPowerHistory + PriceSeries + baked history."""
     import asyncio
 
     from custom_components.sun_sale.contract.models import (
+        BakedObservedHistory,
         ObservedGenerationSeries,
         SunSaleConfig,
     )
@@ -447,13 +291,15 @@ def test_observed_generation_node_produces_series_from_primary_and_secondary():
     from custom_components.sun_sale.pipeline.nodes import ObservedGenerationNode
 
     now = NOW.replace(hour=12)
-    history = GenerationHistory(samples=(
-        _reading(NOW.replace(hour=10), 0.0),
-        _reading(NOW.replace(hour=11), 2.5),
+    power_history = PvPowerHistory(samples=(
+        _power(NOW.replace(hour=10, minute=30), 2500.0),
     ))
     config = SunSaleConfig(tariff=None, battery=None)
     ctx = NodeContext(
-        primary={GenerationHistory: history, PvPowerHistory: _NO_POWER},
+        primary={
+            PvPowerHistory: power_history,
+            BakedObservedHistory: BakedObservedHistory(records=()),
+        },
         secondary={PriceSeries: _hourly_72h_price_series()},
         config=config,
         now=now,

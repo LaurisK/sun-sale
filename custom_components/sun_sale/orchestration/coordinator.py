@@ -39,8 +39,11 @@ from ..contract.const import (
     CONF_INVERTER_ENTITY_GRID_POWER,
     CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY,
     CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY,
+    CONF_INVERTER_ENTITY_GRID_EXPORT_POWER,
     CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY,
+    CONF_INVERTER_ENTITY_GRID_IMPORT_POWER,
     CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
+    CONF_INVERTER_ENTITY_INVERTER_CLOCK,
     CONF_INVERTER_ENTITY_SOLAR_ENERGY,
     CONF_INVERTER_PLATFORM,
     CONF_INVERTER_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH,
@@ -65,7 +68,9 @@ from ..contract.const import (
     CONF_TARIFF_SELL_MARKUP,
     CONF_TARIFF_SELL_TAX_RATE,
     CONF_TARIFF_TAX_RATE,
+    BAKED_OBSERVED_HISTORY_RETENTION_DAYS,
     CAPACITY_OBS_MIN_SOC_DELTA,
+    COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
     GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS,
     GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS,
@@ -93,9 +98,12 @@ from ..contract.const import (
     STORAGE_KEY_CAPACITY,
     STORAGE_KEY_FORECAST_QUALITY,
     STORAGE_KEY_GENERATION,
+    STORAGE_KEY_BAKED_OBSERVED,
+    STORAGE_KEY_COUNTER_SNAPSHOT,
+    STORAGE_KEY_GRID_EXPORT_POWER,
     STORAGE_KEY_GRID_EXPORT_TOTAL,
+    STORAGE_KEY_GRID_IMPORT_POWER,
     STORAGE_KEY_GRID_IMPORT_TOTAL,
-    STORAGE_KEY_GRID_POWER,
     STORAGE_KEY_HOUSEHOLD_LOAD,
     STORAGE_KEY_MODE_HISTORY,
     STORAGE_KEY_MONTHLY_BILL,
@@ -120,6 +128,10 @@ from ..contract.models import (
     CapacityObservation,
     DailyPeak,
     DayClass,
+    BakedDayRecord,
+    BakedObservedHistory,
+    CounterSnapshotHistory,
+    CounterSnapshotRecord,
     DegradationCost,
     EstimatedCapacity,
     ForecastAccuracyResult,
@@ -127,15 +139,18 @@ from ..contract.models import (
     GenerationHistory,
     GenerationReading,
     GenerationSeries,
+    GridExportPowerHistory,
+    GridExportPowerReading,
     GridExportTodayHistory,
     GridExportTodayReading,
+    GridImportPowerHistory,
+    GridImportPowerReading,
     GridImportTodayHistory,
     GridImportTodayReading,
-    GridPowerHistory,
-    GridPowerReading,
     InverterModeChange,
     InverterModeHistory,
     InverterModeReading,
+    InverterTimeReading,
     MonthlyBillResult,
     MonthlyBillState,
     PvPowerHistory,
@@ -152,6 +167,7 @@ from ..contract.models import (
     PriceSeries,
     ProfitabilityScore,
     SchedulePolicy,
+    SlotKwh,
     SolarData,
     SolarEntry,
     Schedule,
@@ -184,15 +200,33 @@ from .persistent_store import PersistentStore
 from ..inbound.battery import BatteryTranslator
 from ..inbound.solis_entity_resolver import resolve_solis_entities
 from ..inbound.forecast import SolarTranslator
-from ..inbound.generation import GenerationTranslator, PvPowerTranslator
+from ..inbound.generation import (
+    GENERATION_SIDE_ID,
+    GenerationTranslator,
+    PvPowerTranslator,
+    build_generation_engine,
+)
 from ..inbound.household_consumption import HouseholdConsumptionTranslator
 from ..inbound.household_load import HouseholdLoadTranslator
 from ..inbound.grid import (
+    GRID_EXPORT_SIDE_ID,
+    GRID_IMPORT_SIDE_ID,
+    GridExportPowerObserver,
     GridExportTotalTranslator,
+    GridImportPowerObserver,
     GridImportTotalTranslator,
-    GridObserver,
+    build_grid_engine,
 )
 from ..inbound.inverter_mode import InverterModeTranslator
+from ..inbound.inverter_time import (
+    InverterTimeHistory,
+    InverterTimeTranslator,
+    current_skew_seconds,
+    empty_history as empty_inverter_time_history,
+    update_history as update_inverter_time_history,
+)
+from ..inbound.observed_bake_in import try_bake_yesterday
+from ..inbound.pre_rollover_snapshot import maybe_capture_snapshots
 from ..inbound.pricing import NordpoolTranslator
 
 _LOGGER = logging.getLogger(__name__)
@@ -397,15 +431,31 @@ def _deserialize_price_history(d: dict) -> list[DailyPeak]:
     return result
 
 
-def _serialize_grid_power(samples: list[GridPowerReading]) -> dict:
-    """Serialise a list of grid power readings."""
+def _serialize_grid_import_power(samples: list[GridImportPowerReading]) -> dict:
+    """Serialise a list of grid-import power readings."""
     return {"samples": [{"ts": s.timestamp.isoformat(), "kw": s.power_kw} for s in samples]}
 
 
-def _deserialize_grid_power(d: dict) -> list[GridPowerReading]:
-    """Deserialise a list of grid power readings."""
+def _deserialize_grid_import_power(d: dict) -> list[GridImportPowerReading]:
+    """Deserialise a list of grid-import power readings."""
     return [
-        GridPowerReading(
+        GridImportPowerReading(
+            power_kw=s["kw"],
+            timestamp=datetime.fromisoformat(s["ts"]),
+        )
+        for s in d.get("samples", [])
+    ]
+
+
+def _serialize_grid_export_power(samples: list[GridExportPowerReading]) -> dict:
+    """Serialise a list of grid-export power readings."""
+    return {"samples": [{"ts": s.timestamp.isoformat(), "kw": s.power_kw} for s in samples]}
+
+
+def _deserialize_grid_export_power(d: dict) -> list[GridExportPowerReading]:
+    """Deserialise a list of grid-export power readings."""
+    return [
+        GridExportPowerReading(
             power_kw=s["kw"],
             timestamp=datetime.fromisoformat(s["ts"]),
         )
@@ -443,6 +493,91 @@ def _deserialize_grid_export_total(d: dict) -> list[GridExportTodayReading]:
         )
         for s in d.get("samples", [])
     ]
+
+
+def _serialize_counter_snapshot(history: CounterSnapshotHistory) -> dict:
+    """Serialise the rolling pre-rollover counter snapshot history."""
+    return {
+        "records": [
+            {
+                "side": r.side_id,
+                "ts":   r.captured_at.isoformat(),
+                "kwh":  r.today_total_kwh,
+            }
+            for r in history.records
+        ]
+    }
+
+
+def _deserialize_counter_snapshot(d: dict) -> CounterSnapshotHistory:
+    """Deserialise the rolling pre-rollover counter snapshot history."""
+    records: list[CounterSnapshotRecord] = []
+    for r in d.get("records", []):
+        try:
+            records.append(
+                CounterSnapshotRecord(
+                    side_id=r["side"],
+                    captured_at=datetime.fromisoformat(r["ts"]),
+                    today_total_kwh=float(r["kwh"]),
+                )
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    return CounterSnapshotHistory(records=tuple(records))
+
+
+def _serialize_baked_observed(history: BakedObservedHistory) -> dict:
+    """Serialise the rolling baked-observed history (one record per (date, side))."""
+    return {
+        "records": [
+            {
+                "date":   r.date_str,
+                "side":   r.side_id,
+                "ctotal": r.counter_total_used,
+                "src":    r.source_kind,
+                "slots":  [
+                    {"s": s.start.isoformat(), "e": s.end.isoformat(), "kwh": s.kwh}
+                    for s in r.baked_slots
+                ],
+                "sum":    r.baked_sum,
+                "at":     r.baked_at.isoformat(),
+            }
+            for r in history.records
+        ]
+    }
+
+
+def _deserialize_baked_observed(d: dict) -> BakedObservedHistory:
+    """Deserialise the rolling baked-observed history.
+
+    Malformed entries are skipped silently so a single bad row cannot block
+    startup. Slot lists with non-parseable timestamps are dropped wholesale.
+    """
+    records: list[BakedDayRecord] = []
+    for r in d.get("records", []):
+        try:
+            slots = tuple(
+                SlotKwh(
+                    start=datetime.fromisoformat(s["s"]),
+                    end=datetime.fromisoformat(s["e"]),
+                    kwh=float(s["kwh"]),
+                )
+                for s in r["slots"]
+            )
+            records.append(
+                BakedDayRecord(
+                    date_str=r["date"],
+                    side_id=r["side"],
+                    counter_total_used=float(r["ctotal"]),
+                    source_kind=r["src"],
+                    baked_slots=slots,
+                    baked_sum=float(r["sum"]),
+                    baked_at=datetime.fromisoformat(r["at"]),
+                )
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    return BakedObservedHistory(records=tuple(records))
 
 
 def _serialize_mode_history(history: InverterModeHistory) -> dict:
@@ -503,31 +638,36 @@ def _deserialize_monthly_bill(d: dict) -> MonthlyBillState:
     )
 
 
-async def _backfill_grid_power_from_recorder(
+async def _backfill_directional_power_from_recorder(
     hass: HomeAssistant,
     entity_id: str,
-    existing: list[GridPowerReading],
+    reading_cls: type,
+    existing: list,
     start: datetime,
     end: datetime,
-) -> list[GridPowerReading]:
-    """Return existing samples merged with grid-power state changes from HA's recorder.
+) -> list:
+    """Return existing samples merged with recorder state changes for ``entity_id``.
 
     Used on coordinator setup so the monthly bill's yday→now slots have data
-    even on the first run after the integration is installed/upgraded. The
-    recorder is queried via an executor job (the underlying call is sync).
+    even on the first run after the integration is installed/upgraded.
     Recorder state values are normalised to kW via the entity's
-    ``unit_of_measurement`` attribute, matching the live read path.
+    ``unit_of_measurement`` attribute, matching the live read path. Negative
+    values are clamped to 0 — directional magnitudes are non-negative by
+    contract.
 
     Args:
         hass: Home Assistant instance.
-        entity_id: Grid power sensor entity ID; empty disables backfill.
+        entity_id: Power sensor entity ID; empty disables backfill.
+        reading_cls: Reading dataclass to construct (e.g.
+            ``GridImportPowerReading``). Must accept ``power_kw`` and
+            ``timestamp`` keyword args.
         existing: Samples already loaded from the persistent store.
         start: Earliest UTC timestamp to backfill.
         end: Latest UTC timestamp to backfill.
 
     Returns:
-        Combined, time-sorted list of GridPowerReading samples deduplicated
-        by timestamp. Returns ``existing`` unchanged if the recorder is
+        Combined, time-sorted list of ``reading_cls`` samples deduplicated by
+        timestamp. Returns ``existing`` unchanged if the recorder is
         unavailable or the entity_id is empty.
     """
     if not entity_id:
@@ -552,12 +692,12 @@ async def _backfill_grid_power_from_recorder(
         )
     except Exception:    # pragma: no cover — recorder may be unavailable
         _LOGGER.warning(
-            "Grid power recorder backfill failed for %s", entity_id, exc_info=True,
+            "Directional power recorder backfill failed for %s", entity_id, exc_info=True,
         )
         return existing
 
     states = states_dict.get(entity_id, []) if states_dict else []
-    backfilled: list[GridPowerReading] = []
+    backfilled: list = []
     for s in states:
         raw = getattr(s, "state", None)
         if raw in (None, "unavailable", "unknown", ""):
@@ -567,17 +707,17 @@ async def _backfill_grid_power_from_recorder(
         except (TypeError, ValueError):
             continue
         unit = str((getattr(s, "attributes", {}) or {}).get("unit_of_measurement") or "").strip()
-        kw = normalize_power_to_kw(value, unit)
+        kw = max(0.0, normalize_power_to_kw(value, unit))
         ts = getattr(s, "last_updated", None) or getattr(s, "last_changed", None)
         if ts is None:
             continue
-        backfilled.append(GridPowerReading(power_kw=kw, timestamp=ts))
+        backfilled.append(reading_cls(power_kw=kw, timestamp=ts))
 
     if not backfilled:
         return existing
 
     seen: set[datetime] = set()
-    merged: list[GridPowerReading] = []
+    merged: list = []
     for sample in (*existing, *backfilled):
         if sample.timestamp in seen:
             continue
@@ -618,12 +758,17 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._household_load_store: PersistentStore[list[HouseholdLoadSample]] | None = None
         self._price_history_store: PersistentStore[list[DailyPeak]] | None = None
         self._forecast_quality_store: PersistentStore[ForecastQualityStore] | None = None
-        self._grid_power_store: PersistentStore[list[GridPowerReading]] | None = None
-        self._grid_power_entity_id: str = ""
+        self._grid_import_power_store: PersistentStore[list[GridImportPowerReading]] | None = None
+        self._grid_export_power_store: PersistentStore[list[GridExportPowerReading]] | None = None
+        self._grid_import_power_entity_id: str = ""
+        self._grid_export_power_entity_id: str = ""
         self._grid_import_total_store: PersistentStore[list[GridImportTodayReading]] | None = None
         self._grid_export_total_store: PersistentStore[list[GridExportTodayReading]] | None = None
         self._monthly_bill_store: PersistentStore[MonthlyBillState] | None = None
         self._mode_history_store: PersistentStore[InverterModeHistory] | None = None
+        self._counter_snapshot_store: PersistentStore[CounterSnapshotHistory] | None = None
+        self._baked_observed_store: PersistentStore[BakedObservedHistory] | None = None
+        self._inverter_time_history: InverterTimeHistory = empty_inverter_time_history()
         self.automation_enabled: bool = False
         self.use_standby: bool = DEFAULT_SCHEDULE_USE_STANDBY
         self.allow_grid_charging: bool = DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING
@@ -739,8 +884,18 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             }
         inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
         self._inverter_entity_ids = dict(inverter_entity_ids)
-        self._grid_power_entity_id = inverter_entity_ids.get("grid_power", "")
-        grid_power_fallback_entity_id = inverter_entity_ids.get("grid_power_fallback", "")
+        # Per-direction grid-power observers — both must be configured for
+        # the pipeline to receive grid samples. No coordinator-side
+        # synthesis from a signed sensor: split is end-to-end. The legacy
+        # ``grid_power`` (signed) entity remains in ``inverter_entity_ids``
+        # for ``InverterController.get_grid_power`` (used by BatteryReading
+        # / capacity estimator), independent of the observer pipeline.
+        self._grid_import_power_entity_id = data.get(
+            CONF_INVERTER_ENTITY_GRID_IMPORT_POWER, "",
+        )
+        self._grid_export_power_entity_id = data.get(
+            CONF_INVERTER_ENTITY_GRID_EXPORT_POWER, "",
+        )
         grid_import_total_entity_id = inverter_entity_ids.get("grid_import_energy_today", "")
         grid_export_total_entity_id = inverter_entity_ids.get("grid_export_energy_today", "")
 
@@ -762,17 +917,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 inverter=inverter,
                 household_load_entity=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
             ),
-            GridObserver(
-                entity_id=self._grid_power_entity_id,
-                # The Solis auto-detect path now points at ``grid_power_net``
-                # (derived sensor — already sunSale convention) so the
-                # primary does not need a sign-flip; only the AC-port
-                # fallback does. Non-Solis platforms supply an
-                # already-correct entity and never flip either slot.
-                invert_sign=False,
-                fallback_entity_id=grid_power_fallback_entity_id,
-                fallback_invert_sign=(inverter_platform == InverterPlatform.SOLIS),
-            ),
+            GridImportPowerObserver(entity_id=self._grid_import_power_entity_id),
+            GridExportPowerObserver(entity_id=self._grid_export_power_entity_id),
             GridImportTotalTranslator(entity_id=grid_import_total_entity_id),
             GridExportTotalTranslator(entity_id=grid_export_total_entity_id),
             GenerationTranslator(
@@ -788,6 +934,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY, ""),
             ),
             InverterModeTranslator(inverter=inverter),
+            InverterTimeTranslator(
+                entity_id=data.get(CONF_INVERTER_ENTITY_INVERTER_CLOCK, ""),
+                local_tz=local_tz,
+            ),
         ]
 
         nodes = [
@@ -860,25 +1010,33 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         )
         await self._forecast_quality_store.load()
 
-        self._grid_power_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_POWER,
-            serialize=_serialize_grid_power,
-            deserialize=_deserialize_grid_power,
+        self._grid_import_power_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_IMPORT_POWER,
+            serialize=_serialize_grid_import_power,
+            deserialize=_deserialize_grid_import_power,
         )
-        await self._grid_power_store.load()
+        await self._grid_import_power_store.load()
+
+        self._grid_export_power_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_EXPORT_POWER,
+            serialize=_serialize_grid_export_power,
+            deserialize=_deserialize_grid_export_power,
+        )
+        await self._grid_export_power_store.load()
 
         backfill_now = datetime.now(timezone.utc)
         backfill_start = backfill_now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
-        existing_samples = list(self._grid_power_store.value or [])
-        merged_samples = await _backfill_grid_power_from_recorder(
-            self.hass,
-            self._grid_power_entity_id,
-            existing_samples,
-            backfill_start,
-            backfill_now,
-        )
-        if len(merged_samples) != len(existing_samples):
-            await self._grid_power_store.save(merged_samples)
+        for store, entity_id, reading_cls in (
+            (self._grid_import_power_store, self._grid_import_power_entity_id, GridImportPowerReading),
+            (self._grid_export_power_store, self._grid_export_power_entity_id, GridExportPowerReading),
+        ):
+            existing_samples = list(store.value or [])
+            merged_samples = await _backfill_directional_power_from_recorder(
+                self.hass, entity_id, reading_cls,
+                existing_samples, backfill_start, backfill_now,
+            )
+            if len(merged_samples) != len(existing_samples):
+                await store.save(merged_samples)
 
         self._grid_import_total_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_IMPORT_TOTAL,
@@ -914,6 +1072,20 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             deserialize=_deserialize_mode_history,
         )
         await self._mode_history_store.load()
+
+        self._counter_snapshot_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_COUNTER_SNAPSHOT,
+            serialize=_serialize_counter_snapshot,
+            deserialize=_deserialize_counter_snapshot,
+        )
+        await self._counter_snapshot_store.load()
+
+        self._baked_observed_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_BAKED_OBSERVED,
+            serialize=_serialize_baked_observed,
+            deserialize=_deserialize_baked_observed,
+        )
+        await self._baked_observed_store.load()
 
     async def _async_update_data(self) -> dict:
         """One DAG cycle: translate → capacity update → DAG → event routing."""
@@ -982,14 +1154,30 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 samples=tuple((self._pv_power_store.value or []) if self._pv_power_store else []),
             )
 
-            current_grid_reading: GridPowerReading | None = primary.get(GridPowerReading)
-            if current_grid_reading is not None and self._grid_power_store is not None:
+            current_import_power: GridImportPowerReading | None = primary.get(GridImportPowerReading)
+            if current_import_power is not None and self._grid_import_power_store is not None:
                 cutoff = now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
-                await self._grid_power_store.append_and_trim(
-                    current_grid_reading, cutoff, lambda s: s.timestamp,
+                await self._grid_import_power_store.append_and_trim(
+                    current_import_power, cutoff, lambda s: s.timestamp,
                 )
-            primary[GridPowerHistory] = GridPowerHistory(
-                samples=tuple((self._grid_power_store.value or []) if self._grid_power_store else []),
+            primary[GridImportPowerHistory] = GridImportPowerHistory(
+                samples=tuple(
+                    (self._grid_import_power_store.value or [])
+                    if self._grid_import_power_store else []
+                ),
+            )
+
+            current_export_power: GridExportPowerReading | None = primary.get(GridExportPowerReading)
+            if current_export_power is not None and self._grid_export_power_store is not None:
+                cutoff = now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
+                await self._grid_export_power_store.append_and_trim(
+                    current_export_power, cutoff, lambda s: s.timestamp,
+                )
+            primary[GridExportPowerHistory] = GridExportPowerHistory(
+                samples=tuple(
+                    (self._grid_export_power_store.value or [])
+                    if self._grid_export_power_store else []
+                ),
             )
 
             current_grid_import_total: GridImportTodayReading | None = primary.get(GridImportTodayReading)
@@ -1016,6 +1204,49 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     (self._grid_export_total_store.value or [])
                     if self._grid_export_total_store else []
                 ),
+            )
+
+            # Inverter clock skew tracker — drives the snapshot window shift
+            # below so the capture aligns with INVERTER-local midnight when
+            # the two clocks have drifted apart. Returns ``None`` (no shift)
+            # until enough samples have accumulated for confidence.
+            current_inverter_time: InverterTimeReading | None = primary.get(
+                InverterTimeReading,
+            )
+            self._inverter_time_history = update_inverter_time_history(
+                self._inverter_time_history, current_inverter_time,
+            )
+            clock_skew = current_skew_seconds(self._inverter_time_history)
+
+            # Pre-rollover snapshot: capture today_total per side within the
+            # late-evening window so the next-day bake-in has an authoritative
+            # value when no dedicated yesterday-total sensor is mapped.
+            if self._counter_snapshot_store is not None:
+                current_snapshots = (
+                    self._counter_snapshot_store.value
+                    or CounterSnapshotHistory(records=())
+                )
+                updated_snapshots = maybe_capture_snapshots(
+                    snapshot_history=current_snapshots,
+                    sources=[
+                        (GENERATION_SIDE_ID, current_generation),
+                        (GRID_IMPORT_SIDE_ID, current_grid_import_total),
+                        (GRID_EXPORT_SIDE_ID, current_grid_export_total),
+                    ],
+                    now=now,
+                    local_tz=self._sun_sale_config.local_tz,
+                    retention_days=COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS,
+                    clock_skew_seconds=clock_skew,
+                )
+                if updated_snapshots is not current_snapshots:
+                    await self._counter_snapshot_store.save(updated_snapshots)
+            primary[CounterSnapshotHistory] = (
+                self._counter_snapshot_store.value
+                if self._counter_snapshot_store else CounterSnapshotHistory(records=())
+            )
+            primary[BakedObservedHistory] = (
+                self._baked_observed_store.value
+                if self._baked_observed_store else BakedObservedHistory(records=())
             )
 
             primary[MonthlyBillState] = (
@@ -1060,6 +1291,64 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             )
 
             secondary, events = await self._engine.run(primary, self._sun_sale_config, now)
+
+            # Bake-in: idempotent per (date, side). Runs once the post-DAG
+            # PriceSeries is available; updates take effect downstream on the
+            # next coordinator cycle. No-op when no source can be resolved
+            # before the hard cutoff.
+            pricing_for_bake: PriceSeries | None = secondary.get(PriceSeries)
+            if (
+                pricing_for_bake is not None
+                and self._baked_observed_store is not None
+            ):
+                local_tz = self._sun_sale_config.local_tz
+                baked_before = (
+                    self._baked_observed_store.value
+                    or BakedObservedHistory(records=())
+                )
+                snap_history = (
+                    self._counter_snapshot_store.value
+                    if self._counter_snapshot_store else CounterSnapshotHistory(records=())
+                )
+                pv_samples = primary.get(PvPowerHistory)
+                grid_import_samples = primary.get(GridImportPowerHistory)
+                grid_export_samples = primary.get(GridExportPowerHistory)
+
+                baked_after = baked_before
+                if pv_samples is not None:
+                    baked_after = try_bake_yesterday(
+                        engine=build_generation_engine(local_tz),
+                        samples_by_side={GENERATION_SIDE_ID: pv_samples.samples},
+                        price_slots=pricing_for_bake.slots,
+                        baked_history=baked_after,
+                        snapshot_history=snap_history,
+                        hass=self.hass,
+                        raw_config=self._config,
+                        now=now,
+                        local_tz=local_tz,
+                    )
+                if grid_import_samples is not None or grid_export_samples is not None:
+                    baked_after = try_bake_yesterday(
+                        engine=build_grid_engine(local_tz),
+                        samples_by_side={
+                            GRID_IMPORT_SIDE_ID: (
+                                grid_import_samples.samples if grid_import_samples else ()
+                            ),
+                            GRID_EXPORT_SIDE_ID: (
+                                grid_export_samples.samples if grid_export_samples else ()
+                            ),
+                        },
+                        price_slots=pricing_for_bake.slots,
+                        baked_history=baked_after,
+                        snapshot_history=snap_history,
+                        hass=self.hass,
+                        raw_config=self._config,
+                        now=now,
+                        local_tz=local_tz,
+                    )
+
+                if baked_after is not baked_before:
+                    await self._baked_observed_store.save(baked_after)
 
             acc_result: ForecastAccuracyResult | None = secondary.get(ForecastAccuracyResult)
             if acc_result is not None and self._forecast_quality_store is not None:
@@ -1154,7 +1443,14 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             coordinator.data.
         """
         reading: BatteryReading | None = primary.get(BatteryReading)
-        grid_reading: GridPowerReading | None = primary.get(GridPowerReading)
+        imp_power: GridImportPowerReading | None = primary.get(GridImportPowerReading)
+        exp_power: GridExportPowerReading | None = primary.get(GridExportPowerReading)
+        # Signed grid power = import − export. Used by the dashboard sensor;
+        # downstream pipeline reads each direction's history directly.
+        grid_power_kw_signed = (
+            (imp_power.power_kw if imp_power else 0.0)
+            - (exp_power.power_kw if exp_power else 0.0)
+        ) if (imp_power is not None or exp_power is not None) else 0.0
         nordpool: NordpoolData | None = primary.get(NordpoolData)
         deg: DegradationCost | None = secondary.get(DegradationCost)
         consumption: HouseholdConsumptionReading | None = primary.get(
@@ -1176,7 +1472,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "degradation_cost": deg.value_kwh if deg else 0.0,
             "estimated_capacity": self._capacity_estimator.estimated_capacity_kwh,
             "prices": nordpool.entries if nordpool else [],
-            "grid_power_kw": grid_reading.power_kw if grid_reading else 0.0,
+            "grid_power_kw": grid_power_kw_signed,
             "battery_power_kw": reading.power_kw if reading else 0.0,
             "household_load_kw": reading.household_load_kw if reading else 0.0,
             "base_load_profile": secondary.get(BaseLoadProfile),
@@ -1188,9 +1484,24 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "forecast_quality": _acc.quality if _acc else None,
             "sun_times": primary.get(SunTimes),
             "monthly_bill": secondary.get(MonthlyBillResult),
-            "grid_power_history": primary.get(GridPowerHistory),
+            "grid_import_power_history": primary.get(GridImportPowerHistory),
+            "grid_export_power_history": primary.get(GridExportPowerHistory),
             "inverter_mode_history": primary.get(InverterModeHistory),
             "inverter_mode_reading": primary.get(InverterModeReading),
+            "baked_observed_history": primary.get(BakedObservedHistory),
+            "counter_snapshot_history": primary.get(CounterSnapshotHistory),
+            "today_generation_live_kwh": (
+                primary.get(GenerationReading).today_total_kwh
+                if primary.get(GenerationReading) is not None else None
+            ),
+            "today_imported_live_kwh": (
+                primary.get(GridImportTodayReading).today_total_kwh
+                if primary.get(GridImportTodayReading) is not None else None
+            ),
+            "today_exported_live_kwh": (
+                primary.get(GridExportTodayReading).today_total_kwh
+                if primary.get(GridExportTodayReading) is not None else None
+            ),
         }
 
     def _read_sun_times(self, now: datetime) -> SunTimes:

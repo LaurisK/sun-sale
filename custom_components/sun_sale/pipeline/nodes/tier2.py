@@ -12,16 +12,15 @@ from ...inbound import grid as grid_module
 from ..dag_engine import DagNode, NodeContext
 from ...contract.events import ControlEvent
 from ...contract.models import (
+    BakedObservedHistory,
     BaseLoadProfile,
     BatteryRuntimeEstimate,
     BatteryState,
     BatteryStatus,
     DegradationCost,
-    GenerationHistory,
     GenerationSeries,
-    GridExportTodayHistory,
-    GridImportTodayHistory,
-    GridPowerHistory,
+    GridExportPowerHistory,
+    GridImportPowerHistory,
     ObservedGenerationSeries,
     ObservedGridSeries,
     PriceHistory,
@@ -54,28 +53,29 @@ class GenerationNode(DagNode):
 
 
 class ObservedGenerationNode(DagNode):
-    """Average PV power samples → ObservedGenerationSeries with end-of-day correction.
+    """Average PV power samples → ObservedGenerationSeries (raw, today + yesterday).
 
-    Primary source: `PvPowerHistory` (instantaneous W, averaged per slot).
-    Correction: `GenerationHistory` today-total counter anchors slot sums at day-end.
-    Fallback: counter differencing when no power samples are present.
-    Tier 2 because it depends on `PriceSeries` (T1 secondary) for the grid.
+    Yesterday's slots are raw averages at this stage; the once-per-day bake-in
+    (Phase 3) will substitute proportionally-corrected slot values sourced
+    from the inverter's yesterday-total. Today stays raw until the next
+    rollover. Tier 2 because it depends on ``PriceSeries`` (T1 secondary).
     """
 
     tier = 2
     output_type = ObservedGenerationSeries
-    consumes = [PvPowerHistory, GenerationHistory, PriceSeries]
+    consumes = [PvPowerHistory, PriceSeries, BakedObservedHistory]
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[ObservedGenerationSeries, list[ControlEvent]]:
-        """Build per-slot ObservedGenerationSeries from power history with counter correction."""
+        """Build per-slot ObservedGenerationSeries from PV power + baked history."""
         pv_power_history = ctx.require(PvPowerHistory)
-        history = ctx.require(GenerationHistory)
         price_series = ctx.require(PriceSeries)
+        baked_history = ctx.require(BakedObservedHistory)
         series = generation_module.build_observed_generation_series(
-            pv_power_history, history, price_series.slots,
+            pv_power_history, price_series.slots,
             now=ctx.now, local_tz=ctx.config.local_tz,
+            baked_history=baked_history,
         )
         return series, []
 
@@ -127,33 +127,35 @@ class ObservedGridNode(DagNode):
 
     Splits each sample into its positive (import) and negative (export)
     components before averaging so gross flows are preserved even when the
-    signed mean is near zero. Today's slot sums are scaled to the inverter's
-    daily-resetting import/export counters (when present) — same end-of-day
-    correction pattern as ObservedGenerationSeries.
-    Tier 2 because it depends on PriceSeries (T1 secondary) for the grid.
+    signed mean is near zero. Yesterday and the older day are raw averages
+    at this stage; the once-per-day bake-in (Phase 3) will substitute
+    proportionally-corrected slot values sourced from the inverter's
+    daily-resetting import / export counters. Tier 2 because it depends on
+    ``PriceSeries`` (T1 secondary).
     """
 
     tier = 2
     output_type = ObservedGridSeries
     consumes = [
-        GridPowerHistory,
-        GridImportTodayHistory,
-        GridExportTodayHistory,
+        GridImportPowerHistory,
+        GridExportPowerHistory,
         PriceSeries,
+        BakedObservedHistory,
     ]
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[ObservedGridSeries, list[ControlEvent]]:
-        """Build per-slot ObservedGridSeries with end-of-day counter correction."""
+        """Build per-slot ObservedGridSeries from per-direction histories."""
         price_series = ctx.require(PriceSeries)
+        baked_history = ctx.require(BakedObservedHistory)
         series = grid_module.build_observed_grid_series(
-            grid_power_history=ctx.require(GridPowerHistory),
-            import_total_history=ctx.require(GridImportTodayHistory),
-            export_total_history=ctx.require(GridExportTodayHistory),
+            import_power_history=ctx.require(GridImportPowerHistory),
+            export_power_history=ctx.require(GridExportPowerHistory),
             price_slots=price_series.slots,
             now=ctx.now,
             local_tz=ctx.config.local_tz,
+            baked_history=baked_history,
         )
         return series, []
 
