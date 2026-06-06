@@ -75,6 +75,8 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
             "inverter_entity_ids": getattr(coordinator, "_inverter_entity_ids", {}),
             "grid_import_power_entity_id": getattr(coordinator, "_grid_import_power_entity_id", ""),
             "grid_export_power_entity_id": getattr(coordinator, "_grid_export_power_entity_id", ""),
+            "pv_power_entity_id": getattr(coordinator, "_pv_power_entity_id", ""),
+            "solar_energy_today_entity_id": getattr(coordinator, "_solar_energy_today_entity_id", ""),
         },
         "inputs": {
             "nordpool_prices": [

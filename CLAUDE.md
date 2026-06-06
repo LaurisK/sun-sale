@@ -72,14 +72,21 @@ generation, 2 for grid: import + export). `build_slots_for_window` takes
 (no sign-split). Generation passes `{generation: pv_power_samples}`; grid
 passes `{grid_import: imp_samples, grid_export: exp_samples}`.
 
-Grid power is **always** sourced from two separate non-negative HA entities
-mapped via `CONF_INVERTER_ENTITY_GRID_IMPORT_POWER` and
-`CONF_INVERTER_ENTITY_GRID_EXPORT_POWER`. The legacy signed
-`GridObserver` has been removed; if a deployment only has a signed net
-sensor, the user must create per-direction template helpers
-(`max(0, ...)` and `max(0, -...)`). The coordinator synthesises a signed
-`grid_power_kw` value purely for dashboard display from the same pair —
-nothing downstream uses it.
+Grid power is sourced per-direction by `GridImportPowerObserver` and
+`GridExportPowerObserver`. Each accepts two entity IDs:
+
+  - `entity_id` — a non-negative directional sensor mapped via
+    `CONF_INVERTER_ENTITY_GRID_IMPORT_POWER` / `..._GRID_EXPORT_POWER`. When
+    present, the observer reads it as-is (clamped ≥ 0).
+  - `signed_entity_id` — a single signed net-flow sensor (sunSale convention:
+    positive = import, negative = export). Used only when the directional
+    entity is empty. The observer projects onto its side via a polarity
+    constant (`+1` for import, `-1` for export) then clamps ≥ 0. The Solis
+    auto-detect path passes the resolved `grid_power` (=`grid_power_net`)
+    here so installs without per-direction sensors work out of the box.
+
+The coordinator also synthesises a signed `grid_power_kw` value purely for
+dashboard display — nothing downstream uses it.
 
 Today's slots are raw averaged each cycle; yesterday is finalised once per
 (date, side) by `try_bake_yesterday` in `inbound/observed_bake_in.py`, which:

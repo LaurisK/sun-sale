@@ -98,40 +98,58 @@ def build_grid_engine(local_tz: TzInfo) -> ObservedSeriesEngine:
 # ---------------------------------------------------------------------------
 
 class _DirectionalPowerObserver:
-    """Shared parsing for a non-negative directional grid-power entity.
+    """Shared parsing for a non-negative directional grid-power reading.
 
-    Reads one HA sensor whose value is the magnitude of grid flow in a single
-    direction (import or export) and produces a non-negative ``power_kw``.
+    Two input modes are supported, in order of preference:
+
+    1. **Directional entity** — a sensor exposing the magnitude of grid flow
+       in a single direction (``entity_id``). Used when the inverter or a
+       user-provided template helper exposes per-direction sensors directly.
+    2. **Signed fallback** — a single signed net-flow sensor
+       (``signed_entity_id``). The observer extracts the matching direction
+       by applying ``max(0.0, signed_polarity * value)`` so each instance
+       still emits a non-negative magnitude. Used by Solis auto-detect when
+       the inverter only exposes ``grid_power_net`` and the user hasn't
+       provided per-direction template helpers.
+
     A freshness check guards against stale states — the meter chain that
     feeds these sensors can silently freeze (numeric value persists but
     ``last_updated`` does not advance), at which point the reading is
     treated as unavailable rather than continuing to bias the per-slot mean.
-    Subclasses bind it to a concrete reading type.
+    Subclasses bind it to a concrete reading type and a sign polarity
+    (``+1`` for import, ``-1`` for export) used when reading the signed
+    fallback.
     """
 
     reading_cls: type
     output_type: type
+    _signed_polarity: int = 1
 
     def __init__(
         self,
         entity_id: str,
         max_age_s: float = _GRID_POWER_MAX_AGE_S,
+        signed_entity_id: str = "",
     ) -> None:
-        """Initialise with the HA entity ID + freshness window.
+        """Initialise with the HA entity ID(s) + freshness window.
 
         Args:
             entity_id: Entity ID of the directional power sensor. Empty
-                string disables the observer (returns ``None``).
+                string activates the ``signed_entity_id`` fallback when set.
             max_age_s: Maximum age (seconds) of ``state.last_updated`` for
                 the reading to be considered fresh; older states return
                 ``None``. ``float('inf')`` disables the freshness check
                 (used by tests that inject states without timestamps).
+            signed_entity_id: Optional signed net-flow sensor (sunSale
+                convention: positive = import, negative = export). Used only
+                when ``entity_id`` is empty.
         """
         self._entity_id = entity_id
         self._max_age_s = max_age_s
+        self._signed_entity_id = signed_entity_id
 
     def _parse(self, hass: Any, now: datetime):
-        """Read the entity, normalise to non-negative kW, return a typed reading.
+        """Read the configured entity, normalise to non-negative kW, return a typed reading.
 
         Args:
             hass: Home Assistant instance.
@@ -139,12 +157,37 @@ class _DirectionalPowerObserver:
 
         Returns:
             ``reading_cls`` instance, or ``None`` when missing, unparseable,
-            or stale. Negative numeric states are clamped to 0.0 (directional
-            magnitudes are non-negative by contract).
+            or stale. Directional reads clamp negative values to 0; signed
+            reads project onto this side via ``_signed_polarity`` then clamp.
         """
-        if not self._entity_id:
-            return None
-        state = hass.states.get(self._entity_id)
+        if self._entity_id:
+            return self._read_entity(hass, now, self._entity_id, signed=False)
+        if self._signed_entity_id:
+            return self._read_entity(hass, now, self._signed_entity_id, signed=True)
+        return None
+
+    def _read_entity(
+        self,
+        hass: Any,
+        now: datetime,
+        entity_id: str,
+        signed: bool,
+    ) -> Any:
+        """Read ``entity_id`` and return a reading; projects onto this side when ``signed``.
+
+        Args:
+            hass: Home Assistant instance.
+            now: Snapshot timestamp.
+            entity_id: HA entity ID to read.
+            signed: When True, multiply by ``_signed_polarity`` before
+                clamping; this extracts the direction-pure magnitude from a
+                signed net-flow sensor.
+
+        Returns:
+            ``reading_cls`` instance, or ``None`` on missing / unparseable /
+            stale state.
+        """
+        state = hass.states.get(entity_id)
         if state is None or state.state in ("unavailable", "unknown", ""):
             return None
         try:
@@ -159,6 +202,8 @@ class _DirectionalPowerObserver:
                     return None
         unit = str((state.attributes or {}).get("unit_of_measurement") or "").strip()
         power_kw = normalize_power_to_kw(value, unit)
+        if signed:
+            power_kw = self._signed_polarity * power_kw
         return self.reading_cls(power_kw=max(0.0, power_kw), timestamp=now)
 
 
@@ -167,6 +212,7 @@ class GridImportPowerObserver(_DirectionalPowerObserver):
 
     reading_cls = GridImportPowerReading
     output_type = GridImportPowerReading
+    _signed_polarity = 1
 
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime,
@@ -180,6 +226,7 @@ class GridExportPowerObserver(_DirectionalPowerObserver):
 
     reading_cls = GridExportPowerReading
     output_type = GridExportPowerReading
+    _signed_polarity = -1
 
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime,

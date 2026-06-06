@@ -155,3 +155,94 @@ def test_export_observer_clamps_negative_to_zero():
     obs = GridExportPowerObserver("sensor.exp")
     reading = obs._parse(hass, NOW)
     assert reading.power_kw == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Signed-fallback mode (Solis auto-detect / installs with only a net sensor)
+# ---------------------------------------------------------------------------
+
+
+def test_import_observer_signed_fallback_extracts_positive_side():
+    """With no directional entity, the import side reads the signed sensor's positive half."""
+    hass = _Hass({"sensor.grid_net": _State(
+        state="2500",
+        attributes={"unit_of_measurement": "W"},
+        last_updated=NOW,
+    )})
+    obs = GridImportPowerObserver(entity_id="", signed_entity_id="sensor.grid_net")
+    reading = obs._parse(hass, NOW)
+    assert reading is not None
+    assert reading.power_kw == 2.5
+
+
+def test_import_observer_signed_fallback_clamps_export_to_zero():
+    """Negative signed value (export) projects onto the import side as zero."""
+    hass = _Hass({"sensor.grid_net": _State(
+        state="-2957",
+        attributes={"unit_of_measurement": "W"},
+        last_updated=NOW,
+    )})
+    obs = GridImportPowerObserver(entity_id="", signed_entity_id="sensor.grid_net")
+    reading = obs._parse(hass, NOW)
+    assert reading is not None
+    assert reading.power_kw == 0.0
+
+
+def test_export_observer_signed_fallback_extracts_negative_side():
+    """With no directional entity, the export side reads the signed sensor's negative half (flipped)."""
+    hass = _Hass({"sensor.grid_net": _State(
+        state="-2957",
+        attributes={"unit_of_measurement": "W"},
+        last_updated=NOW,
+    )})
+    obs = GridExportPowerObserver(entity_id="", signed_entity_id="sensor.grid_net")
+    reading = obs._parse(hass, NOW)
+    assert reading is not None
+    assert reading.power_kw == 2.957
+
+
+def test_export_observer_signed_fallback_clamps_import_to_zero():
+    """Positive signed value (import) projects onto the export side as zero."""
+    hass = _Hass({"sensor.grid_net": _State(
+        state="500",
+        attributes={"unit_of_measurement": "W"},
+        last_updated=NOW,
+    )})
+    obs = GridExportPowerObserver(entity_id="", signed_entity_id="sensor.grid_net")
+    reading = obs._parse(hass, NOW)
+    assert reading is not None
+    assert reading.power_kw == 0.0
+
+
+def test_directional_entity_preferred_over_signed_fallback():
+    """When both are configured, the directional entity wins (signed never read)."""
+    hass = _Hass({
+        "sensor.imp": _State(state="1.0", attributes={"unit_of_measurement": "kW"}, last_updated=NOW),
+        "sensor.grid_net": _State(state="-2.0", attributes={"unit_of_measurement": "kW"}, last_updated=NOW),
+    })
+    obs = GridImportPowerObserver(entity_id="sensor.imp", signed_entity_id="sensor.grid_net")
+    reading = obs._parse(hass, NOW)
+    assert reading is not None
+    # Directional entity says 1.0 kW import; signed sensor (export) would imply 0.0
+    assert reading.power_kw == 1.0
+
+
+def test_observer_returns_none_when_neither_entity_configured():
+    """An observer with neither directional nor signed entity is fully disabled."""
+    hass = _Hass({"sensor.anything": _State(state="1.0", last_updated=NOW)})
+    obs = GridImportPowerObserver(entity_id="", signed_entity_id="")
+    assert obs._parse(hass, NOW) is None
+
+
+def test_signed_fallback_respects_freshness_check():
+    """A stale signed sensor still gets the freshness drop."""
+    stale_ts = NOW - timedelta(seconds=240)
+    hass = _Hass({"sensor.grid_net": _State(
+        state="-1500",
+        attributes={"unit_of_measurement": "W"},
+        last_updated=stale_ts,
+    )})
+    obs = GridExportPowerObserver(
+        entity_id="", signed_entity_id="sensor.grid_net", max_age_s=180,
+    )
+    assert obs._parse(hass, NOW) is None

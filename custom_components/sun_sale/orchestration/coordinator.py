@@ -884,20 +884,47 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             }
         inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
         self._inverter_entity_ids = dict(inverter_entity_ids)
-        # Per-direction grid-power observers — both must be configured for
-        # the pipeline to receive grid samples. No coordinator-side
-        # synthesis from a signed sensor: split is end-to-end. The legacy
-        # ``grid_power`` (signed) entity remains in ``inverter_entity_ids``
-        # for ``InverterController.get_grid_power`` (used by BatteryReading
-        # / capacity estimator), independent of the observer pipeline.
+        # Per-direction grid-power observers — prefer the per-direction
+        # entity when configured. When absent (typical for Solis auto-detect,
+        # where solis_modbus only publishes signed ``grid_power_net``), the
+        # observers fall back to the signed sensor and project onto their
+        # side via ``_signed_polarity``. The signed ``grid_power`` entity
+        # also remains in ``inverter_entity_ids`` for
+        # ``InverterController.get_grid_power`` (used by BatteryReading /
+        # capacity estimator), independent of the observer pipeline.
         self._grid_import_power_entity_id = data.get(
             CONF_INVERTER_ENTITY_GRID_IMPORT_POWER, "",
         )
         self._grid_export_power_entity_id = data.get(
             CONF_INVERTER_ENTITY_GRID_EXPORT_POWER, "",
         )
+        signed_grid_power_entity_id = inverter_entity_ids.get("grid_power", "")
         grid_import_total_entity_id = inverter_entity_ids.get("grid_import_energy_today", "")
         grid_export_total_entity_id = inverter_entity_ids.get("grid_export_energy_today", "")
+        # PV power + today-solar-energy: prefer the manual-config value when
+        # set; fall back to the Solis resolver's auto-detected entity. The
+        # resolver omits the role entirely when not present, so dict.get
+        # with empty-string default is the right merge.
+        pv_power_entity_id = (
+            data.get(CONF_INVERTER_ENTITY_PV_POWER, "")
+            or inverter_entity_ids.get("pv_power", "")
+        )
+        solar_energy_today_entity_id = (
+            data.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, "")
+            or inverter_entity_ids.get("solar_energy_today", "")
+        )
+        self._pv_power_entity_id = pv_power_entity_id
+        self._solar_energy_today_entity_id = solar_energy_today_entity_id
+        # Yesterday-total entities: map auto-detected Solis entries into the
+        # raw-config dict so ``yesterday_total_resolver`` finds them via its
+        # ``DEDICATED_ENTITY_CONFIG_KEY`` lookup without further plumbing.
+        for cfg_key, role_key in (
+            ("inverter_entity_generation_yesterday", "solar_energy_yesterday"),
+            ("inverter_entity_grid_import_yesterday", "grid_import_energy_yesterday"),
+            ("inverter_entity_grid_export_yesterday", "grid_export_energy_yesterday"),
+        ):
+            if not data.get(cfg_key) and inverter_entity_ids.get(role_key):
+                data[cfg_key] = inverter_entity_ids[role_key]
 
         local_tz = self._resolve_local_tz()
         self._sun_sale_config = SunSaleConfig(
@@ -917,16 +944,18 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 inverter=inverter,
                 household_load_entity=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
             ),
-            GridImportPowerObserver(entity_id=self._grid_import_power_entity_id),
-            GridExportPowerObserver(entity_id=self._grid_export_power_entity_id),
+            GridImportPowerObserver(
+                entity_id=self._grid_import_power_entity_id,
+                signed_entity_id=signed_grid_power_entity_id,
+            ),
+            GridExportPowerObserver(
+                entity_id=self._grid_export_power_entity_id,
+                signed_entity_id=signed_grid_power_entity_id,
+            ),
             GridImportTotalTranslator(entity_id=grid_import_total_entity_id),
             GridExportTotalTranslator(entity_id=grid_export_total_entity_id),
-            GenerationTranslator(
-                entity_id=data.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
-            ),
-            PvPowerTranslator(
-                entity_id=data.get(CONF_INVERTER_ENTITY_PV_POWER, ""),
-            ),
+            GenerationTranslator(entity_id=solar_energy_today_entity_id),
+            PvPowerTranslator(entity_id=pv_power_entity_id),
             HouseholdLoadTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
             ),

@@ -48,6 +48,17 @@ _SENSOR_SUFFIXES: dict[str, tuple[str, str]] = {
     # ObservedGridSeries end-of-day correction (see inbound/grid.py).
     "grid_import_energy_today":    ("solis_modbus_inverter_today_energy_imported_from_grid", "today_energy_imported_from_grid"),
     "grid_export_energy_today":    ("solis_modbus_inverter_today_energy_fed_into_grid", "today_energy_fed_into_grid"),
+    # Yesterday-total energy counters — preferred bake-in source when the
+    # inverter exposes them directly (avoids dependence on the pre-rollover
+    # snapshot path). Mapped into raw_config under the keys expected by
+    # ``yesterday_total_resolver.DEDICATED_ENTITY_CONFIG_KEY``.
+    "grid_import_energy_yesterday": ("solis_modbus_inverter_yesterday_energy_imported_from_grid", "yesterday_energy_imported_from_grid"),
+    "grid_export_energy_yesterday": ("solis_modbus_inverter_yesterday_energy_fed_into_grid", "yesterday_energy_fed_into_grid"),
+    # PV power + daily-resetting solar-energy counter — feed the generation
+    # observer (PvPowerTranslator) and bake-in (GenerationTranslator).
+    "pv_power":                    ("solis_modbus_inverter_total_pv_power", "total_pv_power"),
+    "solar_energy_today":          ("solis_modbus_inverter_pv_today_energy_generation", "pv_today_energy_generation"),
+    "solar_energy_yesterday":      ("solis_modbus_inverter_pv_yesterday_energy_generation", "pv_yesterday_energy_generation"),
     # Storage Control word readback (register 43110).
     "storage_control_readback":    ("solis_modbus_inverter_storage_control_switch_value", "storage_control_switch_value"),
     # Battery max charge / discharge currents (per-slot; configured via numbers).
@@ -97,6 +108,11 @@ _OPTIONAL_ROLES: frozenset[str] = frozenset({
     # a fallback for the meter chain — most installs use ``grid_power_net``
     # alone.
     "grid_power_fallback",
+    # Yesterday-total roles are only used by the bake-in's dedicated-sensor
+    # path; the snapshot fallback covers their absence.
+    "grid_import_energy_yesterday",
+    "grid_export_energy_yesterday",
+    "solar_energy_yesterday",
 })
 
 
