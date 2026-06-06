@@ -59,7 +59,10 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     grid_import_power_history = data.get("grid_import_power_history")
     grid_export_power_history = data.get("grid_export_power_history")
     pv_power_history = data.get("pv_power_history")
+    derived_power_history = data.get("derived_power_history")
     observed_grid = data.get("observed_grid")
+    observed_consumption = data.get("observed_consumption")
+    observed_losses = data.get("observed_losses")
 
     cfg = coordinator._config  # noqa: SLF001
     return {
@@ -78,6 +81,8 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
             "grid_export_power_entity_id": getattr(coordinator, "_grid_export_power_entity_id", ""),
             "pv_power_entity_id": getattr(coordinator, "_pv_power_entity_id", ""),
             "solar_energy_today_entity_id": getattr(coordinator, "_solar_energy_today_entity_id", ""),
+            "ac_port_power_entity_id": getattr(coordinator, "_ac_port_power_entity_id", ""),
+            "backup_power_entity_id": getattr(coordinator, "_backup_power_entity_id", ""),
         },
         "inputs": {
             "nordpool_prices": [
@@ -111,6 +116,20 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for s in pv_power_history.samples
                 ],
             } if pv_power_history is not None else None,
+            "derived_power_history": {
+                "sample_count": len(derived_power_history.samples),
+                "samples": [
+                    {
+                        "timestamp":         s.timestamp.isoformat(),
+                        "ac_port_kw_signed": round(s.ac_port_kw_signed, 4),
+                        "backup_kw":         round(s.backup_kw, 4),
+                        "grid_net_kw_signed": round(s.grid_net_kw_signed, 4),
+                        "solar_kw":          round(s.solar_kw, 4),
+                        "battery_kw_signed": round(s.battery_kw_signed, 4),
+                    }
+                    for s in derived_power_history.samples
+                ],
+            } if derived_power_history is not None else None,
             "tariff_config": (
                 dataclasses.asdict(coordinator.tariff_config)
                 if coordinator.tariff_config is not None else None
@@ -220,6 +239,34 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for s in observed_grid.slots
                 ],
             } if observed_grid is not None else None,
+            "observed_consumption": {
+                "slot_count": len(observed_consumption.slots),
+                "total_yesterday_kwh": round(observed_consumption.total_yesterday_kwh, 4),
+                "total_today_so_far_kwh": round(observed_consumption.total_today_so_far_kwh, 4),
+                "computed_at": observed_consumption.computed_at.isoformat(),
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "end": s.end.isoformat(),
+                        "consumed_kwh": round(s.consumed_kwh, 4),
+                    }
+                    for s in observed_consumption.slots
+                ],
+            } if observed_consumption is not None else None,
+            "observed_losses": {
+                "slot_count": len(observed_losses.slots),
+                "total_yesterday_kwh": round(observed_losses.total_yesterday_kwh, 4),
+                "total_today_so_far_kwh": round(observed_losses.total_today_so_far_kwh, 4),
+                "computed_at": observed_losses.computed_at.isoformat(),
+                "slots": [
+                    {
+                        "start": s.start.isoformat(),
+                        "end": s.end.isoformat(),
+                        "losses_kwh": round(s.losses_kwh, 4),
+                    }
+                    for s in observed_losses.slots
+                ],
+            } if observed_losses is not None else None,
             "baked_observed_history": {
                 "record_count": len(baked_history.records),
                 "records": [

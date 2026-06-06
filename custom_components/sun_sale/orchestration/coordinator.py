@@ -33,6 +33,8 @@ from ..contract.const import (
     CONF_BATTERY_PURCHASE_PRICE,
     CONF_BATTERY_RATED_CYCLE_LIFE,
     CONF_BATTERY_ROUND_TRIP_EFFICIENCY,
+    CONF_INVERTER_ENTITY_AC_PORT_POWER,
+    CONF_INVERTER_ENTITY_BACKUP_POWER,
     CONF_INVERTER_ENTITY_BATTERY_POWER,
     CONF_INVERTER_ENTITY_BATTERY_SOC,
     CONF_INVERTER_ENTITY_CHARGE_CONTROL,
@@ -72,6 +74,7 @@ from ..contract.const import (
     CAPACITY_OBS_MIN_SOC_DELTA,
     COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
+    DERIVED_POWER_HISTORY_RETENTION_DAYS,
     GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS,
     GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS,
     GRID_POWER_HISTORY_RETENTION_DAYS,
@@ -102,6 +105,7 @@ from ..contract.const import (
     STORAGE_KEY_COUNTER_SNAPSHOT,
     STORAGE_KEY_GRID_EXPORT_POWER,
     STORAGE_KEY_GRID_EXPORT_TOTAL,
+    STORAGE_KEY_DERIVED_POWER,
     STORAGE_KEY_GRID_IMPORT_POWER,
     STORAGE_KEY_GRID_IMPORT_TOTAL,
     STORAGE_KEY_HOUSEHOLD_LOAD,
@@ -159,9 +163,15 @@ from ..contract.models import (
     HouseholdLoadHistory,
     HouseholdLoadReading,
     HouseholdLoadSample,
+    AcPortPowerReading,
+    BackupPowerReading,
+    DerivedPowerHistory,
+    DerivedPowerSample,
     NordpoolData,
+    ObservedConsumptionSeries,
     ObservedGenerationSeries,
     ObservedGridSeries,
+    ObservedLossesSeries,
     PriceEntry,
     PriceHistory,
     PriceSeries,
@@ -188,8 +198,10 @@ from ..pipeline.nodes import (
     GenerationNode,
     LockoutNode,
     MonthlyBillNode,
+    ObservedConsumptionNode,
     ObservedGenerationNode,
     ObservedGridNode,
+    ObservedLossesNode,
     ScheduleNode,
     PricingNode,
     ProfitabilityNode,
@@ -216,6 +228,11 @@ from ..inbound.observer.grid import (
     GridImportPowerObserver,
     GridImportTotalTranslator,
     build_grid_engine,
+)
+from ..inbound.observer.derived import (
+    AcPortPowerTranslator,
+    BackupPowerTranslator,
+    build_derived_power_sample,
 )
 from ..inbound.inverter_mode import InverterModeTranslator
 from ..inbound.inverter_time import (
@@ -458,6 +475,38 @@ def _deserialize_grid_export_power(d: dict) -> list[GridExportPowerReading]:
         GridExportPowerReading(
             power_kw=s["kw"],
             timestamp=datetime.fromisoformat(s["ts"]),
+        )
+        for s in d.get("samples", [])
+    ]
+
+
+def _serialize_derived_power(samples: list[DerivedPowerSample]) -> dict:
+    """Serialise a list of derived-power cross-stream samples."""
+    return {
+        "samples": [
+            {
+                "ts":  s.timestamp.isoformat(),
+                "ac":  s.ac_port_kw_signed,
+                "bu":  s.backup_kw,
+                "gn":  s.grid_net_kw_signed,
+                "sol": s.solar_kw,
+                "bat": s.battery_kw_signed,
+            }
+            for s in samples
+        ]
+    }
+
+
+def _deserialize_derived_power(d: dict) -> list[DerivedPowerSample]:
+    """Deserialise a list of derived-power cross-stream samples."""
+    return [
+        DerivedPowerSample(
+            timestamp=datetime.fromisoformat(s["ts"]),
+            ac_port_kw_signed=s["ac"],
+            backup_kw=s["bu"],
+            grid_net_kw_signed=s["gn"],
+            solar_kw=s["sol"],
+            battery_kw_signed=s["bat"],
         )
         for s in d.get("samples", [])
     ]
@@ -915,6 +964,19 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         )
         self._pv_power_entity_id = pv_power_entity_id
         self._solar_energy_today_entity_id = solar_energy_today_entity_id
+        # Derived-observer inputs — same manual-first / Solis-auto-second merge.
+        # Both are optional; absence simply disables the consumption + losses
+        # observed series. The grid-net and battery/PV signals already arrive
+        # via the existing translators, so only AC port + backup are new
+        # entities to wire through.
+        self._ac_port_power_entity_id = (
+            data.get(CONF_INVERTER_ENTITY_AC_PORT_POWER, "")
+            or inverter_entity_ids.get("ac_port_power", "")
+        )
+        self._backup_power_entity_id = (
+            data.get(CONF_INVERTER_ENTITY_BACKUP_POWER, "")
+            or inverter_entity_ids.get("backup_power", "")
+        )
         # Yesterday-total entities: map auto-detected Solis entries into the
         # raw-config dict so ``yesterday_total_resolver`` finds them via its
         # ``DEDICATED_ENTITY_CONFIG_KEY`` lookup without further plumbing.
@@ -962,6 +1024,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             HouseholdConsumptionTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY, ""),
             ),
+            AcPortPowerTranslator(entity_id=self._ac_port_power_entity_id),
+            BackupPowerTranslator(entity_id=self._backup_power_entity_id),
             InverterModeTranslator(inverter=inverter),
             InverterTimeTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_INVERTER_CLOCK, ""),
@@ -977,6 +1041,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             GenerationNode(),
             ObservedGenerationNode(),
             ObservedGridNode(),
+            ObservedConsumptionNode(),
+            ObservedLossesNode(),
             DegradationNode(),
             MonthlyBillNode(),
             ChargingProfileNode(),
@@ -1116,6 +1182,13 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         )
         await self._baked_observed_store.load()
 
+        self._derived_power_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_DERIVED_POWER,
+            serialize=_serialize_derived_power,
+            deserialize=_deserialize_derived_power,
+        )
+        await self._derived_power_store.load()
+
     async def _async_update_data(self) -> dict:
         """One DAG cycle: translate → capacity update → DAG → event routing."""
         now = datetime.now(timezone.utc)
@@ -1232,6 +1305,34 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 samples=tuple(
                     (self._grid_export_total_store.value or [])
                     if self._grid_export_total_store else []
+                ),
+            )
+
+            # Derived-power cross-stream sample: composes AC port + backup +
+            # battery (carries battery_power + grid_net_signed) + PV into one
+            # synchronised tuple. Persisted as a rolling history so the
+            # consumption + losses observers can power-average per slot. The
+            # composer returns None when any source is unavailable this cycle —
+            # partial samples would bias the per-slot mean asymmetrically.
+            current_ac_port: AcPortPowerReading | None = primary.get(AcPortPowerReading)
+            current_backup: BackupPowerReading | None = primary.get(BackupPowerReading)
+            current_battery: BatteryReading | None = primary.get(BatteryReading)
+            derived_sample = build_derived_power_sample(
+                now=now,
+                ac_port=current_ac_port,
+                backup=current_backup,
+                battery=current_battery,
+                pv=current_pv_power,
+            )
+            if derived_sample is not None and self._derived_power_store is not None:
+                cutoff = now - timedelta(days=DERIVED_POWER_HISTORY_RETENTION_DAYS)
+                await self._derived_power_store.append_and_trim(
+                    derived_sample, cutoff, lambda s: s.timestamp,
+                )
+            primary[DerivedPowerHistory] = DerivedPowerHistory(
+                samples=tuple(
+                    (self._derived_power_store.value or [])
+                    if self._derived_power_store else []
                 ),
             )
 
@@ -1501,6 +1602,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "forecast": secondary.get(GenerationSeries),
             "observed_generation": secondary.get(ObservedGenerationSeries),
             "observed_grid": secondary.get(ObservedGridSeries),
+            "observed_consumption": secondary.get(ObservedConsumptionSeries),
+            "observed_losses": secondary.get(ObservedLossesSeries),
             "forecast_error": _acc.error_series if _acc else None,
             "calculation": secondary.get(CalculationResult),
             "schedule": secondary.get(Schedule),
@@ -1525,6 +1628,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "grid_import_power_history": primary.get(GridImportPowerHistory),
             "grid_export_power_history": primary.get(GridExportPowerHistory),
             "pv_power_history": primary.get(PvPowerHistory),
+            "derived_power_history": primary.get(DerivedPowerHistory),
             "inverter_mode_history": primary.get(InverterModeHistory),
             "inverter_mode_reading": primary.get(InverterModeReading),
             "baked_observed_history": primary.get(BakedObservedHistory),

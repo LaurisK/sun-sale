@@ -69,6 +69,14 @@ CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY = "inverter_entity_grid_export_energy"
 # direction reads ~0 at any moment because grid flow is one-way.
 CONF_INVERTER_ENTITY_GRID_IMPORT_POWER = "inverter_entity_grid_import_power"
 CONF_INVERTER_ENTITY_GRID_EXPORT_POWER = "inverter_entity_grid_export_power"
+# AC grid-port power (signed; convention: positive = inverter→grid) feeding the
+# derived consumption + losses observers. The Solis auto-detect path resolves
+# this to ``ac_grid_port_power``; non-Solis installs map it manually.
+CONF_INVERTER_ENTITY_AC_PORT_POWER = "inverter_entity_ac_port_power"
+# Backup-port output power (magnitude, ≥ 0). Non-zero only when the inverter
+# is bridging backup-protected loads with grid down; otherwise ~0. Solis
+# resolves to ``backup_load_power``.
+CONF_INVERTER_ENTITY_BACKUP_POWER = "inverter_entity_backup_power"
 # Optional: HA entity exposing the inverter's own clock (local-time
 # datetime). When set, the inverter_time module tracks HA↔inverter skew so
 # the pre-rollover snapshot fires relative to the inverter's idea of midnight
@@ -87,6 +95,7 @@ STORAGE_KEY_GRID_IMPORT_POWER = f"{DOMAIN}_grid_import_power"
 STORAGE_KEY_GRID_EXPORT_POWER = f"{DOMAIN}_grid_export_power"
 STORAGE_KEY_GRID_IMPORT_TOTAL = f"{DOMAIN}_grid_import_total"
 STORAGE_KEY_GRID_EXPORT_TOTAL = f"{DOMAIN}_grid_export_total"
+STORAGE_KEY_DERIVED_POWER = f"{DOMAIN}_derived_power"
 STORAGE_KEY_MONTHLY_BILL = f"{DOMAIN}_monthly_bill"
 STORAGE_KEY_MODE_HISTORY = f"{DOMAIN}_mode_history"
 STORAGE_VERSION = 1
@@ -108,6 +117,10 @@ GRID_POWER_HISTORY_RETENTION_DAYS = 2
 # available alongside today's samples.
 GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS = 2
 GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS = 2
+
+# Rolling derived-power-sample retention (days). Mirrors GRID_POWER history;
+# enough to cover yesterday + today for the bake-in window.
+DERIVED_POWER_HISTORY_RETENTION_DAYS = 2
 
 # Baked observed history retention (days). Keeps enough history for the
 # integration check's rollup window (per-side faults over the last month).

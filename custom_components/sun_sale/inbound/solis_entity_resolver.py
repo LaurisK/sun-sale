@@ -59,6 +59,14 @@ _SENSOR_SUFFIXES: dict[str, tuple[str, str]] = {
     "pv_power":                    ("solis_modbus_inverter_total_pv_power", "total_pv_power"),
     "solar_energy_today":          ("solis_modbus_inverter_pv_today_energy_generation", "pv_today_energy_generation"),
     "solar_energy_yesterday":      ("solis_modbus_inverter_pv_yesterday_energy_generation", "pv_yesterday_energy_generation"),
+    # AC grid-port signed power (positive = inverter→grid) — distinct from
+    # ``grid_power_fallback`` (which the controller uses with a sign flip
+    # when meter-side reads are stale): the derived observers want the raw
+    # signed value as-is to balance against ``grid_power`` (positive = import).
+    "ac_port_power":               ("solis_modbus_inverter_ac_grid_port_power", "ac_grid_port_power"),
+    # Backup-port output power (magnitude). 0 unless the inverter is
+    # bridging backup-protected loads during a grid outage.
+    "backup_power":                ("solis_modbus_inverter_backup_load_power", "backup_load_power"),
     # Storage Control word readback (register 43110).
     "storage_control_readback":    ("solis_modbus_inverter_storage_control_switch_value", "storage_control_switch_value"),
     # Battery max charge / discharge currents (per-slot; configured via numbers).
@@ -113,6 +121,10 @@ _OPTIONAL_ROLES: frozenset[str] = frozenset({
     "grid_import_energy_yesterday",
     "grid_export_energy_yesterday",
     "solar_energy_yesterday",
+    # Derived-observer inputs — absence only disables the consumption /
+    # losses observed series; the rest of the pipeline still runs.
+    "ac_port_power",
+    "backup_power",
 })
 
 

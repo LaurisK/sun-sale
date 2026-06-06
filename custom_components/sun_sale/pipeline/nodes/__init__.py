@@ -21,8 +21,10 @@ from .tier2 import (
     BatteryRuntimeNode,
     DegradationNode,
     GenerationNode,
+    ObservedConsumptionNode,
     ObservedGenerationNode,
     ObservedGridNode,
+    ObservedLossesNode,
     ProfitabilityNode,
 )
 from .tier3 import (
@@ -44,8 +46,10 @@ __all__ = [
     "GenerationNode",
     "LockoutNode",
     "MonthlyBillNode",
+    "ObservedConsumptionNode",
     "ObservedGenerationNode",
     "ObservedGridNode",
+    "ObservedLossesNode",
     "PricingNode",
     "ProfitabilityNode",
     "ScheduleNode",

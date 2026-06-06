@@ -9,6 +9,7 @@ from .. import profitability as profitability_module
 from ...inbound import forecast as forecast_module
 from ...inbound.observer import generation as generation_module
 from ...inbound.observer import grid as grid_module
+from ...inbound.observer import derived as derived_module
 from ..dag_engine import DagNode, NodeContext
 from ...contract.events import ControlEvent
 from ...contract.models import (
@@ -18,11 +19,14 @@ from ...contract.models import (
     BatteryState,
     BatteryStatus,
     DegradationCost,
+    DerivedPowerHistory,
     GenerationSeries,
     GridExportPowerHistory,
     GridImportPowerHistory,
+    ObservedConsumptionSeries,
     ObservedGenerationSeries,
     ObservedGridSeries,
+    ObservedLossesSeries,
     PriceHistory,
     PriceSeries,
     ProfitabilityScore,
@@ -159,6 +163,61 @@ class ObservedGridNode(DagNode):
         )
         return series, []
 
+
+
+class ObservedConsumptionNode(DagNode):
+    """Average derived-power samples → ObservedConsumptionSeries (raw, today + yesterday).
+
+    Both today and yesterday are raw power-averaged at this stage — no
+    bake-in source is wired for the consumption side yet (the
+    ``baked_history`` input is plumbed through for future use). Tier 2
+    because it depends on ``PriceSeries`` (T1 secondary).
+    """
+
+    tier = 2
+    output_type = ObservedConsumptionSeries
+    consumes = [DerivedPowerHistory, PriceSeries, BakedObservedHistory]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[ObservedConsumptionSeries, list[ControlEvent]]:
+        """Build per-slot ObservedConsumptionSeries from derived-power samples."""
+        derived_history = ctx.require(DerivedPowerHistory)
+        price_series = ctx.require(PriceSeries)
+        baked_history = ctx.require(BakedObservedHistory)
+        series = derived_module.build_observed_consumption_series(
+            derived_history, price_series.slots,
+            now=ctx.now, local_tz=ctx.config.local_tz,
+            baked_history=baked_history,
+        )
+        return series, []
+
+
+class ObservedLossesNode(DagNode):
+    """Average derived-power samples → ObservedLossesSeries (raw, today + yesterday).
+
+    No inverter-side counter exists for "today total losses", so the
+    bake-in path doesn't apply — yesterday and today are both raw and
+    stay that way. Tier 2 for symmetry with the other observed nodes.
+    """
+
+    tier = 2
+    output_type = ObservedLossesSeries
+    consumes = [DerivedPowerHistory, PriceSeries, BakedObservedHistory]
+
+    async def _compute(
+        self, ctx: NodeContext
+    ) -> tuple[ObservedLossesSeries, list[ControlEvent]]:
+        """Build per-slot ObservedLossesSeries from derived-power samples."""
+        derived_history = ctx.require(DerivedPowerHistory)
+        price_series = ctx.require(PriceSeries)
+        baked_history = ctx.require(BakedObservedHistory)
+        series = derived_module.build_observed_losses_series(
+            derived_history, price_series.slots,
+            now=ctx.now, local_tz=ctx.config.local_tz,
+            baked_history=baked_history,
+        )
+        return series, []
 
 
 class ProfitabilityNode(DagNode):

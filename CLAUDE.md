@@ -138,3 +138,41 @@ These sensors are pure pass-throughs of pipeline state already validated by
 `check_observed_generation`, `check_observed_grid`, and
 `check_baked_observed`, so they do **not** get their own deep-check
 widgets.
+
+## Derived-power observers (consumption + losses)
+
+`inbound/observer/derived.py` adds two **synthetic** observed series that
+have no single sensor of their own — each cycle composes a
+`DerivedPowerSample` from five primary readings and the engine averages
+per-slot consumption / losses formulas from that shared stream:
+
+  * **consumption_kw** = `max(0, backup + ac_port_signed + grid_net_signed)`
+  * **losses_kw**      = `max(0, solar − battery_signed − ac_port_signed − backup)`
+
+Sign conventions follow the rest of the codebase: `ac_port_signed` is
+positive=inverter→grid (raw Solis convention), `grid_net_signed` is
+positive=import (sunSale), `battery_signed` is positive=charging
+(sunSale). When the user formula is written with opposite signs
+(export-positive grid, discharge-positive battery), the implementation
+flips signs to match the codebase — the physical balance is the same.
+
+`DerivedPowerSample` is persisted via `STORAGE_KEY_DERIVED_POWER`. The
+composer (`build_derived_power_sample`) returns `None` when any of the
+five inputs is missing this cycle — partial samples would bias the
+per-slot mean asymmetrically. AC port + backup translators are mapped
+via two new config keys (`CONF_INVERTER_ENTITY_AC_PORT_POWER`,
+`CONF_INVERTER_ENTITY_BACKUP_POWER`); the Solis resolver auto-fills both
+from `ac_grid_port_power` and `backup_load_power`.
+
+No bake-in is wired for either side in this phase: today and yesterday
+are both raw averaged. The plug points (`baked_history` kwarg on the
+series builders, `BakedObservedHistory` declared in the DAG nodes' `consumes`)
+are kept so a future phase can wire a household-consumption yesterday-total
+source for the consumption side without changing the series-builder surface.
+Losses has no authoritative inverter-side counter and will stay raw.
+
+The series are exposed under `pipeline.observed_consumption` and
+`pipeline.observed_losses` in `debug_view.py`; `derived_power_history`
+appears under `inputs`. Integration checks `check_observed_consumption`
+and `check_observed_losses` validate per-slot non-negativity and the
+declared totals against slot sums.

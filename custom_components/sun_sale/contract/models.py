@@ -864,6 +864,124 @@ class CounterSnapshotHistory:
     records: tuple[CounterSnapshotRecord, ...]
 
 
+# ---------------------------------------------------------------------------
+# Derived-power observers — consumption (home load) and inverter losses
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class AcPortPowerReading:
+    """Primary data: instantaneous AC grid-port power (kW, signed).
+
+    Sign convention: **positive = inverter→grid** (matches the raw Solis
+    ``ac_grid_port_power`` register). Distinct from the sunSale-convention
+    signed grid_power_net (positive = import) — these two should be roughly
+    mirror images when no battery activity is happening.
+    """
+    power_kw: float          # signed; positive = inverter→grid
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class BackupPowerReading:
+    """Primary data: instantaneous backup-port output power (kW, ≥ 0).
+
+    Always non-negative — backup port only sources power (it cannot sink).
+    Reads ~0 whenever the grid is up; non-zero only when the inverter is
+    bridging backup-protected loads during an outage.
+    """
+    power_kw: float          # ≥ 0
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class DerivedPowerSample:
+    """One synchronised cross-stream snapshot feeding the derived observers.
+
+    Captured each coordinator cycle by composing the cycle's individual
+    primary readings into a single tuple-typed sample. Persisted as a rolling
+    history so the engine can average the derived-power formulas per slot
+    independently of when individual primaries become available later.
+
+    All fields are in kW. Sign conventions follow the codebase:
+
+      * ``ac_port_kw_signed`` — positive = inverter→grid (raw Solis convention).
+      * ``backup_kw`` — magnitude ≥ 0.
+      * ``grid_net_kw_signed`` — positive = import (sunSale convention).
+      * ``solar_kw`` — magnitude ≥ 0.
+      * ``battery_kw_signed`` — positive = charging (sunSale convention).
+
+    The derived formulas (clamped ≥ 0) are:
+
+      * consumption_kw = backup + ac_port_signed + grid_net_signed
+      * losses_kw      = solar  − battery_signed − ac_port_signed − backup
+    """
+    timestamp: datetime
+    ac_port_kw_signed: float
+    backup_kw: float
+    grid_net_kw_signed: float
+    solar_kw: float
+    battery_kw_signed: float
+
+
+@dataclass(frozen=True)
+class DerivedPowerHistory:
+    """Rolling history of cross-stream derived-power samples.
+
+    Coordinator appends each cycle (only when *all* component readings are
+    present this cycle — partial samples are skipped to avoid biasing the
+    slot mean with incomplete data) and persists ~2 days.
+    """
+    samples: tuple[DerivedPowerSample, ...]   # sorted by timestamp ascending
+
+
+@dataclass(frozen=True)
+class ObservedConsumptionSlot:
+    """Observed (derived) household-consumption for one price-grid slot."""
+    start: datetime
+    end: datetime
+    consumed_kwh: float
+    source: str           # "inverter_derived"
+
+
+@dataclass(frozen=True)
+class ObservedConsumptionSeries:
+    """Per-slot derived household-consumption aligned to PriceSeries resolution.
+
+    Covers yesterday 00:00 local → now. Today's slots are raw averages of the
+    cycle-derived consumption formula; yesterday's slots come from
+    ``BakedObservedHistory`` when a record exists (Phase-3 bake-in not yet
+    wired for this side — yesterday currently stays raw too).
+    """
+    slots: tuple[ObservedConsumptionSlot, ...]
+    computed_at: datetime
+    total_yesterday_kwh: float = 0.0
+    total_today_so_far_kwh: float = 0.0
+
+
+@dataclass(frozen=True)
+class ObservedLossesSlot:
+    """Observed (derived) inverter conversion losses for one price-grid slot."""
+    start: datetime
+    end: datetime
+    losses_kwh: float
+    source: str           # "inverter_derived"
+
+
+@dataclass(frozen=True)
+class ObservedLossesSeries:
+    """Per-slot derived inverter losses aligned to PriceSeries resolution.
+
+    Covers yesterday 00:00 local → now. No bake-in source exists for losses
+    (the inverter doesn't expose a "losses today total" counter), so slots
+    stay raw indefinitely — comparison against an authoritative total is not
+    possible.
+    """
+    slots: tuple[ObservedLossesSlot, ...]
+    computed_at: datetime
+    total_yesterday_kwh: float = 0.0
+    total_today_so_far_kwh: float = 0.0
+
+
 @dataclass(frozen=True)
 class InverterTimeReading:
     """One paired snapshot of the inverter clock and HA's UTC clock.
