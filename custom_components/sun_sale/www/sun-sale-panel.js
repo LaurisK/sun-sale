@@ -592,16 +592,19 @@
       // History entries from inverter_mode_history are {t, mode} change events;
       // turn them into bands [event.t, next_event.t || now]. Plan slots from
       // inverter_mode_plan are {t, end_t, mode} and become bands directly.
-      const STORAGE_MODE_FILL = {
-        sell:    'rgba(255, 152, 0, 0.18)',
-        store:   'rgba(33, 150, 243, 0.16)',
-        hoard:   'rgba(3, 169, 244, 0.20)',
-        dump:    'rgba(244, 67, 54, 0.20)',
-        gulp:    'rgba(76, 175, 80, 0.20)',
-        stby:    'rgba(120, 144, 156, 0.16)',
-        auto:    'rgba(189, 189, 189, 0.10)',
-        track:   'rgba(156, 39, 176, 0.18)',
-        unknown: 'rgba(96, 96, 96, 0.18)',
+      // StorageMode → strip color. Keys match StorageMode.value
+      // (Python contract/models.py). Used by renderModeStripBlock and the
+      // tooltip dot, and as the recognised-mode filter when stitching bands.
+      const STORAGE_MODE_STRIP = {
+        feed_in:     '#ff9800',
+        self_use:    '#2196f3',
+        no_export:   '#03a9f4',
+        discharge:   '#f44336',
+        grid_charge: '#4caf50',
+        stand_by:    '#7890a0',
+        auto:        '#bdbdbd',
+        track:       '#9c27b0',
+        unknown:     '#606060',
       };
       const modeBands = [];
       {
@@ -611,7 +614,7 @@
           : [];
         for (let i = 0; i < histRaw.length; i++) {
           const ev = histRaw[i];
-          if (!STORAGE_MODE_FILL[ev.mode]) continue;
+          if (!STORAGE_MODE_STRIP[ev.mode]) continue;
           const nextStart = i + 1 < histRaw.length ? histRaw[i + 1].t : nowMs;
           if (nextStart <= ev.t) continue;
           modeBands.push({ mode: ev.mode, x: ev.t, x2: nextStart });
@@ -620,32 +623,27 @@
           ? dashAttrs.inverter_mode_plan
           : [];
         for (const s of planRaw) {
-          if (!STORAGE_MODE_FILL[s.mode]) continue;
+          if (!STORAGE_MODE_STRIP[s.mode]) continue;
           if (!(s.end_t > s.t)) continue;
           modeBands.push({ mode: s.mode, x: s.t, x2: s.end_t });
         }
       }
 
-      // markArea data: one entry per band, colour carried on the start-point itemStyle.
-      const allBandAreas = [
-        ...profileBands.map(b => [
-          { xAxis: b.x, itemStyle: { color: MODE_BAND_FILL[b.mode] } },
-          { xAxis: b.x2 },
-        ]),
-        ...modeBands.map(b => [
-          { xAxis: b.x, itemStyle: { color: STORAGE_MODE_FILL[b.mode] } },
-          { xAxis: b.x2 },
-        ]),
-      ];
+      // markArea data: one entry per ChargingProfile band (today's solar-disposition
+      // mode). StorageMode history/plan bands live in the dedicated top strip
+      // (renderModeStripBlock) instead — drawing them as full-height markAreas as
+      // well would double the visual noise without adding information.
+      const allBandAreas = profileBands.map(b => [
+        { xAxis: b.x, itemStyle: { color: MODE_BAND_FILL[b.mode] } },
+        { xAxis: b.x2 },
+      ]);
 
       const STORAGE_MODE_LABEL = {
-        sell: 'Sell', store: 'Store', hoard: 'Hoard', dump: 'Dump',
-        gulp: 'Gulp', stby: 'Standby', auto: 'Auto', track: 'Track', unknown: 'Unknown',
+        feed_in: 'Feed-in', self_use: 'Self-use', no_export: 'No export',
+        discharge: 'Discharge', grid_charge: 'Grid charge', stand_by: 'Standby',
+        auto: 'Auto', track: 'Track', unknown: 'Unknown',
       };
-      const STORAGE_MODE_DOT = {
-        sell: '#ff9800', store: '#2196f3', hoard: '#03a9f4', dump: '#f44336',
-        gulp: '#4caf50', stby: '#7890a0', auto: '#bdbdbd', track: '#9c27b0', unknown: '#606060',
-      };
+      const STORAGE_MODE_DOT = STORAGE_MODE_STRIP;
       const PROFILE_MODE_LABEL = {
         solar_charge: 'battery',
         sell:         'sell',
@@ -748,6 +746,35 @@
         };
       };
 
+      // Inverter-mode strip: a thin lane above the plot area that paints each
+      // (history + plan) band as a solid block, so mode is always visible even
+      // for slots whose forecast is zero (e.g. night, no expected generation).
+      // y/height are pixel-absolute against the grid origin so the strip stays
+      // fixed at the top regardless of y-axis zoom.
+      const STRIP_HEIGHT_PX = 10;
+      const STRIP_GAP_PX    = 6;
+      const renderModeStripBlock = (params, api) => {
+        const band = modeBands[params.dataIndex];
+        if (!band) return;
+        const xLeft  = api.coord([band.x,  0])[0];
+        const xRight = api.coord([band.x2, 0])[0];
+        const gridTop = params.coordSys.y;
+        return {
+          type: 'rect',
+          shape: {
+            x:      xLeft,
+            y:      gridTop - STRIP_HEIGHT_PX - STRIP_GAP_PX,
+            width:  Math.max(1, xRight - xLeft),
+            height: STRIP_HEIGHT_PX,
+          },
+          style: {
+            fill:   STORAGE_MODE_STRIP[band.mode] || '#606060',
+            stroke: 'rgba(0,0,0,0.35)',
+            lineWidth: 0.5,
+          },
+        };
+      };
+
       const dot = c => `<span style="display:inline-block;width:9px;color:${c}">●</span>`;
       const sq  = c => `<span style="display:inline-block;width:9px;color:${c}">▮</span>`;
 
@@ -845,6 +872,19 @@
           silent:     true,
           z:          5,
         },
+        {
+          name:       'Inverter mode',
+          type:       'custom',
+          yAxisIndex: 1,
+          renderItem: renderModeStripBlock,
+          // One datapoint per band; the x value picks the slot for ECharts'
+          // tooltip slot-bucketing, while the renderItem reads the band from
+          // the modeBands closure for the full (x, x2, mode) tuple.
+          data:       modeBands.map(b => [b.x, 0]),
+          tooltip:    { show: false },
+          silent:     true,
+          z:          6,
+        },
       ];
 
       const option = {
@@ -854,7 +894,9 @@
         grid: {
           left:   60,
           right:  60,
-          top:    40,
+          // top includes ~16 px reserved for the inverter-mode strip lane
+          // (see renderModeStripBlock — STRIP_HEIGHT_PX + STRIP_GAP_PX).
+          top:    56,
           bottom: 70,
         },
         legend: {
