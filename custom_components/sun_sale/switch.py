@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .contract.const import (
+    DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID,
+    DEFAULT_SCHEDULE_ALLOW_FEED_IN,
     DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING,
     DEFAULT_SCHEDULE_USE_STANDBY,
     DOMAIN,
@@ -33,6 +36,8 @@ async def async_setup_entry(
         AutomationSwitch(coordinator, entry),
         UseStandbySwitch(coordinator, entry),
         AllowGridChargingSwitch(coordinator, entry),
+        AllowFeedInSwitch(coordinator, entry),
+        AllowDischargeToGridSwitch(coordinator, entry),
     ])
 
 
@@ -61,11 +66,17 @@ class _SunSaleSwitchBase(CoordinatorEntity, RestoreEntity, SwitchEntity):
         self._entry = entry
 
     async def async_added_to_hass(self) -> None:
-        """Restore the persisted on/off state; fall back to the class default."""
+        """Restore the persisted on/off state when available.
+
+        HA may restore the entity with ``unknown``/``unavailable`` during boot
+        — those states carry no policy decision, so we keep the coordinator's
+        init default (which already mirrors the class ``_default_on``) instead
+        of forcing the flag to False.
+        """
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last is not None:
-            setattr(self.coordinator, self._coord_attr, last.state == "on")
+        if last is not None and last.state in (STATE_ON, STATE_OFF):
+            setattr(self.coordinator, self._coord_attr, last.state == STATE_ON)
 
     @property
     def device_info(self) -> dict:
@@ -134,3 +145,33 @@ class AllowGridChargingSwitch(_SunSaleSwitchBase):
     _unique_suffix = "allow_grid_charging"
     _coord_attr = "allow_grid_charging"
     _default_on = DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING
+
+
+class AllowFeedInSwitch(_SunSaleSwitchBase):
+    """When on the scheduler may pick FeedIn-priority during surplus solar slots.
+
+    When off, FeedIn is removed from the action set. Export to the grid can
+    still occur via SelfUse when there is over-cap solar, but the explicit
+    feed-in-priority mode is suppressed. Defaults to ON.
+    """
+
+    _attr_name = "sunSale Allow Feed-In"
+    _attr_icon = "mdi:transmission-tower-export"
+    _unique_suffix = "allow_feed_in"
+    _coord_attr = "allow_feed_in"
+    _default_on = DEFAULT_SCHEDULE_ALLOW_FEED_IN
+
+
+class AllowDischargeToGridSwitch(_SunSaleSwitchBase):
+    """When on the scheduler may pick the explicit Discharge-to-grid mode at high sell prices.
+
+    When off, Discharge is removed from the action set. The battery may still
+    discharge to cover local load via SelfUse/NoExport, but the planner will
+    not actively sell stored energy. Defaults to ON.
+    """
+
+    _attr_name = "sunSale Allow Discharge to Grid"
+    _attr_icon = "mdi:battery-arrow-up"
+    _unique_suffix = "allow_discharge_to_grid"
+    _coord_attr = "allow_discharge_to_grid"
+    _default_on = DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID

@@ -43,6 +43,7 @@ class ScheduleNode(DagNode):
         DegradationCost,
         BaseLoadProfile,
         ChargingProfile,
+        SchedulePolicy,
     ]
 
     async def _compute(
@@ -74,8 +75,13 @@ class ScheduleNode(DagNode):
             local_tz=ctx.config.local_tz,
             profitability_score=profit_score,
             current_mode=current_mode,
+            mode_change_penalty=policy.mode_change_penalty_eur_per_kwh,
             use_standby=policy.use_standby,
             allow_grid_charging=policy.allow_grid_charging,
+            allow_feed_in=policy.allow_feed_in,
+            allow_discharge_to_grid=policy.allow_discharge_to_grid,
+            profitability_tilt_alpha=policy.profitability_tilt_alpha,
+            terminal_value_discount=policy.terminal_value_discount,
         )
 
         return schedule, []

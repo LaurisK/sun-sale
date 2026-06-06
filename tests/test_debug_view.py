@@ -73,11 +73,25 @@ def make_coordinator(
     include_schedule: bool = True,
     last_dispatched_action: str | None = "idle",
     last_dispatched_at: datetime | None = None,
+    use_standby: bool = True,
+    allow_grid_charging: bool = True,
+    allow_feed_in: bool = True,
+    allow_discharge_to_grid: bool = True,
+    mode_change_penalty_eur_per_kwh: float = 0.005,
+    profitability_tilt_alpha: float = 0.5,
+    terminal_value_discount: float = 0.5,
 ) -> MagicMock:
     coord = MagicMock()
     coord.automation_enabled = automation_enabled
     coord.last_dispatched_action = last_dispatched_action
     coord.last_dispatched_at = last_dispatched_at or BASE
+    coord.use_standby = use_standby
+    coord.allow_grid_charging = allow_grid_charging
+    coord.allow_feed_in = allow_feed_in
+    coord.allow_discharge_to_grid = allow_discharge_to_grid
+    coord.mode_change_penalty_eur_per_kwh = mode_change_penalty_eur_per_kwh
+    coord.profitability_tilt_alpha = profitability_tilt_alpha
+    coord.terminal_value_discount = terminal_value_discount
 
     tariff_cfg = TariffConfig(
         distribution_fee=0.03,
@@ -226,6 +240,43 @@ def test_last_dispatched_at_none_is_null():
     coord.last_dispatched_at = None
     result = _coordinator_to_dict("e", coord)
     assert result["last_dispatched_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# Schedule-policy block — reflects coordinator toggle + knob state.
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_policy_present_and_default():
+    coord = make_coordinator()
+    policy = _coordinator_to_dict("e", coord)["pipeline"]["schedule_policy"]
+    assert policy["use_standby"] is True
+    assert policy["allow_grid_charging"] is True
+    assert policy["allow_feed_in"] is True
+    assert policy["allow_discharge_to_grid"] is True
+    assert policy["mode_change_penalty_eur_per_kwh"] == pytest.approx(0.005)
+    assert policy["profitability_tilt_alpha"] == pytest.approx(0.5)
+    assert policy["terminal_value_discount"] == pytest.approx(0.5)
+
+
+def test_schedule_policy_reflects_disabled_flags():
+    coord = make_coordinator(
+        use_standby=False,
+        allow_grid_charging=False,
+        allow_feed_in=False,
+        allow_discharge_to_grid=False,
+        mode_change_penalty_eur_per_kwh=0.02,
+        profitability_tilt_alpha=0.0,
+        terminal_value_discount=0.25,
+    )
+    policy = _coordinator_to_dict("e", coord)["pipeline"]["schedule_policy"]
+    assert policy["use_standby"] is False
+    assert policy["allow_grid_charging"] is False
+    assert policy["allow_feed_in"] is False
+    assert policy["allow_discharge_to_grid"] is False
+    assert policy["mode_change_penalty_eur_per_kwh"] == pytest.approx(0.02)
+    assert policy["profitability_tilt_alpha"] == pytest.approx(0.0)
+    assert policy["terminal_value_discount"] == pytest.approx(0.25)
 
 
 # ---------------------------------------------------------------------------

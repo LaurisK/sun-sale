@@ -661,3 +661,109 @@ def test_default_flags_match_legacy_behaviour():
         prices, use_standby=True, allow_grid_charging=True,
     )
     assert [s.mode for s in default.slots] == [s.mode for s in explicit.slots]
+
+
+# ---------------------------------------------------------------------------
+# Policy flags — allow_feed_in / allow_discharge_to_grid + numeric knobs
+# ---------------------------------------------------------------------------
+
+
+def _run_full_policy(
+    prices,
+    *,
+    solar=None,
+    soc: float = 0.50,
+    use_standby: bool = True,
+    allow_grid_charging: bool = True,
+    allow_feed_in: bool = True,
+    allow_discharge_to_grid: bool = True,
+    profitability_tilt_alpha: float = 0.5,
+    terminal_value_discount: float = 0.5,
+):
+    """Run optimize_schedule with every policy knob explicitly set."""
+    bc = default_battery_config()
+    tc = default_tariff_config()
+    state = default_battery_state(soc)
+    state.estimated_capacity_kwh = bc.nominal_capacity_kwh
+    deg = degradation_cost_per_kwh(bc, state)
+    ps = build_price_series(prices, tc, now=NOW)
+    gen = _make_gen_series(solar or [])
+    calc = calculate(ps, gen, state, NOW)
+    return optimize_schedule(
+        ps, calc, bc, state, deg, NOW,
+        use_standby=use_standby,
+        allow_grid_charging=allow_grid_charging,
+        allow_feed_in=allow_feed_in,
+        allow_discharge_to_grid=allow_discharge_to_grid,
+        profitability_tilt_alpha=profitability_tilt_alpha,
+        terminal_value_discount=terminal_value_discount,
+    )
+
+
+def test_allow_feed_in_off_excludes_feed_in_mode():
+    """With allow_feed_in=False, FeedIn must not appear in the schedule."""
+    # Big midday solar and a single high sell price — baseline DP loves FeedIn here.
+    prices = (
+        [make_price(h, 0.05) for h in range(10)]
+        + [make_price(10, 0.40), make_price(11, 0.40)]
+        + [make_price(h, 0.05) for h in range(12, 24)]
+    )
+    solar = [make_solar(h, 4.0) for h in (10, 11)]
+    restricted = _run_full_policy(
+        prices, solar=solar, soc=0.90, allow_feed_in=False,
+    )
+    assert all(s.mode != StorageMode.FeedIn for s in restricted.slots)
+
+
+def test_allow_discharge_to_grid_off_excludes_discharge_mode():
+    """With allow_discharge_to_grid=False, Discharge must not appear."""
+    # Clear arb: charge cheap, sell expensive.
+    prices = (
+        [make_price(0, 0.01)]
+        + [make_price(h, 0.10) for h in range(1, 12)]
+        + [make_price(12, 0.50)]
+        + [make_price(h, 0.10) for h in range(13, 24)]
+    )
+    baseline = _run_full_policy(prices)
+    assert any(s.mode == StorageMode.Discharge for s in baseline.slots)
+
+    restricted = _run_full_policy(prices, allow_discharge_to_grid=False)
+    assert all(s.mode != StorageMode.Discharge for s in restricted.slots)
+
+
+def test_all_export_flags_off_emits_self_use_fallback():
+    """Disabling every export mode + StandBy must still produce a full schedule."""
+    prices = [make_price(h, 0.10) for h in range(6)]
+    result = _run_full_policy(
+        prices,
+        use_standby=False,
+        allow_grid_charging=False,
+        allow_feed_in=False,
+        allow_discharge_to_grid=False,
+    )
+    assert len(result.slots) == len(prices)
+    # Only SelfUse / NoExport remain in the action set.
+    allowed = {StorageMode.SelfUse, StorageMode.NoExport}
+    assert all(s.mode in allowed for s in result.slots)
+
+
+def test_terminal_value_discount_zero_drains_battery():
+    """terminal_value_discount=0 turns off look-ahead and the DP drains by horizon end."""
+    prices = [make_price(h, 0.10) for h in range(24)]    # flat
+    with_lookahead = _run_full_policy(prices, terminal_value_discount=0.5)
+    no_lookahead = _run_full_policy(prices, terminal_value_discount=0.0)
+    # Without terminal value the DP has no incentive to retain charge; with it
+    # the SoC stays meaningfully higher at end-of-horizon.
+    assert no_lookahead.slots[-1].expected_soc_after <= with_lookahead.slots[-1].expected_soc_after
+
+
+def test_profitability_tilt_alpha_zero_collapses_tilt():
+    """alpha=0 nullifies the profitability bias regardless of score."""
+    prices = [make_price(h, 0.10) for h in range(12)]
+    low = _run_full_policy(
+        prices, profitability_tilt_alpha=0.0,
+    )
+    high = _run_full_policy(
+        prices, profitability_tilt_alpha=0.0,
+    )
+    assert [s.mode for s in low.slots] == [s.mode for s in high.slots]

@@ -163,5 +163,35 @@
         }
       }
     }
+  },
+  "entity": {
+    "switch": {
+      "automation_enabled": {
+        "name": "Automation"
+      },
+      "use_standby": {
+        "name": "Use Standby"
+      },
+      "allow_grid_charging": {
+        "name": "Allow Grid Charging"
+      },
+      "allow_feed_in": {
+        "name": "Allow Feed-In"
+      },
+      "allow_discharge_to_grid": {
+        "name": "Allow Discharge to Grid"
+      }
+    },
+    "number": {
+      "mode_change_penalty": {
+        "name": "Mode-Change Penalty"
+      },
+      "profitability_tilt_alpha": {
+        "name": "Profitability Tilt α"
+      },
+      "terminal_value_discount": {
+        "name": "Terminal-Value Discount"
+      }
+    }
   }
 }

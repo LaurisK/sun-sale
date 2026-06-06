@@ -416,6 +416,21 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for s in monthly_bill.slots
                 ],
             } if monthly_bill is not None else None,
+            "schedule_policy": {
+                "use_standby":             bool(coordinator.use_standby),
+                "allow_grid_charging":     bool(coordinator.allow_grid_charging),
+                "allow_feed_in":           bool(coordinator.allow_feed_in),
+                "allow_discharge_to_grid": bool(coordinator.allow_discharge_to_grid),
+                "mode_change_penalty_eur_per_kwh": round(
+                    float(coordinator.mode_change_penalty_eur_per_kwh), 6,
+                ),
+                "profitability_tilt_alpha": round(
+                    float(coordinator.profitability_tilt_alpha), 4,
+                ),
+                "terminal_value_discount": round(
+                    float(coordinator.terminal_value_discount), 4,
+                ),
+            },
         },
         "outputs": {
             "schedule": {

@@ -91,9 +91,20 @@ from ..contract.const import (
     DEFAULT_SOLIS_SELF_USE_SWITCH,
     DEFAULT_SOLIS_STORAGE_CONTROL_READBACK,
     DEFAULT_SOLIS_TOU_MODE_SWITCH,
+    DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID,
+    DEFAULT_SCHEDULE_ALLOW_FEED_IN,
     DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING,
+    DEFAULT_SCHEDULE_MODE_CHANGE_PENALTY_EUR_PER_KWH,
+    DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA,
+    DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT,
     DEFAULT_SCHEDULE_USE_STANDBY,
     DOMAIN,
+    SCHEDULE_MODE_CHANGE_PENALTY_MAX,
+    SCHEDULE_MODE_CHANGE_PENALTY_MIN,
+    SCHEDULE_PROFITABILITY_TILT_ALPHA_MAX,
+    SCHEDULE_PROFITABILITY_TILT_ALPHA_MIN,
+    SCHEDULE_TERMINAL_VALUE_DISCOUNT_MAX,
+    SCHEDULE_TERMINAL_VALUE_DISCOUNT_MIN,
     CONF_INVERTER_ENTITY_PV_POWER,
     GENERATION_HISTORY_RETENTION_DAYS,
     PRICE_HISTORY_RETENTION_DAYS,
@@ -263,6 +274,30 @@ class _YesterdayBuckets:
     today_date: str | None = None
     today_nordpool: list[PriceEntry] = field(default_factory=list)
     today_solar: list[SolarEntry] = field(default_factory=list)
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    """Return ``value`` clamped into ``[lo, hi]`` and coerced to ``float``.
+
+    Args:
+        value: User-set knob value (already coerced from the Number entity).
+        lo: Inclusive lower bound.
+        hi: Inclusive upper bound.
+
+    Returns:
+        ``value`` clamped to the closed interval; NaN inputs collapse to ``lo``.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return lo
+    if v != v:    # NaN check — NaN != NaN by IEEE-754
+        return lo
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
 
 
 def _parse_nordpool_entries(payload: dict) -> list[PriceEntry]:
@@ -821,6 +856,13 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self.automation_enabled: bool = False
         self.use_standby: bool = DEFAULT_SCHEDULE_USE_STANDBY
         self.allow_grid_charging: bool = DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING
+        self.allow_feed_in: bool = DEFAULT_SCHEDULE_ALLOW_FEED_IN
+        self.allow_discharge_to_grid: bool = DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID
+        self.mode_change_penalty_eur_per_kwh: float = (
+            DEFAULT_SCHEDULE_MODE_CHANGE_PENALTY_EUR_PER_KWH
+        )
+        self.profitability_tilt_alpha: float = DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA
+        self.terminal_value_discount: float = DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
 
@@ -1427,6 +1469,23 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             primary[SchedulePolicy] = SchedulePolicy(
                 use_standby=self.use_standby,
                 allow_grid_charging=self.allow_grid_charging,
+                allow_feed_in=self.allow_feed_in,
+                allow_discharge_to_grid=self.allow_discharge_to_grid,
+                mode_change_penalty_eur_per_kwh=_clamp(
+                    self.mode_change_penalty_eur_per_kwh,
+                    SCHEDULE_MODE_CHANGE_PENALTY_MIN,
+                    SCHEDULE_MODE_CHANGE_PENALTY_MAX,
+                ),
+                profitability_tilt_alpha=_clamp(
+                    self.profitability_tilt_alpha,
+                    SCHEDULE_PROFITABILITY_TILT_ALPHA_MIN,
+                    SCHEDULE_PROFITABILITY_TILT_ALPHA_MAX,
+                ),
+                terminal_value_discount=_clamp(
+                    self.terminal_value_discount,
+                    SCHEDULE_TERMINAL_VALUE_DISCOUNT_MIN,
+                    SCHEDULE_TERMINAL_VALUE_DISCOUNT_MAX,
+                ),
             )
 
             secondary, events = await self._engine.run(primary, self._sun_sale_config, now)

@@ -100,6 +100,10 @@ def optimize_schedule(
     mode_change_penalty: float = DEFAULT_MODE_CHANGE_PENALTY_EUR_PER_KWH,
     use_standby: bool = True,
     allow_grid_charging: bool = True,
+    allow_feed_in: bool = True,
+    allow_discharge_to_grid: bool = True,
+    profitability_tilt_alpha: float = DEFAULT_PROFITABILITY_TILT_ALPHA,
+    terminal_value_discount: float = DEFAULT_TERMINAL_VALUE_DISCOUNT,
 ) -> Schedule:
     """Compute a future StorageMode schedule via SoC-bucketed dynamic programming.
 
@@ -131,6 +135,17 @@ def optimize_schedule(
             available to cover load instead of sitting idle).
         allow_grid_charging: When False, GridCharge is removed from the DP action
             set so the planner never force-charges the battery from grid.
+        allow_feed_in: When False, FeedIn is removed; export to the grid still
+            happens through SelfUse when over-cap solar exists, but the
+            explicit feed-in-priority mode is not selected.
+        allow_discharge_to_grid: When False, the explicit Discharge mode is
+            removed; the battery may still discharge to cover local load via
+            SelfUse / NoExport.
+        profitability_tilt_alpha: Strength of the profitability-score bias on
+            end-of-horizon SoC valuation. 0 disables the bias.
+        terminal_value_discount: Multiplier applied to the in-horizon median
+            sell price when valuing end-of-horizon SoC. 0 disables terminal
+            valuation entirely (matches phase-2/3 behaviour).
 
     Returns:
         Schedule with one ScheduleSlot per future price slot.
@@ -160,7 +175,13 @@ def optimize_schedule(
 
     bucketer = _Bucketer(battery_config.min_soc, battery_config.max_soc, _SOC_BUCKETS)
 
-    actions = _filter_actions(_ACTIONS, use_standby, allow_grid_charging)
+    actions = _filter_actions(
+        _ACTIONS,
+        use_standby=use_standby,
+        allow_grid_charging=allow_grid_charging,
+        allow_feed_in=allow_feed_in,
+        allow_discharge_to_grid=allow_discharge_to_grid,
+    )
 
     # Degenerate envelope (min_soc == max_soc) — no usable battery; emit StandBy.
     if not bucketer.has_envelope:
@@ -171,8 +192,8 @@ def optimize_schedule(
 
     terminal_per_kwh = _terminal_value_per_storage_kwh(
         price_series, battery_config.round_trip_efficiency,
-        profitability_score, DEFAULT_PROFITABILITY_TILT_ALPHA,
-        DEFAULT_TERMINAL_VALUE_DISCOUNT,
+        profitability_score, profitability_tilt_alpha,
+        terminal_value_discount,
     )
 
     choice = _run_dp(
@@ -191,27 +212,39 @@ def optimize_schedule(
 
 def _filter_actions(
     actions: tuple[StorageMode, ...],
+    *,
     use_standby: bool,
     allow_grid_charging: bool,
+    allow_feed_in: bool,
+    allow_discharge_to_grid: bool,
 ) -> tuple[StorageMode, ...]:
-    """Drop StandBy and/or GridCharge from the action set per the user-toggled policy.
+    """Drop disabled modes from the action set per the user-toggled policy.
 
     Args:
         actions: Full DP action tuple.
         use_standby: Keep StandBy when True.
         allow_grid_charging: Keep GridCharge when True.
+        allow_feed_in: Keep FeedIn when True.
+        allow_discharge_to_grid: Keep Discharge when True.
 
     Returns:
-        Filtered action tuple, preserving original order.
+        Filtered action tuple, preserving original order. SelfUse is always
+        retained as a safe fallback — if the caller managed to disable every
+        policy flag we still need at least one mode for the DP.
     """
     excluded: set[StorageMode] = set()
     if not use_standby:
         excluded.add(StorageMode.StandBy)
     if not allow_grid_charging:
         excluded.add(StorageMode.GridCharge)
+    if not allow_feed_in:
+        excluded.add(StorageMode.FeedIn)
+    if not allow_discharge_to_grid:
+        excluded.add(StorageMode.Discharge)
     if not excluded:
         return actions
-    return tuple(a for a in actions if a not in excluded)
+    filtered = tuple(a for a in actions if a not in excluded)
+    return filtered if filtered else (StorageMode.SelfUse,)
 
 
 # ---------------------------------------------------------------------------

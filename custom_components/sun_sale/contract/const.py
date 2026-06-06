@@ -216,3 +216,23 @@ MODE_HISTORY_RETENTION_DAYS = 2
 # available" behaviour so existing installs see no change after upgrade.
 DEFAULT_SCHEDULE_USE_STANDBY = True
 DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING = True
+DEFAULT_SCHEDULE_ALLOW_FEED_IN = True
+DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID = True
+
+# Numeric schedule-policy knobs. Values mirror the in-module DEFAULT_* used by
+# pipeline/schedule.py so that the user-facing entities start at the same
+# operating point the planner used before they were exposed.
+DEFAULT_SCHEDULE_MODE_CHANGE_PENALTY_EUR_PER_KWH = 0.005
+DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA = 0.5
+DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT = 0.5
+
+# Bounds enforced by the Number entities and clamped by the coordinator before
+# the policy reaches the DP. Mode-change penalty is bounded above by 0.10
+# EUR/kWh — much higher and the DP would never change modes; profitability
+# tilt and terminal discount are dimensionless and live in [0, 1].
+SCHEDULE_MODE_CHANGE_PENALTY_MIN = 0.0
+SCHEDULE_MODE_CHANGE_PENALTY_MAX = 0.10
+SCHEDULE_PROFITABILITY_TILT_ALPHA_MIN = 0.0
+SCHEDULE_PROFITABILITY_TILT_ALPHA_MAX = 1.0
+SCHEDULE_TERMINAL_VALUE_DISCOUNT_MIN = 0.0
+SCHEDULE_TERMINAL_VALUE_DISCOUNT_MAX = 1.0

@@ -53,6 +53,7 @@ _HA_MODULES = [
     "homeassistant.components.panel_custom",
     "homeassistant.components.sensor",
     "homeassistant.components.switch",
+    "homeassistant.components.number",
     "homeassistant.const",
     "homeassistant.data_entry_flow",
     "homeassistant.util",
@@ -107,6 +108,11 @@ class _SwitchEntityStub:
         super().__init__(*args, **kwargs)
 
 
+class _NumberEntityStub:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+
 class _ConfigFlowStub:
     def __init_subclass__(cls, domain=None, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -152,6 +158,19 @@ _sensor_mod.SensorStateClass = MagicMock()
 _switch_mod = sys.modules["homeassistant.components.switch"]
 _switch_mod.SwitchEntity = _SwitchEntityStub
 
+# Give number module shapes
+_number_mod = sys.modules["homeassistant.components.number"]
+_number_mod.NumberEntity = _NumberEntityStub
+
+
+class _NumberModeStub:
+    BOX = "box"
+    SLIDER = "slider"
+    AUTO = "auto"
+
+
+_number_mod.NumberMode = _NumberModeStub
+
 # RestoreEntity stub for switch.py
 class _RestoreEntityStub:
     def __init__(self, *args, **kwargs):
@@ -188,6 +207,10 @@ _core_mod.callback = lambda fn: fn
 _const_mod = sys.modules["homeassistant.const"]
 _const_mod.UnitOfEnergy = MagicMock()
 _const_mod.UnitOfEnergy.KILO_WATT_HOUR = "kWh"
+_const_mod.STATE_ON = "on"
+_const_mod.STATE_OFF = "off"
+_const_mod.STATE_UNKNOWN = "unknown"
+_const_mod.STATE_UNAVAILABLE = "unavailable"
 
 from custom_components.sun_sale.contract.models import (
     BatteryConfig,

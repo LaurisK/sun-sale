@@ -107,17 +107,37 @@ class Schedule:
 
 @dataclass(frozen=True)
 class SchedulePolicy:
-    """User-toggleable flags constraining the DP scheduler's action set.
+    """User-tunable flags + numeric knobs constraining the DP scheduler.
 
-    ``use_standby`` controls whether StandBy (battery idle) may be picked; when
-    disabled, the planner falls back to SelfUse during no-generation windows so
-    the battery is always available to cover load instead of sitting idle.
-    ``allow_grid_charging`` controls whether GridCharge (force grid-charge) is
-    available; disabling it prohibits buying energy from the grid into the
-    battery even when prices are low.
+    Action-set toggles:
+        ``use_standby`` — when False, StandBy is removed from the DP action set
+            so the planner falls back to SelfUse during no-generation windows
+            and the battery stays available to cover load.
+        ``allow_grid_charging`` — when False, GridCharge is removed; the planner
+            never force-charges the battery from the grid no matter how cheap
+            import becomes.
+        ``allow_feed_in`` — when False, FeedIn-priority is removed; export still
+            happens through SelfUse when there is over-cap solar surplus.
+        ``allow_discharge_to_grid`` — when False, the explicit Discharge-to-grid
+            mode is removed; battery can still discharge to cover local load.
+
+    Numeric knobs:
+        ``mode_change_penalty_eur_per_kwh`` — EUR per storage-side kWh moved by
+            the battery whenever the chosen mode differs from the previous
+            slot's. Discourages flapping.
+        ``profitability_tilt_alpha`` — strength of the profitability-score bias
+            on end-SoC valuation; 0 disables the bias.
+        ``terminal_value_discount`` — multiplier applied to the in-horizon
+            median sell price when valuing end-of-horizon SoC; 0 disables
+            terminal valuation entirely.
     """
     use_standby: bool = True
     allow_grid_charging: bool = True
+    allow_feed_in: bool = True
+    allow_discharge_to_grid: bool = True
+    mode_change_penalty_eur_per_kwh: float = 0.005
+    profitability_tilt_alpha: float = 0.5
+    terminal_value_discount: float = 0.5
 
 
 class ChargeMode(Enum):
