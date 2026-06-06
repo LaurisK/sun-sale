@@ -7,8 +7,8 @@ from .. import base_load as base_load_module
 from .. import battery as battery_module
 from .. import profitability as profitability_module
 from ...inbound import forecast as forecast_module
-from ...inbound import generation as generation_module
-from ...inbound import grid as grid_module
+from ...inbound.observer import generation as generation_module
+from ...inbound.observer import grid as grid_module
 from ..dag_engine import DagNode, NodeContext
 from ...contract.events import ControlEvent
 from ...contract.models import (

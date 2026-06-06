@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from datetime import tzinfo as TzInfo
 from typing import Any
 
-from ..contract.models import (
+from ...contract.models import (
     BakedObservedHistory,
     GenerationReading,
     ObservedGenerationSeries,
@@ -28,8 +28,8 @@ from ..contract.models import (
     PvPowerReading,
     SunSaleConfig,
 )
-from .observed_bake_in import baked_slots_by_date
-from .observed_engine import ObservedSeriesEngine, Side
+from .bake_in import baked_slots_by_date
+from .engine import ObservedSeriesEngine, Side
 
 
 # Side identifier for the generation engine instance. Stable across the

@@ -1,11 +1,11 @@
-"""Tests for inbound/observed_engine.py — pure Python, no HA required."""
+"""Tests for inbound/observer/engine.py — pure Python, no HA required."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from custom_components.sun_sale.contract.models import SlotKwh
-from custom_components.sun_sale.inbound.observed_engine import (
+from custom_components.sun_sale.inbound.observer.engine import (
     BAKE_IN_FACTOR_MAX,
     BAKE_IN_FACTOR_MIN,
     BAKE_STATUS_OK,

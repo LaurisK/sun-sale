@@ -1,4 +1,4 @@
-"""Tests for inbound/grid.py per-direction power observers."""
+"""Tests for inbound/observer/grid.py per-direction power observers."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +8,7 @@ from custom_components.sun_sale.contract.models import (
     GridExportPowerReading,
     GridImportPowerReading,
 )
-from custom_components.sun_sale.inbound.grid import (
+from custom_components.sun_sale.inbound.observer.grid import (
     GridExportPowerObserver,
     GridImportPowerObserver,
 )

@@ -1,4 +1,4 @@
-"""Tests for inbound/observed_bake_in.py — pure Python."""
+"""Tests for inbound/observer/bake_in.py — pure Python."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,11 +16,11 @@ from custom_components.sun_sale.contract.models import (
     CounterSnapshotRecord,
     SlotKwh,
 )
-from custom_components.sun_sale.inbound.observed_bake_in import (
+from custom_components.sun_sale.inbound.observer.bake_in import (
     baked_slots_by_date,
     try_bake_yesterday,
 )
-from custom_components.sun_sale.inbound.observed_engine import (
+from custom_components.sun_sale.inbound.observer.engine import (
     ObservedSeriesEngine,
     Side,
 )

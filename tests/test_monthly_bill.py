@@ -18,7 +18,7 @@ from custom_components.sun_sale.contract.models import (
     PriceSeries,
     PriceSlot,
 )
-from custom_components.sun_sale.inbound.grid import build_observed_grid_series
+from custom_components.sun_sale.inbound.observer.grid import build_observed_grid_series
 from custom_components.sun_sale.pipeline.monthly_bill import (
     build_monthly_bill_result,
     compute_bill_slots,

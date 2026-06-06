@@ -200,7 +200,7 @@ from .persistent_store import PersistentStore
 from ..inbound.battery import BatteryTranslator
 from ..inbound.solis_entity_resolver import resolve_solis_entities
 from ..inbound.forecast import SolarTranslator
-from ..inbound.generation import (
+from ..inbound.observer.generation import (
     GENERATION_SIDE_ID,
     GenerationTranslator,
     PvPowerTranslator,
@@ -208,7 +208,7 @@ from ..inbound.generation import (
 )
 from ..inbound.household_consumption import HouseholdConsumptionTranslator
 from ..inbound.household_load import HouseholdLoadTranslator
-from ..inbound.grid import (
+from ..inbound.observer.grid import (
     GRID_EXPORT_SIDE_ID,
     GRID_IMPORT_SIDE_ID,
     GridExportPowerObserver,
@@ -225,7 +225,7 @@ from ..inbound.inverter_time import (
     empty_history as empty_inverter_time_history,
     update_history as update_inverter_time_history,
 )
-from ..inbound.observed_bake_in import try_bake_yesterday
+from ..inbound.observer.bake_in import try_bake_yesterday
 from ..inbound.pre_rollover_snapshot import maybe_capture_snapshots
 from ..inbound.pricing import NordpoolTranslator
 

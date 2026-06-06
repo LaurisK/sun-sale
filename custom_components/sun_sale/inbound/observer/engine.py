@@ -20,7 +20,7 @@ from datetime import datetime
 from datetime import tzinfo as TzInfo
 from typing import Any, Callable, Sequence
 
-from ..contract.models import SlotKwh
+from ...contract.models import SlotKwh
 
 
 # Bake-in factor guard. A correction factor outside this range indicates a

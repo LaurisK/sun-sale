@@ -1,4 +1,4 @@
-"""Tests for inbound/grid.py — ObservedGridSeries assembly.
+"""Tests for inbound/observer/grid.py — ObservedGridSeries assembly.
 
 After the per-direction split, the legacy ``GridObserver`` is gone; the
 builder consumes two non-negative histories (import / export) directly.
@@ -15,7 +15,7 @@ from custom_components.sun_sale.contract.models import (
     PriceEntry,
     PriceSeries,
 )
-from custom_components.sun_sale.inbound.grid import build_observed_grid_series
+from custom_components.sun_sale.inbound.observer.grid import build_observed_grid_series
 from custom_components.sun_sale.inbound.pricing import build_price_series
 from tests.conftest import BASE_DT, default_tariff_config
 

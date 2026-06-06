@@ -1,4 +1,4 @@
-"""Tests for inbound/generation.py — pure Python, no HA required.
+"""Tests for inbound/observer/generation.py — pure Python, no HA required.
 
 After the bake-in redesign, the per-cycle counter correction and the
 counter-difference fallback have been removed; only the PV-power averaging
@@ -17,7 +17,7 @@ from custom_components.sun_sale.contract.models import (
     PvPowerReading,
     SlotKwh,
 )
-from custom_components.sun_sale.inbound.generation import (
+from custom_components.sun_sale.inbound.observer.generation import (
     GENERATION_SIDE_ID,
     build_observed_generation_series,
 )
