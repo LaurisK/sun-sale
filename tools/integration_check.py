@@ -1233,7 +1233,20 @@ def check_baked_observed(snap: Snapshot) -> BakedObservedCheckResult:
 
 @dataclass
 class ObservedGenerationCheckResult:
-    """Result of the observed-generation deep-check: inverter counter vs declared totals."""
+    """Result of the observed-generation deep-check: PV samples → per-slot averages → totals.
+
+    Cross-checks the full engine pipeline for the single ``generation`` side:
+
+      * each published ``ObservedGenerationSlot.generated_kwh`` is rebuilt by
+        averaging the raw ``pv_power_history`` samples that fall within
+        ``[slot.start, slot.end)`` and multiplying by the slot duration;
+      * the sum of today's slots must equal ``total_today_so_far_kwh``;
+      * the sum of yesterday's slots must equal ``total_yesterday_kwh``;
+      * yesterday's series total is compared against the inverter's
+        authoritative day-total (``counter_total_used`` on the bake-in
+        record), so a single failed check surfaces both engine drift and
+        bake-in skew.
+    """
 
     skipped: bool = False
     skip_reason: str = ""
@@ -1242,17 +1255,48 @@ class ObservedGenerationCheckResult:
     total_today_so_far_kwh: float = 0.0
     computed_yesterday_kwh: float = 0.0
     computed_today_kwh: float = 0.0
+    pv_history_sample_count: int = 0
+    pv_history_first_sample: str = ""
+    pv_history_last_sample: str = ""
+    yesterday_baked_counter_total: float | None = None
+    yesterday_baked_source_kind: str = ""
+    yesterday_total_vs_counter_delta: float | None = None
+    energy_mismatch_count: int = 0
     computed_at: str = ""
     slot_rows: list[dict] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
     overall_ok: bool = True
 
 
+# Tolerance for the yesterday-series vs inverter-counter cross-check. The
+# bake-in step normally clamps |Δ| to zero modulo float rounding, but the
+# series total is rounded to 4 decimals at the debug-view boundary, so a 10 Wh
+# floor avoids spurious failures on small days.
+_GEN_YDAY_COUNTER_TOL = 0.01
+
+
 def check_observed_generation(snap: Snapshot) -> ObservedGenerationCheckResult:
-    """Verify observed generation slot values are non-negative and daily totals match slot sums.
+    """Verify observed generation slots against PV samples, daily totals, and the bake counter.
+
+    For each published slot, the raw ``pv_power_history`` samples falling
+    inside ``[slot.start, slot.end)`` are averaged (in kW) and converted to
+    kWh via the slot duration. Today's slots are always raw averages of the
+    samples, so the reconstruction must match within rounding. Yesterday's
+    slots come from a ``BakedDayRecord`` once the bake-in has run — the raw
+    reconstruction is still surfaced but is not compared to the published
+    value (the bake-in scales it).
+
+    Cross-checks performed:
+      * non-negative ``generated_kwh`` per slot,
+      * per-slot reconstruction (today only),
+      * ``sum(today_slots) == total_today_so_far_kwh``,
+      * ``sum(yesterday_slots) == total_yesterday_kwh``,
+      * ``total_yesterday_kwh ≈ counter_total_used`` from the matching baked
+        record (the inverter's authoritative day-total).
 
     Args:
-        snap: Coordinator snapshot containing pipeline.observed_generation.
+        snap: Coordinator snapshot containing ``pipeline.observed_generation``,
+            ``inputs.pv_power_history``, and ``pipeline.baked_observed_history``.
 
     Returns:
         ObservedGenerationCheckResult with per-slot data and overall pass/fail.
@@ -1270,31 +1314,85 @@ def check_observed_generation(snap: Snapshot) -> ObservedGenerationCheckResult:
     result.total_today_so_far_kwh = og.get("total_today_so_far_kwh", 0.0)
     result.computed_at = og.get("computed_at", "")
 
+    pv_history = snap.inputs.get("pv_power_history") or {}
+    pv_samples: list[tuple[datetime, float]] = []
+    for s in pv_history.get("samples") or []:
+        try:
+            pv_samples.append((
+                datetime.fromisoformat(s.get("timestamp", "")),
+                float(s.get("power_w", 0.0)),
+            ))
+        except (ValueError, TypeError):
+            continue
+    pv_samples.sort(key=lambda x: x[0])
+    result.pv_history_sample_count = len(pv_samples)
+    if pv_samples:
+        result.pv_history_first_sample = pv_samples[0][0].isoformat()
+        result.pv_history_last_sample = pv_samples[-1][0].isoformat()
+
     now = datetime.now(timezone.utc)
     today = now.date()
     yesterday = today - timedelta(days=1)
     comp_yesterday = 0.0
     comp_today = 0.0
+    energy_mismatches = 0
 
     for s in og.get("slots") or []:
         start_str = s.get("start", "")
+        end_str = s.get("end", "")
         kwh = s.get("generated_kwh", 0.0)
-        ok = kwh >= -1e-6
-        if not ok:
-            result.mismatches.append(start_str)
+        sign_ok = kwh >= -1e-6
+        if not sign_ok:
+            result.mismatches.append(f"negative_value:{start_str[:16]}")
             result.overall_ok = False
+
         try:
-            d = datetime.fromisoformat(start_str).astimezone(timezone.utc).date()
-        except (ValueError, AttributeError):
-            d = None
-        if d == yesterday:
+            bs_start = datetime.fromisoformat(start_str)
+            bs_end = datetime.fromisoformat(end_str) if end_str else None
+        except (ValueError, TypeError):
+            bs_start = bs_end = None
+
+        sample_count = 0
+        expected_kwh = 0.0
+        energy_ok = True
+        if bs_start is not None and bs_end is not None:
+            in_slot = [w for (ts, w) in pv_samples if bs_start <= ts < bs_end]
+            sample_count = len(in_slot)
+            if in_slot:
+                duration_h = (bs_end - bs_start).total_seconds() / 3600.0
+                avg_kw = sum(max(0.0, w) for w in in_slot) / len(in_slot) / 1000.0
+                expected_kwh = avg_kw * duration_h
+            # Yesterday's slots are baked (scaled) so the raw reconstruction
+            # is not expected to match the published value. Compare only on
+            # today's slots where the published value is the raw average.
+            d_local = bs_start.date() if bs_start else None
+            if d_local == today and in_slot:
+                if abs(expected_kwh - kwh) > 1e-3:
+                    energy_ok = False
+                    energy_mismatches += 1
+
+        d_utc = bs_start.date() if bs_start else None
+        if d_utc == yesterday:
             comp_yesterday += kwh
-        elif d == today:
+        elif d_utc == today:
             comp_today += kwh
-        result.slot_rows.append({"start": start_str, "generated_kwh": kwh, "ok": ok})
+
+        result.slot_rows.append({
+            "start": start_str,
+            "generated_kwh": kwh,
+            "expected_kwh": expected_kwh,
+            "sample_count": sample_count,
+            "sign_ok": sign_ok,
+            "energy_ok": energy_ok,
+        })
 
     result.computed_yesterday_kwh = round(comp_yesterday, 4)
     result.computed_today_kwh = round(comp_today, 4)
+    result.energy_mismatch_count = energy_mismatches
+    if energy_mismatches:
+        result.mismatches.append(f"{energy_mismatches}_energy_mismatch")
+        result.overall_ok = False
+
     TOL = 0.01
     if abs(comp_yesterday - result.total_yesterday_kwh) > TOL:
         result.mismatches.append("yesterday_total_mismatch")
@@ -1302,6 +1400,22 @@ def check_observed_generation(snap: Snapshot) -> ObservedGenerationCheckResult:
     if abs(comp_today - result.total_today_so_far_kwh) > TOL:
         result.mismatches.append("today_total_mismatch")
         result.overall_ok = False
+
+    baked = snap.pipeline.get("baked_observed_history") or {}
+    yesterday_str = yesterday.isoformat()
+    for r in baked.get("records") or []:
+        if r.get("side_id") == "generation" and r.get("date") == yesterday_str:
+            counter_total = float(r.get("counter_total_used", 0.0))
+            source_kind = r.get("source_kind", "")
+            result.yesterday_baked_counter_total = counter_total
+            result.yesterday_baked_source_kind = source_kind
+            if source_kind != "failed_no_source":
+                delta = abs(counter_total - result.total_yesterday_kwh)
+                result.yesterday_total_vs_counter_delta = round(delta, 4)
+                if delta > _GEN_YDAY_COUNTER_TOL:
+                    result.mismatches.append("yesterday_vs_counter_mismatch")
+                    result.overall_ok = False
+            break
 
     return result
 
@@ -1313,7 +1427,15 @@ def check_observed_generation(snap: Snapshot) -> ObservedGenerationCheckResult:
 
 @dataclass
 class ObservedGridCheckResult:
-    """Result of the observed-grid deep-check: per-slot import/export vs upstream samples."""
+    """Result of the observed-grid deep-check: per-slot import/export vs upstream samples.
+
+    Mirrors the generation deep-check for both grid sides (import + export):
+    each side's published per-slot kWh is rebuilt from its own
+    ``grid_*_power_history`` stream, the per-day totals are cross-checked
+    against the slot sums, and yesterday's series total is cross-checked
+    against the inverter's authoritative day-total stored on the bake-in
+    record (``counter_total_used``) for each side independently.
+    """
 
     skipped: bool = False
     skip_reason: str = ""
@@ -1330,6 +1452,12 @@ class ObservedGridCheckResult:
     grid_history_first_sample: str = ""
     grid_history_last_sample: str = ""
     energy_mismatch_count: int = 0
+    yesterday_import_counter_total: float | None = None
+    yesterday_import_source_kind: str = ""
+    yesterday_import_vs_counter_delta: float | None = None
+    yesterday_export_counter_total: float | None = None
+    yesterday_export_source_kind: str = ""
+    yesterday_export_vs_counter_delta: float | None = None
     computed_at: str = ""
     slot_rows: list[dict] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
@@ -1483,6 +1611,33 @@ def check_observed_grid(snap: Snapshot) -> ObservedGridCheckResult:
     if abs(ct_exp - result.total_today_exported_kwh) > TOL:
         result.mismatches.append("today_exported_total_mismatch")
         result.overall_ok = False
+
+    baked = snap.pipeline.get("baked_observed_history") or {}
+    yesterday_str = yesterday.isoformat()
+    for r in baked.get("records") or []:
+        if r.get("date") != yesterday_str:
+            continue
+        side_id = r.get("side_id", "")
+        counter_total = float(r.get("counter_total_used", 0.0))
+        source_kind = r.get("source_kind", "")
+        if side_id == "grid_import":
+            result.yesterday_import_counter_total = counter_total
+            result.yesterday_import_source_kind = source_kind
+            if source_kind != "failed_no_source":
+                delta = abs(counter_total - result.total_yesterday_imported_kwh)
+                result.yesterday_import_vs_counter_delta = round(delta, 4)
+                if delta > TOL:
+                    result.mismatches.append("yesterday_import_vs_counter_mismatch")
+                    result.overall_ok = False
+        elif side_id == "grid_export":
+            result.yesterday_export_counter_total = counter_total
+            result.yesterday_export_source_kind = source_kind
+            if source_kind != "failed_no_source":
+                delta = abs(counter_total - result.total_yesterday_exported_kwh)
+                result.yesterday_export_vs_counter_delta = round(delta, 4)
+                if delta > TOL:
+                    result.mismatches.append("yesterday_export_vs_counter_mismatch")
+                    result.overall_ok = False
 
     return result
 
@@ -2123,18 +2278,25 @@ class ForecastCheckWidget(Static):
 
 
 class ObservedGenerationSlotsTable(Static):
-    """DataTable: Time | Generated (kWh) | ✓/✗, grouped by date."""
+    """DataTable: Time | Gen kWh | Exp kWh | Samp | ✓/✗, grouped by date.
+
+    ``Exp kWh`` is the kWh the harness rebuilds by averaging the raw PV power
+    samples in the slot window — today's slots should match within rounding,
+    yesterday's are baked so a divergence here is expected (the bake factor
+    is what scales the raw values).
+    """
 
     DEFAULT_CSS = """
     ObservedGenerationSlotsTable { height: auto; }
-    ObservedGenerationSlotsTable DataTable { height: 18; }
+    ObservedGenerationSlotsTable DataTable { height: 22; }
     """
 
     def __init__(self, og: ObservedGenerationCheckResult) -> None:
         """Initialise with the observed generation check result.
 
         Args:
-            og: Result of check_observed_generation() containing per-slot generated kWh.
+            og: Result of check_observed_generation() containing per-slot generated kWh
+                and per-slot reconstruction from raw PV power samples.
         """
         super().__init__()
         self._og = og
@@ -2146,7 +2308,7 @@ class ObservedGenerationSlotsTable(Static):
     def on_mount(self) -> None:
         """Populate the DataTable with one row per slot, date-separated."""
         table = self.query_one(DataTable)
-        table.add_columns("Time", "Generated (kWh)", "")
+        table.add_columns("Time", "Gen kWh", "Exp kWh", "Samp", "")
         dim = "dim"
         prev_date = None
 
@@ -2161,16 +2323,23 @@ class ObservedGenerationSlotsTable(Static):
 
             if cur_date is not None and cur_date != prev_date:
                 if prev_date is not None:
-                    table.add_row(*[Text("─", style=dim)] * 3)
-                table.add_row(Text(str(cur_date), style="bold"), "", "")
+                    table.add_row(*[Text("─", style=dim)] * 5)
+                table.add_row(Text(str(cur_date), style="bold"), *[""] * 4)
                 prev_date = cur_date
 
             kwh = row["generated_kwh"]
-            ok = row["ok"]
+            expected = row["expected_kwh"]
+            samples = row["sample_count"]
+            ok = row["sign_ok"] and row["energy_ok"]
+
+            base_style = dim if kwh == 0 else ""
+            samples_style = "red" if samples == 0 else dim
             table.add_row(
                 Text(time_str, style="cyan"),
-                Text(f"{kwh:.4f}", style=dim if kwh == 0 else ""),
-                Text("✗" if not ok else "", style="red"),
+                Text(f"{kwh:.4f}", style=base_style),
+                Text(f"{expected:.4f}", style=dim),
+                Text(str(samples), style=samples_style),
+                Text("✓" if ok else "✗", style="green" if ok else "red"),
             )
 
 
@@ -2216,6 +2385,36 @@ class ObservedGenerationCheckWidget(Static):
                 f"  today:     computed [{today_style}]{og.computed_today_kwh:.4f}[/{today_style}]kWh"
                 f"  declared {og.total_today_so_far_kwh:.4f}kWh",
                 markup=True,
+            )
+
+            counter = og.yesterday_baked_counter_total
+            if counter is not None:
+                vs_ok = "yesterday_vs_counter_mismatch" not in og.mismatches
+                vs_style = "green" if vs_ok else "red"
+                delta = og.yesterday_total_vs_counter_delta
+                delta_str = f"{delta:.4f}" if delta is not None else "—"
+                yield Static(
+                    f"  yday vs inverter: series [{vs_style}]{og.total_yesterday_kwh:.4f}[/{vs_style}]kWh"
+                    f"  counter {counter:.4f}kWh"
+                    f"  |Δ|={delta_str}kWh  ({og.yesterday_baked_source_kind or 'no_record'})",
+                    markup=True,
+                )
+            else:
+                yield Static(
+                    "  yday vs inverter: [dim]no bake record for yesterday yet[/dim]",
+                    markup=True,
+                )
+
+            yield Static(
+                f"  pv_power_history: {og.pv_history_sample_count} sample(s)"
+                + (
+                    f"  first={og.pv_history_first_sample}  last={og.pv_history_last_sample}"
+                    if og.pv_history_sample_count else ""
+                )
+                + (
+                    f"  energy_mismatches={og.energy_mismatch_count}"
+                    if og.energy_mismatch_count else ""
+                )
             )
             with Collapsible(title="Slots", collapsed=False):
                 yield ObservedGenerationSlotsTable(og)
@@ -2340,6 +2539,48 @@ class ObservedGridCheckWidget(Static):
                 f"  declared {og.total_today_exported_kwh:.4f}kWh",
                 markup=True,
             )
+
+            def _vs_counter_line(
+                label: str,
+                series_total: float,
+                counter: float | None,
+                source_kind: str,
+                delta: float | None,
+                mismatch_key: str,
+            ) -> str:
+                """Format one side's yday-series vs inverter-counter comparison line."""
+                if counter is None:
+                    return (
+                        f"  yday {label} vs inverter: "
+                        "[dim]no bake record for yesterday yet[/dim]"
+                    )
+                ok = mismatch_key not in og.mismatches
+                style = "green" if ok else "red"
+                delta_str = f"{delta:.4f}" if delta is not None else "—"
+                return (
+                    f"  yday {label} vs inverter: "
+                    f"series [{style}]{series_total:.4f}[/{style}]kWh  "
+                    f"counter {counter:.4f}kWh  |Δ|={delta_str}kWh  "
+                    f"({source_kind or 'no_record'})"
+                )
+
+            yield Static(
+                _vs_counter_line(
+                    "imp", og.total_yesterday_imported_kwh,
+                    og.yesterday_import_counter_total,
+                    og.yesterday_import_source_kind,
+                    og.yesterday_import_vs_counter_delta,
+                    "yesterday_import_vs_counter_mismatch",
+                ) + "\n" + _vs_counter_line(
+                    "exp", og.total_yesterday_exported_kwh,
+                    og.yesterday_export_counter_total,
+                    og.yesterday_export_source_kind,
+                    og.yesterday_export_vs_counter_delta,
+                    "yesterday_export_vs_counter_mismatch",
+                ),
+                markup=True,
+            )
+
             yield Static(
                 f"  grid_*_power_history: {og.grid_history_sample_count} sample(s)"
                 + (

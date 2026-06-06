@@ -58,6 +58,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     monthly_bill = data.get("monthly_bill")
     grid_import_power_history = data.get("grid_import_power_history")
     grid_export_power_history = data.get("grid_export_power_history")
+    pv_power_history = data.get("pv_power_history")
     observed_grid = data.get("observed_grid")
 
     cfg = coordinator._config  # noqa: SLF001
@@ -103,6 +104,13 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for s in grid_export_power_history.samples
                 ],
             } if grid_export_power_history is not None else None,
+            "pv_power_history": {
+                "sample_count": len(pv_power_history.samples),
+                "samples": [
+                    {"timestamp": s.timestamp.isoformat(), "power_w": round(s.power_w, 2)}
+                    for s in pv_power_history.samples
+                ],
+            } if pv_power_history is not None else None,
             "tariff_config": (
                 dataclasses.asdict(coordinator.tariff_config)
                 if coordinator.tariff_config is not None else None

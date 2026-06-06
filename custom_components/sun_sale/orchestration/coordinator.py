@@ -1524,6 +1524,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "monthly_bill": secondary.get(MonthlyBillResult),
             "grid_import_power_history": primary.get(GridImportPowerHistory),
             "grid_export_power_history": primary.get(GridExportPowerHistory),
+            "pv_power_history": primary.get(PvPowerHistory),
             "inverter_mode_history": primary.get(InverterModeHistory),
             "inverter_mode_reading": primary.get(InverterModeReading),
             "baked_observed_history": primary.get(BakedObservedHistory),
