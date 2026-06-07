@@ -1132,9 +1132,16 @@ class InverterModeReading:
 
     All hardware-derived fields are nullable so the translator stays resilient
     to entity-unavailability. ``mode`` is decoded from ``reg_43110_value`` plus
-    ancillary currents via ``pipeline/storage_mode_specs.decode_mode``; it
-    falls back to ``StorageMode.UNKNOWN`` when the register cannot be read or
-    the bitmask is unfamiliar.
+    ancillary currents and ``backflow_power_w`` via
+    ``pipeline/storage_mode_specs.decode_mode``; it falls back to
+    ``StorageMode.UNKNOWN`` when the register cannot be read or the bitmask
+    is unfamiliar.
+
+    ``backflow_power_w`` is the configured export-power cap. It is the
+    discriminator between SelfUse (cap > 0) and NoExport (cap = 0) under the
+    shared SelfUse bitmask (reg 43110 = 1) — Solis Cloud EMS suppresses export
+    by toggling this single value, and sunSale's ``apply_mode`` writes it the
+    same way, so it is the authoritative observable signal.
     """
     timestamp: datetime
     reg_43110_value: int | None
@@ -1142,6 +1149,7 @@ class InverterModeReading:
     charge_a: float | None
     discharge_a: float | None
     rc_setpoint_w: int | None
+    backflow_power_w: int | None = None
 
 
 @dataclass(frozen=True)

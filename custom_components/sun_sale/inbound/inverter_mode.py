@@ -56,7 +56,8 @@ class InverterModeTranslator:
         charge_a = self._inverter.get_charge_current_a()
         discharge_a = self._inverter.get_discharge_current_a()
         rc_w = self._inverter.get_rc_setpoint_w()
-        mode = decode_mode(reg, charge_a, discharge_a, rc_w)
+        backflow_w = self._inverter.get_backflow_power_w()
+        mode = decode_mode(reg, charge_a, discharge_a, rc_w, backflow_w)
         return InverterModeReading(
             timestamp=now,
             reg_43110_value=reg,
@@ -64,6 +65,7 @@ class InverterModeTranslator:
             charge_a=charge_a,
             discharge_a=discharge_a,
             rc_setpoint_w=rc_w,
+            backflow_power_w=backflow_w,
         )
 
     async def translate(

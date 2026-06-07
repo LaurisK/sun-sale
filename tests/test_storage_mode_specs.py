@@ -123,7 +123,25 @@ def test_decode_self_use_idle_is_standby():
 
 
 def test_decode_self_use_with_charge_current_is_self_use():
+    # Backflow unknown → backwards-compat: assume SelfUse.
     assert decode_mode(1, 50.0, 0.0, 0) == StorageMode.SelfUse
+
+
+def test_decode_self_use_with_export_allowed_is_self_use():
+    # Backflow > 0 → export permitted → SelfUse.
+    assert decode_mode(1, 50.0, 0.0, 0, backflow_power_w=10_000) == StorageMode.SelfUse
+
+
+def test_decode_self_use_with_zero_backflow_is_no_export():
+    # Solis EMS zeroes backflow_power to suppress export while leaving reg=1.
+    # The decoder must read NoExport so sunSale matches that behaviour.
+    assert decode_mode(1, 50.0, 0.0, 0, backflow_power_w=0) == StorageMode.NoExport
+
+
+def test_decode_standby_ignores_backflow():
+    # Both currents zero → StandBy regardless of backflow value.
+    assert decode_mode(1, 0.0, 0.0, 0, backflow_power_w=0) == StorageMode.StandBy
+    assert decode_mode(1, 0.0, 0.0, 0, backflow_power_w=10_000) == StorageMode.StandBy
 
 
 def test_decode_grid_charge_bitmask_is_grid_charge():
@@ -144,15 +162,15 @@ def test_decode_handles_none_currents_as_zero():
 
 
 def test_decode_round_trip_applied_modes_match_build_specs():
-    """For every applied mode whose decode is unambiguous, applying its spec to
-    the inverter and reading the register back should reproduce the same mode."""
+    """For every applied mode, applying its spec to the inverter and reading
+    the register + ancillary fields back should reproduce the same mode."""
     specs = _specs()
     # AUTO and TRACK collapse to StandBy/SelfUse in the decoder by design — they
     # are not part of the round-trip set (see decode_mode docstring).
     unambiguous = {
         StorageMode.FeedIn,
         StorageMode.SelfUse,
-        StorageMode.NoExport,    # will round-trip to SelfUse; tested separately
+        StorageMode.NoExport,
         StorageMode.Discharge,
         StorageMode.GridCharge,
         StorageMode.StandBy,
@@ -164,12 +182,8 @@ def test_decode_round_trip_applied_modes_match_build_specs():
             spec.charge_a,
             spec.discharge_a,
             spec.rc_setpoint_w,
+            spec.export_limit_w,
         )
-        # NoExport is observationally indistinguishable from SelfUse (both SelfUse
-        # bitmask with charge current); the decoder collapses them to SelfUse.
-        if mode == StorageMode.NoExport:
-            assert decoded == StorageMode.SelfUse
-        else:
-            assert decoded == mode, f"{mode} round-trip failed → {decoded}"
+        assert decoded == mode, f"{mode} round-trip failed → {decoded}"
 
 

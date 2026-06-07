@@ -19,6 +19,7 @@ def _make_inverter(
     charge_a: float | None,
     discharge_a: float | None,
     rc_w: int | None,
+    backflow_w: int | None = None,
 ) -> MagicMock:
     """Build a stub InverterController exposing only the read-side helpers."""
     inv = MagicMock()
@@ -26,6 +27,7 @@ def _make_inverter(
     inv.get_charge_current_a.return_value = charge_a
     inv.get_discharge_current_a.return_value = discharge_a
     inv.get_rc_setpoint_w.return_value = rc_w
+    inv.get_backflow_power_w.return_value = backflow_w
     return inv
 
 
@@ -39,6 +41,7 @@ def test_parse_decodes_grid_charge_when_register_is_33():
         charge_a=50.0,
         discharge_a=0.0,
         rc_setpoint_w=-3000,
+        backflow_power_w=None,
     )
 
 
@@ -58,6 +61,36 @@ def test_parse_decodes_standby_when_self_use_with_zero_currents():
     inv = _make_inverter(reg=1, charge_a=0.0, discharge_a=0.0, rc_w=0)
     reading = InverterModeTranslator(inv).parse(None, NOW)
     assert reading.mode == StorageMode.StandBy
+
+
+def test_parse_decodes_self_use_when_backflow_allows_export():
+    inv = _make_inverter(
+        reg=1, charge_a=290.0, discharge_a=290.0, rc_w=0, backflow_w=10_000,
+    )
+    reading = InverterModeTranslator(inv).parse(None, NOW)
+    assert reading.mode == StorageMode.SelfUse
+    assert reading.backflow_power_w == 10_000
+
+
+def test_parse_decodes_no_export_when_backflow_zero():
+    # Mirrors the live Solis-EMS pattern observed on 2026-06-07: reg=1,
+    # currents untouched at 290 A, backflow_power flipped to 0 W.
+    inv = _make_inverter(
+        reg=1, charge_a=290.0, discharge_a=290.0, rc_w=0, backflow_w=0,
+    )
+    reading = InverterModeTranslator(inv).parse(None, NOW)
+    assert reading.mode == StorageMode.NoExport
+    assert reading.backflow_power_w == 0
+
+
+def test_parse_falls_back_to_self_use_when_backflow_unknown():
+    # Legacy / unavailable readback path: backflow=None → SelfUse (the
+    # pre-discriminator behaviour) rather than misreporting NoExport.
+    inv = _make_inverter(
+        reg=1, charge_a=290.0, discharge_a=0.0, rc_w=0, backflow_w=None,
+    )
+    reading = InverterModeTranslator(inv).parse(None, NOW)
+    assert reading.mode == StorageMode.SelfUse
 
 
 def test_parse_returns_unknown_when_register_unavailable():

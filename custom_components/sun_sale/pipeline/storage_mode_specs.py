@@ -134,18 +134,30 @@ def decode_mode(
     charge_a: float | None,
     discharge_a: float | None,
     rc_setpoint_w: int | None,
+    backflow_power_w: int | None = None,
 ) -> StorageMode:
     """Best-effort decode of an observed inverter state to a StorageMode.
 
     The register-bitmask alone is ambiguous in two cases:
       * 43110=1 (SelfUse) covers AUTO, StandBy, SelfUse, and NoExport.
       * 43110=64 (FeedIn) covers FeedIn and Discharge.
-    Ancillary signals (discharge current, charge current) disambiguate where
-    possible. NoExport vs SelfUse and AUTO vs the hardware-default cases
-    collapse to SelfUse / StandBy respectively because the differentiating
-    fields (export-limit, allow-export-switch) are not consulted here. The
-    control module's *target* mode is the authoritative answer; this decoder
-    produces the *observed* label that drives the chart history.
+    Ancillary signals disambiguate:
+      * Battery currents (``charge_a`` / ``discharge_a``) separate StandBy
+        from SelfUse and FeedIn from Discharge.
+      * ``backflow_power_w`` separates SelfUse (cap > 0) from NoExport
+        (cap = 0) — Solis Cloud EMS suppresses export by writing this number
+        entity to 0 while leaving register 43110 at 1, and sunSale's
+        ``apply_mode`` writes it the same way (see ``build_specs``: NoExport
+        spec has ``export_limit_w=0``, SelfUse spec has ``export_limit_w =
+        export_max_w``). When ``backflow_power_w`` is ``None`` (e.g. the
+        readback sensor is unavailable, or a legacy caller that hasn't yet
+        plumbed the value through) the decoder falls back to SelfUse — the
+        historical pre-discriminator behaviour.
+
+    AUTO vs the hardware-default cases collapse to StandBy / SelfUse because
+    those distinctions are not register-observable. The control module's
+    *target* mode is the authoritative answer; this decoder produces the
+    *observed* label that drives the chart history.
 
     Args:
         reg_43110_value: Raw readback of the Storage Control word.
@@ -153,6 +165,9 @@ def decode_mode(
         discharge_a: Configured discharge current; treated as ``0`` when ``None``.
         rc_setpoint_w: Signed RC active-power setpoint (currently unused but
             reserved for TRACK detection).
+        backflow_power_w: Configured export-power cap in watts. ``0`` means
+            export is suppressed (NoExport); ``None`` means "unknown — assume
+            SelfUse" for backward compatibility.
 
     Returns:
         Best-fit StorageMode; ``UNKNOWN`` when ``reg_43110_value`` is ``None``
@@ -173,6 +188,8 @@ def decode_mode(
     if reg_43110_value == 1:
         if c < _CURRENT_EPSILON_A and d < _CURRENT_EPSILON_A:
             return StorageMode.StandBy
+        if backflow_power_w is not None and backflow_power_w <= 0:
+            return StorageMode.NoExport
         return StorageMode.SelfUse
     return StorageMode.UNKNOWN
 
