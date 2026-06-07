@@ -95,6 +95,8 @@
         this._renderBatteryRow(dashAttrs);
         this._renderProfileRow(dashAttrs);
         this._renderGenerationRow(dashAttrs);
+        const panel = this.shadowRoot?.querySelector('#schedule-panel');
+        if (panel?.classList.contains('open')) this._syncScheduleDrawer();
       }
     }
 
@@ -256,10 +258,133 @@
           .bill-summary .bill-value { font-weight: 600; }
           .bill-summary .bill-value.revenue { color: #66bb6a; }
           .bill-summary .bill-sep { color: var(--secondary-text-color, #444); }
+          .header-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+          }
+          #schedule-toggle {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--primary-text-color, #fff);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            font-family: inherit;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+          }
+          #schedule-toggle:hover { background: rgba(255, 255, 255, 0.10); }
+          #schedule-toggle.open { background: rgba(66, 165, 245, 0.18); border-color: rgba(66, 165, 245, 0.50); }
+          #schedule-panel {
+            display: none;
+            margin: 0 0 16px;
+            padding: 14px 16px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+          }
+          #schedule-panel.open { display: block; }
+          .sched-section-title {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--secondary-text-color, #888);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin: 0 0 8px;
+          }
+          .sched-section + .sched-section { margin-top: 14px; }
+          .sched-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 8px 16px;
+          }
+          .sched-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 6px 0;
+            font-size: 0.85rem;
+            color: var(--primary-text-color, #fff);
+          }
+          .sched-row .sched-label {
+            color: var(--secondary-text-color, #bbb);
+            flex: 1 1 auto;
+            min-width: 0;
+          }
+          .sched-row .sched-missing {
+            color: #ef5350;
+            font-size: 0.75rem;
+          }
+          .sched-toggle {
+            position: relative;
+            display: inline-block;
+            width: 36px;
+            height: 20px;
+            flex: 0 0 auto;
+          }
+          .sched-toggle input { opacity: 0; width: 0; height: 0; }
+          .sched-toggle .slider {
+            position: absolute;
+            cursor: pointer;
+            inset: 0;
+            background-color: #555;
+            border-radius: 20px;
+            transition: background-color 0.15s;
+          }
+          .sched-toggle .slider:before {
+            position: absolute;
+            content: "";
+            height: 14px;
+            width: 14px;
+            left: 3px;
+            top: 3px;
+            background-color: #fff;
+            border-radius: 50%;
+            transition: transform 0.15s;
+          }
+          .sched-toggle input:checked + .slider { background-color: #42a5f5; }
+          .sched-toggle input:checked + .slider:before { transform: translateX(16px); }
+          .sched-toggle input:disabled + .slider { opacity: 0.4; cursor: not-allowed; }
+          .sched-num {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 0 0 auto;
+          }
+          .sched-num input {
+            width: 78px;
+            padding: 4px 6px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 4px;
+            color: var(--primary-text-color, #fff);
+            font-family: inherit;
+            font-size: 0.85rem;
+            text-align: right;
+          }
+          .sched-num input:focus { outline: 1px solid #42a5f5; outline-offset: -1px; }
+          .sched-num input:disabled { opacity: 0.4; cursor: not-allowed; }
+          .sched-num .sched-unit {
+            color: var(--secondary-text-color, #888);
+            font-size: 0.75rem;
+          }
         </style>
         <div id="card">
-          <h2>☀ Sun Sale</h2>
-          <div id="subtitle">Buy &amp; Sell prices · Solar — 72 h window</div>
+          <div class="header-row">
+            <div>
+              <h2>☀ Sun Sale</h2>
+              <div id="subtitle">Buy &amp; Sell prices · Solar — 72 h window</div>
+            </div>
+            <button id="schedule-toggle" type="button" title="Edit schedule parameters">
+              <span>⚙</span><span>Schedule</span>
+            </button>
+          </div>
+          <div id="schedule-panel"></div>
           <div id="battery"></div>
           <div id="profile"></div>
           <div id="generation"></div>
@@ -269,6 +394,14 @@
           <div id="accuracy"></div>
         </div>
       `;
+
+      const toggleBtn = this.shadowRoot.querySelector('#schedule-toggle');
+      const panel     = this.shadowRoot.querySelector('#schedule-panel');
+      toggleBtn.addEventListener('click', () => {
+        const open = panel.classList.toggle('open');
+        toggleBtn.classList.toggle('open', open);
+        if (open) this._renderScheduleDrawer();
+      });
     }
 
     _renderBatteryRow(dashAttrs) {
@@ -375,6 +508,169 @@
       });
 
       el.innerHTML = parts.join('');
+    }
+
+    // ── Schedule parameters drawer ────────────────────────────────────────────
+    // Inline editor for sunSale's schedule policy switches + numeric knobs.
+    // Entities are resolved by suffix-match against the `sunsale_` prefix so
+    // the panel works even if HA renames the entity_id slug (e.g. `α` in the
+    // Profitability-Tilt name is unidecoded inconsistently across HA versions).
+
+    _SCHEDULE_SWITCHES = [
+      { key: 'automation',             label: 'Automation enabled',     match: ['automation', 'enabled'] },
+      { key: 'use_standby',            label: 'Use standby (night)',    match: ['use_standby'] },
+      { key: 'allow_grid_charging',    label: 'Allow grid charging',    match: ['allow_grid_charging'] },
+      { key: 'allow_feed_in',          label: 'Allow feed-in',          match: ['allow_feed_in'] },
+      { key: 'allow_discharge_to_grid',label: 'Allow discharge to grid',match: ['allow_discharge_to_grid'] },
+    ];
+
+    _SCHEDULE_NUMBERS = [
+      { key: 'mode_change_penalty',    label: 'Mode-change penalty',    match: ['mode_change_penalty'], unit: 'EUR/kWh' },
+      { key: 'profitability_tilt',     label: 'Profitability tilt α',   match: ['profitability_tilt'],  unit: '' },
+      { key: 'terminal_value_discount',label: 'Terminal-value discount',match: ['terminal_value_discount'], unit: '' },
+    ];
+
+    _findEntityId(domain, matchAll) {
+      if (!this._hass?.states) return null;
+      const prefix = `${domain}.sunsale_`;
+      for (const eid of Object.keys(this._hass.states)) {
+        if (!eid.startsWith(prefix)) continue;
+        if (matchAll.every(m => eid.includes(m))) return eid;
+      }
+      return null;
+    }
+
+    _renderScheduleDrawer() {
+      const panel = this.shadowRoot.querySelector('#schedule-panel');
+      if (!panel) return;
+
+      const switchRow = (spec) => {
+        const eid = this._findEntityId('switch', spec.match);
+        if (!eid) {
+          return `<div class="sched-row" data-spec="${spec.key}">
+            <span class="sched-label">${spec.label}</span>
+            <span class="sched-missing">entity not found</span>
+          </div>`;
+        }
+        const st = this._hass.states[eid];
+        const on = st?.state === 'on';
+        const unavailable = !st || st.state === 'unavailable';
+        return `<div class="sched-row" data-spec="${spec.key}">
+          <span class="sched-label" title="${eid}">${spec.label}</span>
+          <label class="sched-toggle">
+            <input type="checkbox" data-eid="${eid}" data-kind="switch"
+                   ${on ? 'checked' : ''} ${unavailable ? 'disabled' : ''}>
+            <span class="slider"></span>
+          </label>
+        </div>`;
+      };
+
+      const numberRow = (spec) => {
+        const eid = this._findEntityId('number', spec.match);
+        if (!eid) {
+          return `<div class="sched-row" data-spec="${spec.key}">
+            <span class="sched-label">${spec.label}</span>
+            <span class="sched-missing">entity not found</span>
+          </div>`;
+        }
+        const st = this._hass.states[eid];
+        const unavailable = !st || st.state === 'unavailable' || st.state === 'unknown';
+        const value = unavailable ? '' : st.state;
+        const attrs = st?.attributes || {};
+        const min   = attrs.min  != null ? attrs.min  : 0;
+        const max   = attrs.max  != null ? attrs.max  : 1;
+        const step  = attrs.step != null ? attrs.step : 0.01;
+        const unit  = spec.unit || attrs.unit_of_measurement || '';
+        return `<div class="sched-row" data-spec="${spec.key}">
+          <span class="sched-label" title="${eid}">${spec.label}</span>
+          <span class="sched-num">
+            <input type="number" data-eid="${eid}" data-kind="number"
+                   min="${min}" max="${max}" step="${step}"
+                   value="${value}" ${unavailable ? 'disabled' : ''}>
+            ${unit ? `<span class="sched-unit">${unit}</span>` : ''}
+          </span>
+        </div>`;
+      };
+
+      panel.innerHTML = `
+        <div class="sched-section">
+          <div class="sched-section-title">Policy switches</div>
+          <div class="sched-grid">
+            ${this._SCHEDULE_SWITCHES.map(switchRow).join('')}
+          </div>
+        </div>
+        <div class="sched-section">
+          <div class="sched-section-title">Tuning knobs</div>
+          <div class="sched-grid">
+            ${this._SCHEDULE_NUMBERS.map(numberRow).join('')}
+          </div>
+        </div>
+      `;
+
+      panel.querySelectorAll('input[data-kind="switch"]').forEach((el) => {
+        el.addEventListener('change', () => this._onSwitchChange(el));
+      });
+      panel.querySelectorAll('input[data-kind="number"]').forEach((el) => {
+        el.addEventListener('change', () => this._onNumberChange(el));
+      });
+    }
+
+    _syncScheduleDrawer() {
+      // In-place state refresh that preserves input focus and partial typing.
+      // Falls back to a full re-render when the entity wiring changes (entity
+      // appears/disappears) so the "entity not found" rows update too.
+      const panel = this.shadowRoot.querySelector('#schedule-panel');
+      if (!panel) return;
+      const expected =
+        this._SCHEDULE_SWITCHES.length + this._SCHEDULE_NUMBERS.length;
+      const rows = panel.querySelectorAll('.sched-row');
+      if (rows.length !== expected) { this._renderScheduleDrawer(); return; }
+
+      const active = this.shadowRoot.activeElement;
+      panel.querySelectorAll('input[data-kind="switch"]').forEach((el) => {
+        if (el === active) return;
+        const st = this._hass.states[el.dataset.eid];
+        if (!st) return;
+        el.checked  = st.state === 'on';
+        el.disabled = st.state === 'unavailable';
+      });
+      panel.querySelectorAll('input[data-kind="number"]').forEach((el) => {
+        if (el === active) return;
+        const st = this._hass.states[el.dataset.eid];
+        if (!st) return;
+        const unavailable = st.state === 'unavailable' || st.state === 'unknown';
+        el.disabled = unavailable;
+        if (!unavailable) el.value = st.state;
+      });
+    }
+
+    async _onSwitchChange(el) {
+      const eid = el.dataset.eid;
+      const service = el.checked ? 'turn_on' : 'turn_off';
+      try {
+        await this._hass.callService('switch', service, { entity_id: eid });
+      } catch (e) {
+        console.warn('sunSale: switch service call failed', eid, e);
+        // Revert visual state — HA push will re-sync on next update.
+        el.checked = !el.checked;
+      }
+    }
+
+    async _onNumberChange(el) {
+      const eid = el.dataset.eid;
+      const raw = parseFloat(el.value);
+      if (!isFinite(raw)) { el.value = ''; return; }
+      const min = parseFloat(el.min);
+      const max = parseFloat(el.max);
+      let value = raw;
+      if (isFinite(min) && value < min) value = min;
+      if (isFinite(max) && value > max) value = max;
+      el.value = value;
+      try {
+        await this._hass.callService('number', 'set_value', { entity_id: eid, value });
+      } catch (e) {
+        console.warn('sunSale: number service call failed', eid, e);
+      }
     }
 
     _setStatus(msg) {
