@@ -72,6 +72,7 @@ def simulate_slot(
     est_capacity_kwh: float,
     deg_cost_eur_kwh: float,
     export_limit_kw: float | None = None,
+    max_discharge_to_grid_kw: float | None = None,
 ) -> SlotOutcome:
     """Compute the outcome of applying ``mode`` for one slot.
 
@@ -90,6 +91,10 @@ def simulate_slot(
             ``None`` means uncapped. AUTO is always uncapped; NoExport never
             exports; Discharge is uncapped; GridCharge curtails any solar surplus
             because grid-charge takes the charge bus.
+        max_discharge_to_grid_kw: Optional AC-power cap (kW) applied only to the
+            Discharge-to-grid mode; ``None`` means uncapped (hardware limit
+            from ``battery_cfg.max_discharge_power_kw`` applies). Does not
+            affect battery discharge in SelfUse/NoExport (load cover).
 
     Returns:
         SlotOutcome describing every energy flow and the resulting reward.
@@ -138,9 +143,14 @@ def simulate_slot(
             max_charge_kwh, export_cap_kwh=0.0,
         )
     elif mode == StorageMode.Discharge:
+        if max_discharge_to_grid_kw is not None and eff > 0:
+            cap_storage_kwh = max_discharge_to_grid_kw * slot_hours / eff
+            effective_discharge_storage_kwh = min(max_discharge_storage_kwh, cap_storage_kwh)
+        else:
+            effective_discharge_storage_kwh = max_discharge_storage_kwh
         flows = _simulate_discharge(
             solar_kwh, baseload_kwh, drawdown_storage_kwh,
-            max_discharge_storage_kwh, eff,
+            effective_discharge_storage_kwh, eff,
         )
     elif mode == StorageMode.FeedIn:
         flows = _simulate_feed_in(

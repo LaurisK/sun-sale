@@ -430,6 +430,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "terminal_value_discount": round(
                     float(coordinator.terminal_value_discount), 4,
                 ),
+                "max_discharge_to_grid_kw": coordinator.max_discharge_to_grid_kw,
             },
         },
         "outputs": {

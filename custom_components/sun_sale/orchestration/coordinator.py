@@ -94,11 +94,14 @@ from ..contract.const import (
     DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID,
     DEFAULT_SCHEDULE_ALLOW_FEED_IN,
     DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING,
+    DEFAULT_SCHEDULE_MAX_DISCHARGE_TO_GRID_KW,
     DEFAULT_SCHEDULE_MODE_CHANGE_PENALTY_EUR_PER_KWH,
     DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA,
     DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT,
     DEFAULT_SCHEDULE_USE_STANDBY,
     DOMAIN,
+    SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX,
+    SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MIN,
     SCHEDULE_MODE_CHANGE_PENALTY_MAX,
     SCHEDULE_MODE_CHANGE_PENALTY_MIN,
     SCHEDULE_PROFITABILITY_TILT_ALPHA_MAX,
@@ -863,6 +866,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         )
         self.profitability_tilt_alpha: float = DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA
         self.terminal_value_discount: float = DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT
+        self.max_discharge_to_grid_kw: float | None = DEFAULT_SCHEDULE_MAX_DISCHARGE_TO_GRID_KW
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
 
@@ -1485,6 +1489,15 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     self.terminal_value_discount,
                     SCHEDULE_TERMINAL_VALUE_DISCOUNT_MIN,
                     SCHEDULE_TERMINAL_VALUE_DISCOUNT_MAX,
+                ),
+                max_discharge_to_grid_kw=(
+                    _clamp(
+                        self.max_discharge_to_grid_kw,
+                        SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MIN,
+                        SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX,
+                    )
+                    if self.max_discharge_to_grid_kw is not None
+                    else None
                 ),
             )
 

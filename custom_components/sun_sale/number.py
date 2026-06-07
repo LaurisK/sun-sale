@@ -23,6 +23,8 @@ from .contract.const import (
     DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA,
     DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT,
     DOMAIN,
+    SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX,
+    SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MIN,
     SCHEDULE_MODE_CHANGE_PENALTY_MAX,
     SCHEDULE_MODE_CHANGE_PENALTY_MIN,
     SCHEDULE_PROFITABILITY_TILT_ALPHA_MAX,
@@ -50,6 +52,7 @@ async def async_setup_entry(
         ModeChangePenaltyNumber(coordinator, entry),
         ProfitabilityTiltAlphaNumber(coordinator, entry),
         TerminalValueDiscountNumber(coordinator, entry),
+        MaxDischargeToGridKwNumber(coordinator, entry),
     ])
 
 
@@ -158,3 +161,78 @@ class TerminalValueDiscountNumber(_SunSalePolicyNumber):
     _unique_suffix = "terminal_value_discount"
     _coord_attr = "terminal_value_discount"
     _default_value = DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT
+
+
+class MaxDischargeToGridKwNumber(CoordinatorEntity, RestoreEntity, NumberEntity):
+    """AC power cap (kW) for Discharge-to-grid mode.
+
+    Setting this below the hardware max limits how aggressively the DP
+    schedules grid export. ``max_discharge_to_grid_kw`` on the coordinator
+    stores ``None`` for "use hardware max", represented in the UI as the
+    entity's maximum value (``SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX``).
+    """
+
+    _attr_name = "sunSale Max Discharge to Grid"
+    _attr_icon = "mdi:transmission-tower-export"
+    _attr_native_unit_of_measurement = "kW"
+    _attr_native_min_value = SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MIN
+    _attr_native_max_value = SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX
+    _attr_native_step = 0.5
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Pin entity to config entry.
+
+        Args:
+            coordinator: sunSale data coordinator.
+            entry: Config entry this entity belongs to.
+        """
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_max_discharge_to_grid_kw"
+        self._entry = entry
+
+    async def async_added_to_hass(self) -> None:
+        """Restore persisted setpoint on startup.
+
+        Args: none (inherited HA lifecycle hook).
+        """
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None or last.state in (STATE_UNKNOWN, STATE_UNAVAILABLE, None):
+            return
+        try:
+            value = float(last.state)
+        except (TypeError, ValueError):
+            return
+        # Treat max value as "unlimited" sentinel → None
+        if value >= SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX:
+            self.coordinator.max_discharge_to_grid_kw = None
+        else:
+            self.coordinator.max_discharge_to_grid_kw = value
+
+    @property
+    def device_info(self) -> dict:
+        """Group under the sunSale device row."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+            "name": "sunSale",
+            "manufacturer": "sunSale",
+        }
+
+    @property
+    def native_value(self) -> float:
+        """Return kW cap; maps None (unlimited) to the entity maximum."""
+        v = self.coordinator.max_discharge_to_grid_kw
+        return v if v is not None else SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the discharge cap; treat max value as unlimited.
+
+        Args:
+            value: New kW setpoint from HA UI.
+        """
+        if value >= SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX:
+            self.coordinator.max_discharge_to_grid_kw = None
+        else:
+            self.coordinator.max_discharge_to_grid_kw = value
+        self.async_write_ha_state()

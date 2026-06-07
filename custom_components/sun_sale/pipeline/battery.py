@@ -9,6 +9,12 @@ from datetime import datetime
 from ..contract.const import CAPACITY_OBS_MIN_SOC_DELTA
 from ..contract.models import BatteryConfig, BatteryState, CapacityObservation
 
+# Implied capacity more than this multiple of nominal is physically impossible
+# given the inverter's charge/discharge limits and the 5-minute update cycle.
+# Acts as a guard against sensor-unit bugs (e.g. W read as kW) corrupting the
+# weighted-average estimator.
+_CAPACITY_OBS_MAX_MULTIPLIER = 2.0
+
 
 def degradation_cost_per_kwh(config: BatteryConfig, state: BatteryState) -> float:
     """Compute the wear cost per kWh cycled through the battery.
@@ -77,22 +83,33 @@ class CapacityEstimator:
         self._observations: list[CapacityObservation] = list(observations or [])
 
     def add_observation(self, obs: CapacityObservation) -> None:
-        """Record a charge/discharge observation; silently discards small SoC deltas.
+        """Record a charge/discharge observation; silently discards bad samples.
+
+        Rejected when ``|soc_delta| < CAPACITY_OBS_MIN_SOC_DELTA`` (too small
+        to yield a reliable implied capacity) or when the implied capacity
+        exceeds ``nominal × _CAPACITY_OBS_MAX_MULTIPLIER`` (sensor-unit bug
+        or transient reading artifact that would corrupt the weighted average).
 
         Args:
-            obs: Observation to append; ignored when |soc_delta| < CAPACITY_OBS_MIN_SOC_DELTA.
+            obs: Observation to append.
         """
-        if abs(obs.soc_end - obs.soc_start) < CAPACITY_OBS_MIN_SOC_DELTA:
+        soc_delta = abs(obs.soc_end - obs.soc_start)
+        if soc_delta < CAPACITY_OBS_MIN_SOC_DELTA:
+            return
+        implied = obs.energy_kwh / soc_delta
+        if implied > self._nominal * _CAPACITY_OBS_MAX_MULTIPLIER:
             return
         self._observations.append(obs)
 
     @property
     def estimated_capacity_kwh(self) -> float:
         """Current best estimate of usable capacity in kWh."""
+        max_plausible = self._nominal * _CAPACITY_OBS_MAX_MULTIPLIER
         implied = [
             obs.energy_kwh / abs(obs.soc_end - obs.soc_start)
             for obs in self._observations
             if abs(obs.soc_end - obs.soc_start) >= CAPACITY_OBS_MIN_SOC_DELTA
+            and obs.energy_kwh / abs(obs.soc_end - obs.soc_start) <= max_plausible
         ]
         if not implied:
             return self._nominal

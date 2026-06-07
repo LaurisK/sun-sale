@@ -138,6 +138,7 @@ class SchedulePolicy:
     mode_change_penalty_eur_per_kwh: float = 0.005
     profitability_tilt_alpha: float = 0.5
     terminal_value_discount: float = 0.5
+    max_discharge_to_grid_kw: float | None = None  # None → hardware max
 
 
 class ChargeMode(Enum):

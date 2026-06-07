@@ -305,7 +305,7 @@
           .sched-row {
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-start;
             gap: 10px;
             padding: 6px 0;
             font-size: 0.85rem;
@@ -517,7 +517,7 @@
     // Profitability-Tilt name is unidecoded inconsistently across HA versions).
 
     _SCHEDULE_SWITCHES = [
-      { key: 'automation',             label: 'Automation enabled',     match: ['automation', 'enabled'] },
+      { key: 'automation',             label: 'Automation enabled',     match: ['automation'] },
       { key: 'use_standby',            label: 'Use standby (night)',    match: ['use_standby'] },
       { key: 'allow_grid_charging',    label: 'Allow grid charging',    match: ['allow_grid_charging'] },
       { key: 'allow_feed_in',          label: 'Allow feed-in',          match: ['allow_feed_in'] },
@@ -528,6 +528,7 @@
       { key: 'mode_change_penalty',    label: 'Mode-change penalty',    match: ['mode_change_penalty'], unit: 'EUR/kWh' },
       { key: 'profitability_tilt',     label: 'Profitability tilt α',   match: ['profitability_tilt'],  unit: '' },
       { key: 'terminal_value_discount',label: 'Terminal-value discount',match: ['terminal_value_discount'], unit: '' },
+      { key: 'max_discharge_to_grid',  label: 'Max discharge to grid',  match: ['max_discharge_to_grid'], unit: 'kW' },
     ];
 
     _findEntityId(domain, matchAll) {
@@ -548,20 +549,20 @@
         const eid = this._findEntityId('switch', spec.match);
         if (!eid) {
           return `<div class="sched-row" data-spec="${spec.key}">
-            <span class="sched-label">${spec.label}</span>
             <span class="sched-missing">entity not found</span>
+            <span class="sched-label">${spec.label}</span>
           </div>`;
         }
         const st = this._hass.states[eid];
         const on = st?.state === 'on';
         const unavailable = !st || st.state === 'unavailable';
         return `<div class="sched-row" data-spec="${spec.key}">
-          <span class="sched-label" title="${eid}">${spec.label}</span>
           <label class="sched-toggle">
             <input type="checkbox" data-eid="${eid}" data-kind="switch"
                    ${on ? 'checked' : ''} ${unavailable ? 'disabled' : ''}>
             <span class="slider"></span>
           </label>
+          <span class="sched-label" title="${eid}">${spec.label}</span>
         </div>`;
       };
 
@@ -569,8 +570,8 @@
         const eid = this._findEntityId('number', spec.match);
         if (!eid) {
           return `<div class="sched-row" data-spec="${spec.key}">
-            <span class="sched-label">${spec.label}</span>
             <span class="sched-missing">entity not found</span>
+            <span class="sched-label">${spec.label}</span>
           </div>`;
         }
         const st = this._hass.states[eid];
@@ -582,13 +583,13 @@
         const step  = attrs.step != null ? attrs.step : 0.01;
         const unit  = spec.unit || attrs.unit_of_measurement || '';
         return `<div class="sched-row" data-spec="${spec.key}">
-          <span class="sched-label" title="${eid}">${spec.label}</span>
           <span class="sched-num">
             <input type="number" data-eid="${eid}" data-kind="number"
                    min="${min}" max="${max}" step="${step}"
                    value="${value}" ${unavailable ? 'disabled' : ''}>
             ${unit ? `<span class="sched-unit">${unit}</span>` : ''}
           </span>
+          <span class="sched-label" title="${eid}">${spec.label}</span>
         </div>`;
       };
 

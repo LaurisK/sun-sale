@@ -225,6 +225,9 @@ DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID = True
 DEFAULT_SCHEDULE_MODE_CHANGE_PENALTY_EUR_PER_KWH = 0.005
 DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA = 0.5
 DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT = 0.5
+# None means "use hardware max from BatteryConfig"; set a lower value to
+# limit the DP's peak grid-export rate in Discharge-to-grid slots.
+DEFAULT_SCHEDULE_MAX_DISCHARGE_TO_GRID_KW: float | None = None
 
 # Bounds enforced by the Number entities and clamped by the coordinator before
 # the policy reaches the DP. Mode-change penalty is bounded above by 0.10
@@ -236,3 +239,5 @@ SCHEDULE_PROFITABILITY_TILT_ALPHA_MIN = 0.0
 SCHEDULE_PROFITABILITY_TILT_ALPHA_MAX = 1.0
 SCHEDULE_TERMINAL_VALUE_DISCOUNT_MIN = 0.0
 SCHEDULE_TERMINAL_VALUE_DISCOUNT_MAX = 1.0
+SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MIN = 0.5
+SCHEDULE_MAX_DISCHARGE_TO_GRID_KW_MAX = 30.0

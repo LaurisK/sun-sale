@@ -104,6 +104,7 @@ def optimize_schedule(
     allow_discharge_to_grid: bool = True,
     profitability_tilt_alpha: float = DEFAULT_PROFITABILITY_TILT_ALPHA,
     terminal_value_discount: float = DEFAULT_TERMINAL_VALUE_DISCOUNT,
+    max_discharge_to_grid_kw: float | None = None,
 ) -> Schedule:
     """Compute a future StorageMode schedule via SoC-bucketed dynamic programming.
 
@@ -146,6 +147,9 @@ def optimize_schedule(
         terminal_value_discount: Multiplier applied to the in-horizon median
             sell price when valuing end-of-horizon SoC. 0 disables terminal
             valuation entirely (matches phase-2/3 behaviour).
+        max_discharge_to_grid_kw: Optional AC-power cap applied only to the
+            Discharge-to-grid mode; ``None`` means use hardware max. Does not
+            affect discharge in SelfUse/NoExport (load cover).
 
     Returns:
         Schedule with one ScheduleSlot per future price slot.
@@ -200,6 +204,7 @@ def optimize_schedule(
         future_slots, baseload_kwh, solar_kwh, slot_hours,
         battery_config, cap_kwh, degradation_cost, export_limit_kw,
         bucketer, terminal_per_kwh, mode_change_penalty, actions,
+        max_discharge_to_grid_kw,
     )
 
     return _forward_roll(
@@ -207,6 +212,7 @@ def optimize_schedule(
         battery_config, battery_state, cap_kwh, degradation_cost,
         export_limit_kw, bucketer, choice, now,
         current_mode, mode_change_penalty, actions,
+        max_discharge_to_grid_kw,
     )
 
 
@@ -409,6 +415,7 @@ def _run_dp(
     terminal_per_kwh: float,
     mode_change_penalty: float,
     actions: tuple[StorageMode, ...],
+    max_discharge_to_grid_kw: float | None = None,
 ) -> list[list[list[StorageMode]]]:
     """Backward DP — compute the optimal mode for every (slot, soc_bucket, prev_mode) cell.
 
@@ -431,6 +438,8 @@ def _run_dp(
         terminal_per_kwh: EUR worth per storage-side kWh held at end-of-horizon.
         mode_change_penalty: EUR per storage-kWh moved when mode changes.
         actions: Modes the DP may pick from (possibly filtered by policy).
+        max_discharge_to_grid_kw: AC-power cap for Discharge mode; ``None``
+            means hardware max.
 
     Returns:
         ``choice[t][b][m]`` — the optimal StorageMode for slot ``t`` when the
@@ -488,6 +497,7 @@ def _run_dp(
                     est_capacity_kwh=cap_kwh,
                     deg_cost_eur_kwh=deg_cost,
                     export_limit_kw=export_limit_kw,
+                    max_discharge_to_grid_kw=max_discharge_to_grid_kw,
                 )
                 next_b = bucketer.to_index(outcome.soc_out)
                 throughput = _storage_throughput(outcome, battery_config.round_trip_efficiency)
@@ -545,6 +555,7 @@ def _forward_roll(
     current_mode: StorageMode | None,
     mode_change_penalty: float,
     actions: tuple[StorageMode, ...],
+    max_discharge_to_grid_kw: float | None = None,
 ) -> Schedule:
     """Walk the chosen policy forward from the actual current SoC and mode.
 
@@ -570,6 +581,8 @@ def _forward_roll(
             charge the first-slot mode-change penalty. ``None`` skips it.
         mode_change_penalty: EUR per storage-kWh moved on a mode change.
         actions: Modes the DP considered (must match ``_run_dp``).
+        max_discharge_to_grid_kw: AC-power cap for Discharge mode; ``None``
+            means hardware max.
 
     Returns:
         Schedule with per-slot StorageMode, projected SoC, reward, and reason.
@@ -596,6 +609,7 @@ def _forward_roll(
             est_capacity_kwh=cap_kwh,
             deg_cost_eur_kwh=deg_cost,
             export_limit_kw=export_limit_kw,
+            max_discharge_to_grid_kw=max_discharge_to_grid_kw,
         )
         action_idx = actions.index(mode)
         if prev_idx == sentinel_prev or prev_idx == action_idx:
