@@ -44,7 +44,6 @@ from ..contract.const import (
     CONF_INVERTER_ENTITY_GRID_EXPORT_POWER,
     CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY,
     CONF_INVERTER_ENTITY_GRID_IMPORT_POWER,
-    CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
     CONF_INVERTER_ENTITY_INVERTER_CLOCK,
     CONF_INVERTER_ENTITY_SOLAR_ENERGY,
     CONF_INVERTER_PLATFORM,
@@ -72,13 +71,13 @@ from ..contract.const import (
     CONF_TARIFF_TAX_RATE,
     BAKED_OBSERVED_HISTORY_RETENTION_DAYS,
     CAPACITY_OBS_MIN_SOC_DELTA,
+    CONSUMPTION_DAILY_WINDOW_DAYS,
     COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
     DERIVED_POWER_HISTORY_RETENTION_DAYS,
     GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS,
     GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS,
     GRID_POWER_HISTORY_RETENTION_DAYS,
-    HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS,
     DEFAULT_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH,
     DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
     DEFAULT_SOLIS_BACKFLOW_POWER,
@@ -120,9 +119,9 @@ from ..contract.const import (
     STORAGE_KEY_GRID_EXPORT_POWER,
     STORAGE_KEY_GRID_EXPORT_TOTAL,
     STORAGE_KEY_DERIVED_POWER,
+    STORAGE_KEY_CONSUMPTION_DAILY,
     STORAGE_KEY_GRID_IMPORT_POWER,
     STORAGE_KEY_GRID_IMPORT_TOTAL,
-    STORAGE_KEY_HOUSEHOLD_LOAD,
     STORAGE_KEY_MODE_HISTORY,
     STORAGE_KEY_MONTHLY_BILL,
     STORAGE_KEY_PRICE_HISTORY,
@@ -148,6 +147,8 @@ from ..contract.models import (
     DayClass,
     BakedDayRecord,
     BakedObservedHistory,
+    ConsumptionDailyBuckets,
+    ConsumptionDayRecord,
     CounterSnapshotHistory,
     CounterSnapshotRecord,
     DegradationCost,
@@ -174,9 +175,6 @@ from ..contract.models import (
     PvPowerHistory,
     PvPowerReading,
     HouseholdConsumptionReading,
-    HouseholdLoadHistory,
-    HouseholdLoadReading,
-    HouseholdLoadSample,
     AcPortPowerReading,
     BackupPowerReading,
     DerivedPowerHistory,
@@ -232,8 +230,11 @@ from ..inbound.observer.generation import (
     PvPowerTranslator,
     build_generation_engine,
 )
+from ..inbound.consumption_daily import (
+    backfill_from_derived_history,
+    try_finalise_yesterday_consumption,
+)
 from ..inbound.household_consumption import HouseholdConsumptionTranslator
-from ..inbound.household_load import HouseholdLoadTranslator
 from ..inbound.observer.grid import (
     GRID_EXPORT_SIDE_ID,
     GRID_IMPORT_SIDE_ID,
@@ -448,20 +449,46 @@ def _deserialize_pv_power(d: dict) -> list[PvPowerReading]:
     ]
 
 
-def _serialize_household_load(samples: list[HouseholdLoadSample]) -> dict:
-    """Serialise a list of household load samples."""
-    return {"samples": [{"ts": s.timestamp.isoformat(), "kw": s.load_kw} for s in samples]}
+def _serialize_consumption_daily(buckets: ConsumptionDailyBuckets) -> dict:
+    """Serialise the rolling per-day hour-bucket consumption history."""
+    return {
+        "records": [
+            {
+                "date":  r.local_date.isoformat(),
+                "kwh":   list(r.hour_kwh),
+                "cov":   list(r.hour_completeness),
+                "at":    r.finalised_at.isoformat(),
+            }
+            for r in buckets.records
+        ]
+    }
 
 
-def _deserialize_household_load(d: dict) -> list[HouseholdLoadSample]:
-    """Deserialise a list of household load samples."""
-    return [
-        HouseholdLoadSample(
-            timestamp=datetime.fromisoformat(s["ts"]),
-            load_kw=s["kw"],
-        )
-        for s in d.get("samples", [])
-    ]
+def _deserialize_consumption_daily(d: dict) -> ConsumptionDailyBuckets:
+    """Deserialise the rolling per-day hour-bucket consumption history.
+
+    Malformed records are skipped silently so a single bad row cannot block
+    startup. Records that don't carry a full 24-tuple for either ``kwh`` or
+    ``cov`` are dropped — the builder requires fixed shape.
+    """
+    records: list[ConsumptionDayRecord] = []
+    for r in d.get("records", []):
+        try:
+            kwh = tuple(float(x) for x in r["kwh"])
+            cov = tuple(float(x) for x in r["cov"])
+            if len(kwh) != 24 or len(cov) != 24:
+                continue
+            records.append(
+                ConsumptionDayRecord(
+                    local_date=date.fromisoformat(r["date"]),
+                    hour_kwh=kwh,
+                    hour_completeness=cov,
+                    finalised_at=datetime.fromisoformat(r["at"]),
+                )
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    return ConsumptionDailyBuckets(records=tuple(records))
 
 
 def _serialize_price_history(peaks: list[DailyPeak]) -> dict:
@@ -842,7 +869,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._yesterday_store: PersistentStore[_YesterdayBuckets] | None = None
         self._generation_store: PersistentStore[list[GenerationReading]] | None = None
         self._pv_power_store: PersistentStore[list[PvPowerReading]] | None = None
-        self._household_load_store: PersistentStore[list[HouseholdLoadSample]] | None = None
+        self._consumption_daily_store: PersistentStore[ConsumptionDailyBuckets] | None = None
         self._price_history_store: PersistentStore[list[DailyPeak]] | None = None
         self._forecast_quality_store: PersistentStore[ForecastQualityStore] | None = None
         self._grid_import_power_store: PersistentStore[list[GridImportPowerReading]] | None = None
@@ -1050,7 +1077,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ),
             BatteryTranslator(
                 inverter=inverter,
-                household_load_entity=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
+                # Legacy: kept so existing configs that mapped a single
+                # household-load sensor still feed BatteryReading.household_load_kw
+                # for the dashboard. New configs leave this empty → 0.2 kW stub.
+                household_load_entity=data.get("inverter_entity_household_load", ""),
             ),
             GridImportPowerObserver(
                 entity_id=self._grid_import_power_entity_id,
@@ -1064,9 +1094,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             GridExportTotalTranslator(entity_id=grid_export_total_entity_id),
             GenerationTranslator(entity_id=solar_energy_today_entity_id),
             PvPowerTranslator(entity_id=pv_power_entity_id),
-            HouseholdLoadTranslator(
-                entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, ""),
-            ),
             HouseholdConsumptionTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY, ""),
             ),
@@ -1130,12 +1157,12 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         )
         await self._pv_power_store.load()
 
-        self._household_load_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_HOUSEHOLD_LOAD,
-            serialize=_serialize_household_load,
-            deserialize=_deserialize_household_load,
+        self._consumption_daily_store = PersistentStore(
+            self.hass, STORAGE_VERSION, STORAGE_KEY_CONSUMPTION_DAILY,
+            serialize=_serialize_consumption_daily,
+            deserialize=_deserialize_consumption_daily,
         )
-        await self._household_load_store.load()
+        await self._consumption_daily_store.load()
 
         self._price_history_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_PRICE_HISTORY,
@@ -1234,6 +1261,34 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             deserialize=_deserialize_derived_power,
         )
         await self._derived_power_store.load()
+
+        # Backfill the consumption-daily store from any complete local days
+        # already present in the derived-power history. With the standard
+        # 2-day derived retention this seeds 1–2 records (typically
+        # yesterday + day-before-yesterday) so the per-hour P15 builder has
+        # something to chew on before the regular per-cycle finalise hook
+        # accumulates fresh days. Idempotent — skipped for dates already
+        # recorded.
+        if (
+            self._consumption_daily_store is not None
+            and self._derived_power_store is not None
+        ):
+            local_tz = self._sun_sale_config.local_tz
+            existing = (
+                self._consumption_daily_store.value
+                or ConsumptionDailyBuckets(records=())
+            )
+            derived_history = DerivedPowerHistory(
+                samples=tuple(self._derived_power_store.value or []),
+            )
+            after = backfill_from_derived_history(
+                derived_history=derived_history,
+                existing=existing,
+                local_tz=local_tz,
+                now=datetime.now(timezone.utc),
+            )
+            if after is not existing:
+                await self._consumption_daily_store.save(after)
 
     async def _async_update_data(self) -> dict:
         """One DAG cycle: translate → capacity update → DAG → event routing."""
@@ -1438,16 +1493,38 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 self._monthly_bill_store.value if self._monthly_bill_store else None
             )
 
-            current_load: HouseholdLoadReading | None = primary.get(HouseholdLoadReading)
-            if current_load is not None and self._household_load_store is not None:
-                sample = HouseholdLoadSample(timestamp=now, load_kw=current_load.load_kw)
-                cutoff = now - timedelta(days=HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS)
-                await self._household_load_store.append_and_trim(
-                    sample, cutoff, lambda s: s.timestamp,
+            # Consumption-daily rollup: finalise yesterday once per local date.
+            # The hook is idempotent — when yesterday's record already exists
+            # only trimming runs, so calling every cycle is fine. The primary
+            # is populated from the (possibly just-updated) store value so the
+            # BaseLoadProfile node sees the latest rolling window.
+            if (
+                self._consumption_daily_store is not None
+                and self._derived_power_store is not None
+                and self._sun_sale_config is not None
+            ):
+                existing_buckets = (
+                    self._consumption_daily_store.value
+                    or ConsumptionDailyBuckets(records=())
                 )
-            primary[HouseholdLoadHistory] = HouseholdLoadHistory(
-                samples=tuple((self._household_load_store.value or []) if self._household_load_store else []),
-            )
+                derived_for_finalise = primary.get(DerivedPowerHistory)
+                if derived_for_finalise is None:
+                    derived_for_finalise = DerivedPowerHistory(
+                        samples=tuple(self._derived_power_store.value or []),
+                    )
+                updated_buckets = try_finalise_yesterday_consumption(
+                    derived_history=derived_for_finalise,
+                    existing=existing_buckets,
+                    local_tz=self._sun_sale_config.local_tz,
+                    now=now,
+                )
+                if updated_buckets is not existing_buckets:
+                    await self._consumption_daily_store.save(updated_buckets)
+            primary[ConsumptionDailyBuckets] = (
+                self._consumption_daily_store.value
+                if self._consumption_daily_store is not None
+                else None
+            ) or ConsumptionDailyBuckets(records=())
 
             primary[PriceHistory] = PriceHistory(
                 peaks=tuple((self._price_history_store.value or []) if self._price_history_store else []),
@@ -1705,6 +1782,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "inverter_mode_reading": primary.get(InverterModeReading),
             "baked_observed_history": primary.get(BakedObservedHistory),
             "counter_snapshot_history": primary.get(CounterSnapshotHistory),
+            "consumption_daily_buckets": primary.get(ConsumptionDailyBuckets),
             "today_generation_live_kwh": (
                 primary.get(GenerationReading).today_total_kwh
                 if primary.get(GenerationReading) is not None else None

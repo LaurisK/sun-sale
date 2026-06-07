@@ -45,7 +45,6 @@ from .contract.const import (
     CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY,
     CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY,
     CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY,
-    CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD,
     CONF_INVERTER_ENTITY_SOLAR_ENERGY,
     CONF_INVERTER_ENTITY_PV_POWER,
     CONF_NORDPOOL_ENTITY,
@@ -263,8 +262,10 @@ def _sources_schema(d: dict) -> vol.Schema:
         d: Existing config/options dict used for default values.
 
     Returns:
-        Schema covering Nordpool entity, resolution, solar forecast entities, solar energy,
-        household load, and household consumption energy selectors.
+        Schema covering Nordpool entity, resolution, solar forecast entities,
+        solar energy, and household consumption energy selectors. Household
+        baseload is derived from the AC-port / backup / grid composition —
+        no dedicated load sensor is asked for.
     """
     return vol.Schema({
         _req(CONF_NORDPOOL_ENTITY, d): _SENSOR,
@@ -273,7 +274,6 @@ def _sources_schema(d: dict) -> vol.Schema:
         _opt(CONF_SOLAR_FORECAST_ENTITY_2, d): _SENSOR_ENERGY,
         _opt(CONF_INVERTER_ENTITY_SOLAR_ENERGY, d): _SENSOR_ENERGY,
         _opt(CONF_INVERTER_ENTITY_PV_POWER, d): _SENSOR_POWER,
-        _opt(CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD, d): _SENSOR_POWER,
         _opt(CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY, d): _SENSOR_ENERGY,
         _opt(CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY, d): _SENSOR_ENERGY,
         _opt(CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY, d): _SENSOR_ENERGY,

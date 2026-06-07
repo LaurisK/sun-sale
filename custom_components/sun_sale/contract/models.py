@@ -470,37 +470,31 @@ class HouseholdConsumptionReading:
 
 
 @dataclass(frozen=True)
-class HouseholdLoadReading:
-    """Primary data: one snapshot of measured household load (per cycle).
+class ConsumptionDayRecord:
+    """One local-date's hour-bucket consumption totals.
 
-    Distinct from `BatteryReading.household_load_kw`: that field carries a
-    0.2 kW stub when the sensor is unavailable, so downstream calculation/
-    dashboard always have a number. This reading returns None on absence
-    so the persisted history isn't polluted (see docs/base_load_missing.md §8).
+    Built once per local day from the day's ``ObservedConsumptionSeries`` —
+    each ``hour_kwh[h]`` is the sum of ``consumed_kwh`` across the price-grid
+    slots whose local start-hour equals ``h``. ``hour_completeness[h]`` is
+    the fraction of expected price-grid slots in that hour that contributed
+    at least one derived sample, so the baseload builder can drop hours
+    where the inverter was offline.
     """
-    timestamp: datetime
-    load_kw: float
+    local_date: date
+    hour_kwh: tuple[float, ...]                 # length 24, kWh by local hour 0..23
+    hour_completeness: tuple[float, ...]        # length 24, fraction in 0..1
+    finalised_at: datetime                       # UTC timestamp when the record was written
 
 
 @dataclass(frozen=True)
-class HouseholdLoadSample:
-    """One persisted sample of measured household load (in HouseholdLoadHistory).
+class ConsumptionDailyBuckets:
+    """Primary data: rolling history of finalised per-day hour-bucket rollups.
 
-    Same shape as HouseholdLoadReading; separate type so the persisted-storage
-    schema can evolve independently of the per-cycle primary type.
+    Coordinator appends one record per local date after the day ends and
+    trims to ``CONSUMPTION_DAILY_WINDOW_DAYS``. Consumed by
+    ``BaseLoadProfileNode`` to compute the per-hour P15 floor.
     """
-    timestamp: datetime
-    load_kw: float
-
-
-@dataclass(frozen=True)
-class HouseholdLoadHistory:
-    """Primary data: rolling history of household-load samples.
-
-    Coordinator appends each cycle (when the sensor was available) and
-    persists ~45 days. Consumed by `BaseLoadProfileNode`.
-    """
-    samples: tuple[HouseholdLoadSample, ...]   # sorted by timestamp ascending
+    records: tuple[ConsumptionDayRecord, ...]   # sorted by local_date ascending
 
 
 class DayClass(Enum):

@@ -54,7 +54,6 @@ CONF_NORDPOOL_ENTITY = "nordpool_entity"
 CONF_NORDPOOL_RESOLUTION = "nordpool_resolution"
 CONF_SOLAR_FORECAST_ENTITY = "solar_forecast_entity"
 CONF_SOLAR_FORECAST_ENTITY_2 = "solar_forecast_entity_2"
-CONF_INVERTER_ENTITY_HOUSEHOLD_LOAD = "inverter_entity_household_load"
 CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY = (
     "inverter_entity_household_consumption_energy"
 )
@@ -88,7 +87,7 @@ STORAGE_KEY_CAPACITY = f"{DOMAIN}_capacity"
 STORAGE_KEY_YESTERDAY = f"{DOMAIN}_yesterday"
 STORAGE_KEY_GENERATION = f"{DOMAIN}_generation"
 STORAGE_KEY_PV_POWER = f"{DOMAIN}_pv_power"
-STORAGE_KEY_HOUSEHOLD_LOAD = f"{DOMAIN}_household_load"
+STORAGE_KEY_CONSUMPTION_DAILY = f"{DOMAIN}_consumption_daily"
 STORAGE_KEY_PRICE_HISTORY = f"{DOMAIN}_price_history"
 STORAGE_KEY_FORECAST_QUALITY = f"{DOMAIN}_forecast_quality"
 STORAGE_KEY_GRID_IMPORT_POWER = f"{DOMAIN}_grid_import_power"
@@ -161,10 +160,16 @@ INVERTER_TIME_MIN_SAMPLES = 5
 # out quickly.
 INVERTER_TIME_MAX_SAMPLES = 50
 
-# Rolling household-load retention (days). Sized at ~1.5× the baseload
-# profile window (30d) so a few stale samples at the tail don't strand
-# entries that just left the window.
-HOUSEHOLD_LOAD_HISTORY_RETENTION_DAYS = 45
+# Rolling per-day consumption-bucket retention (days). One ConsumptionDayRecord
+# per local date, each holding 24 hour-bucket sums in kWh. Sized to give a
+# full 30 finalised days of input to the per-hour P15 baseload profile.
+CONSUMPTION_DAILY_WINDOW_DAYS = 30
+
+# Per-day per-hour completeness gate. A day's hour bucket only feeds the P15
+# profile when at least this fraction of the price-grid slots in that hour
+# had a derived sample — drops days where the inverter was offline for part
+# of the hour and the sum would otherwise underestimate the floor.
+CONSUMPTION_DAILY_MIN_HOUR_COMPLETENESS = 0.8
 
 # Rolling price-history retention (days) for profitability scoring.
 PRICE_HISTORY_RETENTION_DAYS = 90

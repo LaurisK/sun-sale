@@ -13,8 +13,8 @@ from ...contract.models import (
     BatteryReading,
     BatteryState,
     BatteryStatus,
+    ConsumptionDailyBuckets,
     EstimatedCapacity,
-    HouseholdLoadHistory,
     NordpoolData,
     PriceSeries,
     YesterdayPrices,
@@ -69,18 +69,18 @@ class BatteryStatusNode(DagNode):
 
 
 class BaseLoadProfileNode(DagNode):
-    """24h hour-of-day baseload profile from rolling household-load history."""
+    """24h hour-of-day P15 baseload profile from per-day consumption rollups."""
 
     tier = 1
     output_type = BaseLoadProfile
-    consumes = [HouseholdLoadHistory]
+    consumes = [ConsumptionDailyBuckets]
 
     async def _compute(
         self, ctx: NodeContext
     ) -> tuple[BaseLoadProfile, list[ControlEvent]]:
-        """Build 24-bucket baseload profile from rolling household-load history."""
-        history = ctx.require(HouseholdLoadHistory)
+        """Build 24-bucket P15 profile from the rolling daily-bucket history."""
+        buckets = ctx.require(ConsumptionDailyBuckets)
         profile = base_load_module.build_base_load_profile(
-            history, ctx.config.local_tz, now=ctx.now,
+            buckets, ctx.config.local_tz, now=ctx.now,
         )
         return profile, []

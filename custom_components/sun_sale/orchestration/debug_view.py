@@ -35,6 +35,31 @@ class SunSaleDebugView(HomeAssistantView):
         return self.json(entries)
 
 
+def _serialize_consumption_daily_buckets(buckets: Any) -> dict | None:
+    """Serialise a ConsumptionDailyBuckets primary into a JSON-safe dict.
+
+    Args:
+        buckets: ConsumptionDailyBuckets instance or None.
+
+    Returns:
+        Dict with record_count + per-record date / hourly arrays, or None.
+    """
+    if buckets is None:
+        return None
+    return {
+        "record_count": len(buckets.records),
+        "records": [
+            {
+                "local_date":         r.local_date.isoformat(),
+                "finalised_at":       r.finalised_at.isoformat(),
+                "hour_kwh":           [round(v, 4) for v in r.hour_kwh],
+                "hour_completeness":  [round(v, 3) for v in r.hour_completeness],
+            }
+            for r in buckets.records
+        ],
+    }
+
+
 def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     """Serialise one coordinator's full state into a JSON-safe dict."""
     data = coordinator.data or {}
@@ -157,6 +182,9 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for r in snapshot_history.records
                 ],
             } if snapshot_history is not None else None,
+            "consumption_daily_buckets": _serialize_consumption_daily_buckets(
+                data.get("consumption_daily_buckets"),
+            ),
         },
         "pipeline": {
             "pricing": {

@@ -2005,11 +2005,31 @@ class BaseLoadCheckResult:
     overall_ok: bool = True
 
 
+# P15 floor percentile — must match pipeline/base_load.DEFAULT_PERCENTILE.
+_BASE_LOAD_PERCENTILE = 0.15
+
+# Per-day per-hour completeness gate — must match
+# CONSUMPTION_DAILY_MIN_HOUR_COMPLETENESS in contract/const.py.
+_BASE_LOAD_MIN_HOUR_COMPLETENESS = 0.8
+
+# Tolerance (kW) for the per-hour P15 cross-check against the daily buckets.
+# Tighter than the typical floor magnitude so a mismatch is unambiguous.
+_BASE_LOAD_KW_TOL = 1e-3
+
+
 def check_base_load(snap: Snapshot) -> BaseLoadCheckResult:
-    """Verify base-load profile has 24 slots with non-negative kW values.
+    """Verify the base-load profile shape and cross-check P15 against daily buckets.
+
+    Per-hour ``baseload_kw`` is recomputed from
+    ``inputs.consumption_daily_buckets`` by replaying the P15 over the same
+    qualified bucket-days and compared against the reported value. Reports
+    a mismatch when the difference exceeds ``_BASE_LOAD_KW_TOL``. Buckets
+    flagged ``is_fallback=True`` are skipped from the cross-check (their
+    value comes from a different path).
 
     Args:
-        snap: Coordinator snapshot containing pipeline.base_load_profile.
+        snap: Coordinator snapshot containing pipeline.base_load_profile and
+            inputs.consumption_daily_buckets.
 
     Returns:
         BaseLoadCheckResult with per-hour data and overall pass/fail.
@@ -2039,22 +2059,77 @@ def check_base_load(snap: Snapshot) -> BaseLoadCheckResult:
         result.mismatches.append("confidence_out_of_range")
         result.overall_ok = False
 
+    buckets = (snap.inputs.get("consumption_daily_buckets") or {})
+    records = buckets.get("records") or []
+    qualified_per_hour: list[list[float]] = [[] for _ in range(24)]
+    for r in records:
+        kwh_list = r.get("hour_kwh") or []
+        cov_list = r.get("hour_completeness") or []
+        if len(kwh_list) != 24 or len(cov_list) != 24:
+            continue
+        for h in range(24):
+            if float(cov_list[h]) >= _BASE_LOAD_MIN_HOUR_COMPLETENESS:
+                qualified_per_hour[h].append(float(kwh_list[h]))
+
+    record_count = len(records)
+    if result.distinct_days != record_count:
+        result.mismatches.append(
+            f"distinct_days={result.distinct_days} (expected {record_count})"
+        )
+        result.overall_ok = False
+
     for s in slots:
         hour = s.get("hour", 0)
         kw = s.get("baseload_kw", 0.0)
+        is_fallback = s.get("is_fallback", False)
         ok = kw >= 0.0
         if not ok:
             result.mismatches.append(f"negative_kw_h{hour}")
             result.overall_ok = False
+        expected = None
+        if not is_fallback:
+            values = qualified_per_hour[hour] if 0 <= hour < 24 else []
+            if values:
+                expected = _percentile(values, _BASE_LOAD_PERCENTILE)
+                if abs(expected - kw) > _BASE_LOAD_KW_TOL:
+                    result.mismatches.append(
+                        f"p15_mismatch_h{hour}: reported={kw:.4f} "
+                        f"expected={expected:.4f} (n={len(values)})"
+                    )
+                    result.overall_ok = False
         result.slot_rows.append({
             "hour": hour,
             "baseload_kw": kw,
             "sample_count": s.get("sample_count", 0),
-            "is_fallback": s.get("is_fallback", False),
+            "is_fallback": is_fallback,
+            "expected_p15": expected,
             "ok": ok,
         })
 
     return result
+
+
+def _percentile(values: list[float], p: float) -> float:
+    """Linear-interpolation percentile (matches pipeline/base_load._percentile).
+
+    Args:
+        values: Non-empty list of floats.
+        p: Percentile in [0, 1].
+
+    Returns:
+        Interpolated percentile value, or 0.0 for empty input.
+    """
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return values[0]
+    sorted_v = sorted(values)
+    n = len(sorted_v)
+    rank = p * (n - 1)
+    lo = int(rank)
+    hi = min(lo + 1, n - 1)
+    frac = rank - lo
+    return sorted_v[lo] + (sorted_v[hi] - sorted_v[lo]) * frac
 
 
 # ---------------------------------------------------------------------------

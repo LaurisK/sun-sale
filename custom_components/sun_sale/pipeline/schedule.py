@@ -401,6 +401,35 @@ class _Bucketer:
         """
         return self._min + index * self._step
 
+    def to_interp(self, soc: float) -> tuple[int, int, float]:
+        """Locate ``soc`` between two adjacent buckets for value interpolation.
+
+        Returns the pair of bucket indices that bracket ``soc`` plus the
+        fractional position toward the upper one. Callers compute an
+        interpolated value as ``(1 - frac) * v[lo] + frac * v[hi]``. When
+        ``soc`` falls outside the envelope, ``lo == hi`` and ``frac == 0``
+        so the lookup degenerates to the boundary bucket. Without this
+        interpolation the DP's value lookup snaps to a single bucket and
+        loses sub-bucket SoC gains — e.g. a small solar surplus stored
+        each slot looks identical to feeding in, so the planner picks the
+        immediate revenue and burns through prime storage opportunities.
+
+        Args:
+            soc: Continuous SoC value.
+
+        Returns:
+            ``(lo_index, hi_index, frac_to_hi)``.
+        """
+        if self._step == 0:
+            return 0, 0, 0.0
+        raw = (soc - self._min) / self._step
+        if raw <= 0:
+            return 0, 0, 0.0
+        if raw >= self._n - 1:
+            return self._n - 1, self._n - 1, 0.0
+        lo = int(raw)
+        return lo, lo + 1, raw - lo
+
 
 def _run_dp(
     future_slots: list[PriceSlot],
@@ -482,8 +511,13 @@ def _run_dp(
             soc_in = bucketer.to_soc(b)
             # Per-action outcome is independent of prev_mode (only the penalty
             # depends on it), so compute outcomes once per (b, action) and
-            # reuse across prev_mode columns.
-            per_action: list[tuple[SlotOutcome, int, float]] = []
+            # reuse across prev_mode columns. The next-layer value is read
+            # via linear interpolation between the two buckets bracketing
+            # the resulting SoC — snap-to-bucket loses sub-bucket gains
+            # (e.g. storing a small solar surplus every slot), which makes
+            # the DP miss long arbitrage chains built out of tiny per-slot
+            # SoC moves.
+            per_action: list[tuple[SlotOutcome, int, int, float, float]] = []
             for action in actions:
                 outcome = simulate_slot(
                     soc_in=soc_in,
@@ -499,22 +533,26 @@ def _run_dp(
                     export_limit_kw=export_limit_kw,
                     max_discharge_to_grid_kw=max_discharge_to_grid_kw,
                 )
-                next_b = bucketer.to_index(outcome.soc_out)
+                lo, hi, frac = bucketer.to_interp(outcome.soc_out)
                 throughput = _storage_throughput(outcome, battery_config.round_trip_efficiency)
-                per_action.append((outcome, next_b, throughput))
+                per_action.append((outcome, lo, hi, frac, throughput))
 
             for prev_m in range(n_prev):
                 best_total = float("-inf")
                 best_mode = fallback_mode
                 for action_idx, action in enumerate(actions):
-                    outcome, next_b, throughput = per_action[action_idx]
+                    outcome, lo, hi, frac, throughput = per_action[action_idx]
                     # Penalty applies only when the chosen action differs from
                     # the previous mode and the battery actually moves energy.
                     if prev_m == sentinel_prev or prev_m == action_idx:
                         penalty = 0.0
                     else:
                         penalty = mode_change_penalty * throughput
-                    total = outcome.reward_eur - penalty + next_layer[next_b][action_idx]
+                    v_next = (
+                        next_layer[lo][action_idx]
+                        + frac * (next_layer[hi][action_idx] - next_layer[lo][action_idx])
+                    )
+                    total = outcome.reward_eur - penalty + v_next
                     if total > best_total:
                         best_total = total
                         best_mode = action
