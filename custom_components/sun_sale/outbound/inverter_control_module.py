@@ -89,6 +89,7 @@ class InverterControlModule:
         reading: InverterModeReading,
         history: InverterModeHistory,
         automation_enabled: bool,
+        mode_override: StorageMode | None = None,
     ) -> InverterModeHistory:
         """Run one observe → plan → act cycle and return the updated history.
 
@@ -101,6 +102,10 @@ class InverterControlModule:
             automation_enabled: When ``True``, the current slot's target is
                 pushed to the inverter via ``apply_mode``. When ``False``,
                 the module is observer-only.
+            mode_override: When set, overrides the scheduler's current-slot
+                choice — this exact StorageMode is dispatched as long as
+                ``automation_enabled`` is True. ``None`` keeps sunSale's
+                auto choice.
 
         Returns:
             Updated ``InverterModeHistory``. The coordinator persists this
@@ -108,21 +113,29 @@ class InverterControlModule:
         """
         updated_history = self._record_observation(now, reading, history)
         if automation_enabled:
-            await self._dispatch_current_slot(now, schedule)
+            await self._dispatch_current_slot(now, schedule, mode_override)
         return updated_history
 
     def current_target(
-        self, now: datetime, schedule: Schedule | None
+        self,
+        now: datetime,
+        schedule: Schedule | None,
+        mode_override: StorageMode | None = None,
     ) -> StorageMode | None:
-        """Return the StorageMode the scheduler targets for the current slot.
+        """Return the StorageMode that would be dispatched for ``now``.
 
         Args:
             now: Cycle timestamp.
             schedule: Latest Schedule, or ``None``.
+            mode_override: When set, this is returned directly — it is what
+                the dispatcher will push to the inverter.
 
         Returns:
-            Target StorageMode, or ``None`` when no slot covers ``now``.
+            Target StorageMode, or ``None`` when no override is set and no
+            schedule slot covers ``now``.
         """
+        if mode_override is not None:
+            return mode_override
         slot = self._current_slot(now, schedule)
         return slot.mode if slot is not None else None
 
@@ -169,18 +182,26 @@ class InverterControlModule:
         return InverterModeHistory(samples=tuple(samples))
 
     async def _dispatch_current_slot(
-        self, now: datetime, schedule: Schedule | None
+        self,
+        now: datetime,
+        schedule: Schedule | None,
+        mode_override: StorageMode | None = None,
     ) -> None:
-        """Apply the current-slot target mode to the inverter.
+        """Apply the current-slot target mode (or the override) to the inverter.
 
         Args:
             now: Cycle timestamp.
-            schedule: Latest Schedule, or ``None`` (no-op).
+            schedule: Latest Schedule, or ``None``.
+            mode_override: When set, dispatched directly and the schedule slot
+                is ignored. ``None`` falls back to the slot covering ``now``.
         """
-        slot = self._current_slot(now, schedule)
-        if slot is None:
+        if mode_override is not None:
+            target: StorageMode | None = mode_override
+        else:
+            slot = self._current_slot(now, schedule)
+            target = slot.mode if slot is not None else None
+        if target is None:
             return
-        target = slot.mode
         spec = self._specs.get(target)
         if spec is None:
             _LOGGER.warning(
@@ -190,7 +211,11 @@ class InverterControlModule:
             return
         await self._inverter.apply_mode(target, spec)
         if target != self._last_applied_mode:
-            _LOGGER.info("inverter_control: dispatched %s", target.value)
+            _LOGGER.info(
+                "inverter_control: dispatched %s%s",
+                target.value,
+                " (override)" if mode_override is not None else "",
+            )
             self._last_applied_mode = target
 
     @staticmethod

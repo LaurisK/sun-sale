@@ -93,6 +93,11 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
         "entry_id": entry_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "automation_enabled": coordinator.automation_enabled,
+        "mode_override": (
+            coordinator.mode_override.value
+            if coordinator.mode_override is not None
+            else None
+        ),
         "config": {
             "nordpool_entity": cfg.get(CONF_NORDPOOL_ENTITY, ""),
             "solar_forecast_entity": cfg.get(CONF_SOLAR_FORECAST_ENTITY, ""),

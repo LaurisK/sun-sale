@@ -67,6 +67,7 @@ async def async_setup_entry(
         ScheduleSensor(coordinator, entry),
         DashboardSensor(coordinator, entry),
         InverterModeSensor(coordinator, entry),
+        ObservedInverterModeSensor(coordinator, entry),
         PricingPipelineSensor(coordinator, entry),
         ForecastPipelineSensor(coordinator, entry),
         CalculationPipelineSensor(coordinator, entry),
@@ -430,6 +431,78 @@ class InverterModeSensor(_BaseSensor):
         if cur_slot.mode in (StorageMode.SelfUse, StorageMode.NoExport):
             return "charge_solar"
         return "self_use_sell" if solar_w > load_w else "self_use"
+
+
+class ObservedInverterModeSensor(_BaseSensor):
+    """Diagnostic readout of the inverter's actual current StorageMode.
+
+    Decoded from the cycle's ``InverterModeReading`` (register 43110 plus
+    ancillary currents / RC setpoint / export cap). State is always rendered
+    as ``mode(reg=…, chg_a=…, dis_a=…, rc_w=…, backflow_w=…)`` — the same
+    raw values regardless of whether decoding produced a known mode or
+    ``unknown`` — so the bitmask + ancillary signals are visible without
+    having to crack open the debug endpoint.
+
+    Pair with ``select.sunsale_mode_override`` to confirm whether a manually
+    dispatched mode actually takes effect on the inverter — the override
+    drives what's *commanded*; this sensor reports what's *observed*.
+    """
+
+    _attr_name = "sunSale Observed Inverter Mode"
+    _attr_icon = "mdi:eye-circle-outline"
+
+    def __init__(self, coordinator: SunSaleCoordinator, entry: ConfigEntry) -> None:
+        """Initialise the observed-mode diagnostic sensor."""
+        super().__init__(coordinator, entry, "observed_inverter_mode")
+
+    @property
+    def native_value(self) -> str:
+        """Return ``<mode>(reg=…, chg_a=…, dis_a=…, rc_w=…, backflow_w=…)``."""
+        reading = self._reading()
+        if reading is None:
+            return "unavailable"
+        return (
+            f"{reading.mode.value}("
+            f"reg={_fmt(reading.reg_43110_value)}, "
+            f"chg_a={_fmt(reading.charge_a)}, "
+            f"dis_a={_fmt(reading.discharge_a)}, "
+            f"rc_w={_fmt(reading.rc_setpoint_w)}, "
+            f"backflow_w={_fmt(reading.backflow_power_w)})"
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Surface raw register readbacks alongside the decoded mode."""
+        reading = self._reading()
+        if reading is None:
+            return {}
+        override = self.coordinator.mode_override
+        target = self.coordinator.last_dispatched_action
+        return {
+            "reg_43110_value": reading.reg_43110_value,
+            "charge_a": reading.charge_a,
+            "discharge_a": reading.discharge_a,
+            "rc_setpoint_w": reading.rc_setpoint_w,
+            "backflow_power_w": reading.backflow_power_w,
+            "last_dispatched_action": target,
+            "mode_override": override.value if override is not None else None,
+        }
+
+    def _reading(self) -> InverterModeReading | None:
+        """Return this cycle's InverterModeReading, or None when unavailable."""
+        data = self.coordinator.data
+        if not data:
+            return None
+        return data.get("inverter_mode_reading")
+
+
+def _fmt(value: Any) -> str:
+    """Render a value as ``None`` when missing, else its short string form."""
+    if value is None:
+        return "None"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
 
 
 class DashboardSensor(_BaseSensor):

@@ -38,7 +38,7 @@ def _js_hash(filename: str) -> str:
 
 _DEBUG_VIEW_KEY = f"{DOMAIN}_debug_view_registered"
 
-PLATFORMS = ["sensor", "switch", "number"]
+PLATFORMS = ["sensor", "switch", "number", "select"]
 
 SERVICE_FORCE_RECALCULATE = "force_recalculate"
 

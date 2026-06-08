@@ -892,6 +892,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self.profitability_tilt_alpha: float = DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA
         self.terminal_value_discount: float = DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT
         self.max_discharge_to_grid_kw: float | None = DEFAULT_SCHEDULE_MAX_DISCHARGE_TO_GRID_KW
+        # Manual override for the dispatched StorageMode. When set, the control
+        # module forwards this to the inverter regardless of the scheduler's
+        # current-slot choice. ``None`` (default) keeps sunSale's auto choice.
+        self.mode_override: StorageMode | None = None
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
 
@@ -1685,10 +1689,13 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     reading=reading,
                     history=history_before,
                     automation_enabled=self.automation_enabled,
+                    mode_override=self.mode_override,
                 )
                 if updated_history.samples != history_before.samples:
                     await self._mode_history_store.save(updated_history)
-                target = self._control_module.current_target(now, schedule)
+                target = self._control_module.current_target(
+                    now, schedule, mode_override=self.mode_override,
+                )
                 if self.automation_enabled and target is not None:
                     self.last_dispatched_action = target.value
                     self.last_dispatched_at = now

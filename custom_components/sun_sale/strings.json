@@ -192,6 +192,20 @@
       "terminal_value_discount": {
         "name": "Terminal-Value Discount"
       }
+    },
+    "select": {
+      "mode_override": {
+        "name": "Mode Override",
+        "state": {
+          "auto": "Auto (scheduler)",
+          "self_use": "Self-Use",
+          "no_export": "No Export",
+          "stand_by": "Standby",
+          "grid_charge": "Grid Charge",
+          "discharge": "Discharge",
+          "feed_in": "Feed-In"
+        }
+      }
     }
   }
 }

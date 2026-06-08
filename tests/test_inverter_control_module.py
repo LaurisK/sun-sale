@@ -237,3 +237,70 @@ async def test_current_target_returns_slot_mode():
 @pytest.mark.asyncio
 async def test_current_target_returns_none_when_no_schedule():
     assert _module().current_target(NOW, None) is None
+
+
+# ---------------------------------------------------------------------------
+# Manual StorageMode override
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_override_dispatches_overridden_mode_not_slot_mode():
+    inv = _mock_inverter()
+    mod = _module(inv)
+    schedule = _schedule_with(StorageMode.SelfUse)
+    await mod.tick(
+        now=NOW, schedule=schedule,
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()),
+        automation_enabled=True,
+        mode_override=StorageMode.Discharge,
+    )
+    inv.apply_mode.assert_awaited_once()
+    assert inv.apply_mode.await_args.args[0] == StorageMode.Discharge
+
+
+@pytest.mark.asyncio
+async def test_override_dispatches_when_no_schedule_slot_covers_now():
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.tick(
+        now=NOW, schedule=None,
+        reading=_reading(StorageMode.StandBy, reg=1),
+        history=InverterModeHistory(samples=()),
+        automation_enabled=True,
+        mode_override=StorageMode.GridCharge,
+    )
+    inv.apply_mode.assert_awaited_once()
+    assert inv.apply_mode.await_args.args[0] == StorageMode.GridCharge
+
+
+@pytest.mark.asyncio
+async def test_override_ignored_when_automation_off():
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.tick(
+        now=NOW, schedule=_schedule_with(StorageMode.SelfUse),
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()),
+        automation_enabled=False,
+        mode_override=StorageMode.Discharge,
+    )
+    inv.apply_mode.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_current_target_returns_override_when_set():
+    mod = _module()
+    schedule = _schedule_with(StorageMode.SelfUse)
+    assert mod.current_target(
+        NOW, schedule, mode_override=StorageMode.FeedIn,
+    ) == StorageMode.FeedIn
+
+
+@pytest.mark.asyncio
+async def test_current_target_override_wins_even_without_schedule():
+    mod = _module()
+    assert mod.current_target(
+        NOW, None, mode_override=StorageMode.Discharge,
+    ) == StorageMode.Discharge

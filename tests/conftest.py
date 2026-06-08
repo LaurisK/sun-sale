@@ -54,6 +54,7 @@ _HA_MODULES = [
     "homeassistant.components.sensor",
     "homeassistant.components.switch",
     "homeassistant.components.number",
+    "homeassistant.components.select",
     "homeassistant.const",
     "homeassistant.data_entry_flow",
     "homeassistant.util",
@@ -161,6 +162,15 @@ _switch_mod.SwitchEntity = _SwitchEntityStub
 # Give number module shapes
 _number_mod = sys.modules["homeassistant.components.number"]
 _number_mod.NumberEntity = _NumberEntityStub
+
+
+class _SelectEntityStub:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+
+_select_mod = sys.modules["homeassistant.components.select"]
+_select_mod.SelectEntity = _SelectEntityStub
 
 
 class _NumberModeStub:
