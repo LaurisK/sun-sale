@@ -101,6 +101,18 @@ _SWITCH_SUFFIXES: dict[str, tuple[str, str]] = {
 }
 
 
+# Roles whose entity IDs must be ``number.*`` entities so that
+# ``InverterController._set_number`` can call ``number.set_value``.
+# The main resolution loop may pick a ``sensor.*`` readback entity first
+# (both domains share the same entity_id tail); the second pass in
+# ``resolve_solis_entities`` re-scans and overwrites with the number entity.
+_WRITABLE_ROLES: frozenset[str] = frozenset({
+    "battery_max_charge_current",
+    "battery_max_discharge_current",
+    "rc_setpoint",
+    "backflow_power",
+})
+
 # Roles that ``InverterController`` handles gracefully when their entity ID
 # is empty (the write is logged at debug-level and skipped — see
 # ``outbound/inverter.py`` class docstring). Listed here so the resolver
@@ -203,6 +215,25 @@ def resolve_solis_entities(hass: HomeAssistant, config_entry_id: str) -> dict[st
                 continue
             if uid.endswith(f"_{_REG_43110}_{bit}"):
                 result[role] = entity_id
+
+    # Second pass: for writable roles the first pass may have resolved a
+    # sensor.* readback entity (both domains share the same entity_id tail).
+    # Re-scan and override with the number.* entity so that
+    # InverterController._set_number can call number.set_value successfully.
+    for entry in er.async_entries_for_config_entry(registry, config_entry_id):
+        uid = entry.unique_id or ""
+        entity_id = entry.entity_id or ""
+        if not entity_id.startswith("number."):
+            continue
+        for role in _WRITABLE_ROLES:
+            suffix, tail = _SENSOR_SUFFIXES[role]
+            if _matches(uid, entity_id, suffix, tail):
+                if result.get(role, "").startswith("sensor."):
+                    _LOGGER.debug(
+                        "solis_modbus resolver: overriding %s with number entity %s",
+                        role, entity_id,
+                    )
+                    result[role] = entity_id
 
     all_roles = (
         set(_SENSOR_SUFFIXES) | set(_SWITCH_SUFFIXES) | set(_BIT_SWITCHES)
