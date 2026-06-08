@@ -30,7 +30,7 @@ from typing import Any, Callable
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.widgets import Collapsible, DataTable, Footer, Static
+from textual.widgets import Collapsible, DataTable, Footer, Sparkline, Static
 
 DEFAULT_HA_URL = "http://85.206.57.75:8124"
 DEFAULT_HA_TOKEN = (
@@ -1004,11 +1004,14 @@ def check_schedule(snap: Snapshot) -> ScheduleCheckResult:
         profit = s.get("expected_profit_eur") or 0.0
         computed_profit += profit
 
+        raw_soc = s.get("expected_soc_after")
+        soc_pct = round(raw_soc * 100.0, 1) if raw_soc is not None else None
         result.slot_rows.append({
             "start": start_str,
             "end": end_str,
             "mode": s.get("mode", ""),
             "power_kw": s.get("power_kw") or 0.0,
+            "soc_pct": soc_pct,
             "profit_eur": profit,
             "reason": s.get("reason", "") or "",
             "is_current": is_current,
@@ -4265,7 +4268,7 @@ class CalculationCheckWidget(Static):
 
 
 class ScheduleSlotsTable(Static):
-    """DataTable: Time | Mode | Power (kW) | Profit (€) | Reason."""
+    """DataTable: Time | Mode | SoC (%) | Power (kW) | Profit (€) | Reason."""
 
     DEFAULT_CSS = """
     ScheduleSlotsTable { height: auto; }
@@ -4276,7 +4279,7 @@ class ScheduleSlotsTable(Static):
         """Initialise with the schedule check result.
 
         Args:
-            sc: Result of check_schedule() containing per-slot mode and profit data.
+            sc: Result of check_schedule() containing per-slot mode, SoC, and profit data.
         """
         super().__init__()
         self._sc = sc
@@ -4288,7 +4291,7 @@ class ScheduleSlotsTable(Static):
     def on_mount(self) -> None:
         """Populate the DataTable with one row per schedule slot, date-separated."""
         table = self.query_one(DataTable)
-        table.add_columns("Time", "Mode", "Power (kW)", "Profit (€)", "Reason", "")
+        table.add_columns("Time", "Mode", "SoC (%)", "Power (kW)", "Profit (€)", "Reason", "")
         dim = "dim"
         prev_date = None
 
@@ -4303,8 +4306,8 @@ class ScheduleSlotsTable(Static):
 
             if cur_date is not None and cur_date != prev_date:
                 if prev_date is not None:
-                    table.add_row(*[Text("─", style=dim)] * 6)
-                table.add_row(Text(str(cur_date), style="bold"), *[""] * 5)
+                    table.add_row(*[Text("─", style=dim)] * 7)
+                table.add_row(Text(str(cur_date), style="bold"), *[""] * 6)
                 prev_date = cur_date
 
             is_current = row["is_current"]
@@ -4313,10 +4316,13 @@ class ScheduleSlotsTable(Static):
             profit_style = "green" if profit > 0 else ("red" if profit < 0 else dim)
             time_style = "bold cyan" if is_current else "cyan"
             prefix = "▶ " if is_current else "  "
+            soc = row.get("soc_pct")
+            soc_str = f"{soc:.1f}" if soc is not None else "—"
 
             table.add_row(
                 Text(prefix + time_str, style=time_style),
                 Text(row["mode"], style="bold" if is_current else ""),
+                Text(soc_str, style=dim),
                 Text(f"{row['power_kw']:.2f}", style=dim if row["power_kw"] == 0 else ""),
                 Text(f"{profit:+.4f}", style=profit_style),
                 Text(row["reason"][:40] if row["reason"] else "—", style=dim),
@@ -4466,8 +4472,44 @@ class InverterModeCheckWidget(Static):
                 yield InverterModeBandsTable(ic)
 
 
+class _SocSparkline(Static):
+    """Sparkline showing projected battery SoC across all schedule slots."""
+
+    DEFAULT_CSS = """
+    _SocSparkline { height: auto; }
+    _SocSparkline Sparkline { height: 5; }
+    """
+
+    def __init__(self, soc_values: list[float]) -> None:
+        """Initialise with a list of per-slot SoC values (0.0–1.0).
+
+        Args:
+            soc_values: Projected SoC at end of each schedule slot.
+        """
+        super().__init__()
+        self._soc_values = soc_values
+
+    def compose(self) -> ComposeResult:
+        """Yield a labelled Sparkline for the SoC series."""
+        if not self._soc_values:
+            yield Static("  (no SoC data)")
+            return
+        low = min(self._soc_values)
+        high = max(self._soc_values)
+        yield Static(
+            f"  SoC trajectory  low={low*100:.1f}%  high={high*100:.1f}%",
+            markup=False,
+        )
+        yield Sparkline(
+            self._soc_values,
+            summary_function=max,
+            min_color="red",
+            max_color="green",
+        )
+
+
 class ScheduleCheckWidget(Static):
-    """Collapsible schedule deep-check: per-slot actions, power, and profit."""
+    """Collapsible schedule deep-check: SoC trajectory chart, per-slot actions, power, and profit."""
 
     DEFAULT_CSS = "ScheduleCheckWidget { height: auto; }"
 
@@ -4481,7 +4523,7 @@ class ScheduleCheckWidget(Static):
         self._sc = sc
 
     def compose(self) -> ComposeResult:
-        """Render Slots sub-Collapsible with schedule data."""
+        """Render SoC chart and Slots sub-Collapsible with schedule data."""
         sc = self._sc
 
         if sc.skipped:
@@ -4505,6 +4547,12 @@ class ScheduleCheckWidget(Static):
                 f"  declared {sc.total_expected_profit_eur:+.4f}€",
                 markup=True,
             )
+            soc_values = [
+                r["soc_pct"] / 100.0
+                for r in sc.slot_rows
+                if r.get("soc_pct") is not None
+            ]
+            yield _SocSparkline(soc_values)
             with Collapsible(title="Slots", collapsed=False):
                 yield ScheduleSlotsTable(sc)
 
@@ -4632,6 +4680,7 @@ class IntegrationCheckApp(App):
     CalculationCheckWidget { height: auto; }
     CalculationSlotsTable DataTable { height: 22; }
     ScheduleCheckWidget { height: auto; }
+    _SocSparkline Sparkline { height: 5; }
     ScheduleSlotsTable DataTable { height: 18; }
     BatteryCheckWidget { height: auto; }
     _BatteryDataTable DataTable { height: 12; }

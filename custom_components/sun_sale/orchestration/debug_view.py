@@ -450,6 +450,7 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                         "end": s.end.isoformat(),
                         "mode": s.mode.value,
                         "power_kw": s.power_kw,
+                        "expected_soc_after": round(s.expected_soc_after, 4),
                         "expected_profit_eur": s.expected_profit_eur,
                         "reason": s.reason,
                     }

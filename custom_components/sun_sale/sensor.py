@@ -514,6 +514,7 @@ class DashboardSensor(_BaseSensor):
                     "t": int(s.start.timestamp() * 1000),
                     "end_t": int(s.end.timestamp() * 1000),
                     "mode": s.mode.value,
+                    "expected_soc_after": round(s.expected_soc_after, 3),
                 }
                 for s in schedule_obj.slots
             ]
