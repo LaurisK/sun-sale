@@ -728,7 +728,6 @@
       const errorSlots    = this._readForecastErrors(dashAttrs, windowStart, windowEnd);
 
       this._renderBatteryRow(dashAttrs);
-      this._renderProfileRow(dashAttrs);
       this._renderGenerationRow(dashAttrs);
 
       // Merge past history + future pricing sensor into continuous price lines.
