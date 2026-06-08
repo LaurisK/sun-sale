@@ -15,7 +15,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .contract.const import CONF_INVERTER_ENTITY_SOLAR_ENERGY, DOMAIN
+from .contract.const import (
+    CONF_INVERTER_ENTITY_BATTERY_SOC,
+    CONF_INVERTER_ENTITY_SOLAR_ENERGY,
+    DOMAIN,
+)
 from .orchestration.coordinator import SunSaleCoordinator
 from .contract.models import (
     BakedObservedHistory,
@@ -554,6 +558,7 @@ class DashboardSensor(_BaseSensor):
             "battery_power_kw": round(power_kw, 3) if power_kw is not None else None,
             "battery_state": battery_state,
             "solar_energy_entity_id": config.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, ""),
+            "battery_soc_entity_id": config.get(CONF_INVERTER_ENTITY_BATTERY_SOC, ""),
             "forecast_quality": forecast_quality_data,
             "forecast_daily_kwh": forecast_daily_kwh,
             "actual_yesterday_kwh": round(observed.total_yesterday_kwh, 3) if observed else None,

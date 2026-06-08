@@ -616,10 +616,12 @@
 
     // ── Data: history API — past buy/sell prices + solar actual ───────────────
 
-    async _fetchHistory(windowStartMs) {
+    async _fetchHistory(windowStartMs, socEntityId) {
       const start    = new Date(windowStartMs).toISOString();
       const end      = new Date().toISOString();
-      const entities = [BUY_PRICE_ENTITY, SELL_PRICE_ENTITY].join(',');
+      const entityList = [BUY_PRICE_ENTITY, SELL_PRICE_ENTITY];
+      if (socEntityId) entityList.push(socEntityId);
+      const entities = entityList.join(',');
       const url      = `/api/history/period/${start}?end_time=${end}`
         + `&filter_entity_id=${entities}&minimal_response=true&no_attributes=true`;
       try {
@@ -637,13 +639,33 @@
             .filter(([, v]) => isFinite(v));
         }
         return {
-          buyPrice:  indexed[BUY_PRICE_ENTITY]  || [],
-          sellPrice: indexed[SELL_PRICE_ENTITY] || [],
+          buyPrice:   indexed[BUY_PRICE_ENTITY]  || [],
+          sellPrice:  indexed[SELL_PRICE_ENTITY] || [],
+          socHistory: socEntityId ? (indexed[socEntityId] || []) : [],
         };
       } catch (e) {
         console.warn('sunSale: history fetch failed', e);
-        return { buyPrice: [], sellPrice: [] };
+        return { buyPrice: [], sellPrice: [], socHistory: [] };
       }
+    }
+
+    // ── Data: SOC forecast from schedule plan ─────────────────────────────────
+    // Returns [[timestamp_ms, soc_pct]] points: current SOC at nowTs, then
+    // the expected SOC after each future plan slot.
+
+    _buildSocForecast(dashAttrs) {
+      const nowMs      = Number(dashAttrs?.now_ts) || Date.now();
+      const currentSoc = dashAttrs?.battery_soc_pct;
+      const plan       = Array.isArray(dashAttrs?.inverter_mode_plan)
+        ? dashAttrs.inverter_mode_plan : [];
+      const points = [];
+      if (currentSoc != null) points.push([nowMs, currentSoc]);
+      for (const slot of plan) {
+        if (slot.end_t > nowMs && slot.expected_soc_after != null) {
+          points.push([slot.end_t, Math.round(slot.expected_soc_after * 1000) / 10]);
+        }
+      }
+      return points.sort((a, b) => a[0] - b[0]);
     }
 
     // ── Data: buy/sell prices from pricing pipeline sensor (all slots) ────────
@@ -721,11 +743,14 @@
       const windowEnd   = localMidnight(2) - 60_000; // tomorrow 23:59 local
       const SLOT_MS     = 15 * 60 * 1000;
 
-      const history       = await this._fetchHistory(windowStart);
-      const pricingSlots  = this._readPricingSlots(windowEnd);
       const dashAttrs     = this._hass.states[DASHBOARD_ENTITY]?.attributes;
+      const socEntityId   = dashAttrs?.battery_soc_entity_id || '';
+      const history       = await this._fetchHistory(windowStart, socEntityId);
+      const pricingSlots  = this._readPricingSlots(windowEnd);
       const forecastSlots = this._buildForecastSlots(dashAttrs, windowStart, windowEnd);
-      const errorSlots    = this._readForecastErrors(dashAttrs, windowStart, windowEnd);
+      const errorSlots      = this._readForecastErrors(dashAttrs, windowStart, windowEnd);
+      const socHistoryData  = history.socHistory.filter(([t]) => t >= windowStart && t <= now);
+      const socForecastData = this._buildSocForecast(dashAttrs);
 
       this._renderBatteryRow(dashAttrs);
       this._renderGenerationRow(dashAttrs);
@@ -838,6 +863,25 @@
       const billingBySlot     = new Map(billingData.map(p => [p.x, p]));
       const importBySlot      = new Map(importData.map(p => [p.x, p]));
       const exportBySlot      = new Map(exportData.map(p => [p.x, p]));
+      // SOC history is state-change events; use stepline lookup (same as prices).
+      const findSocAt = (xMs) => {
+        const d = socHistoryData;
+        if (!d.length || xMs < d[0][0]) return null;
+        let lo = 0, hi = d.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >>> 1;
+          if (d[mid][0] <= xMs) lo = mid;
+          else hi = mid - 1;
+        }
+        return d[lo];
+      };
+      // SOC forecast: sorted points — find the closest future point for a given x.
+      const findSocForecastAt = (xMs) => {
+        for (const pt of socForecastData) {
+          if (pt[0] >= xMs) return pt;
+        }
+        return null;
+      };
 
       // Stepline binary search: prices are sparse, so we interpolate by holding
       // the last value whose timestamp ≤ x (stepline 'end' semantics).
@@ -1043,6 +1087,26 @@
           silent:     true,
           z:          6,
         },
+        {
+          name:       'Battery SOC',
+          type:       'line',
+          yAxisIndex: 4,
+          showSymbol: false,
+          lineStyle:  { color: '#4db6ac', width: 2 },
+          itemStyle:  { color: '#4db6ac' },
+          data:       socHistoryData,
+          z:          3,
+        },
+        {
+          name:       'SOC forecast',
+          type:       'line',
+          yAxisIndex: 4,
+          showSymbol: false,
+          lineStyle:  { color: '#4db6ac', width: 2, type: 'dashed' },
+          itemStyle:  { color: '#4db6ac' },
+          data:       socForecastData,
+          z:          3,
+        },
       ];
 
       const option = {
@@ -1060,7 +1124,7 @@
         legend: {
           show:        true,
           textStyle:   { color: '#aaa' },
-          data:        ['Solar forecast', 'Buy price', 'Sell price', 'Net billing', 'Grid import', 'Grid export'],
+          data:        ['Solar forecast', 'Buy price', 'Sell price', 'Net billing', 'Grid import', 'Grid export', 'Battery SOC', 'SOC forecast'],
           top:         5,
         },
         xAxis: {
@@ -1122,6 +1186,7 @@
           },
           { type: 'value', position: 'right', show: false },
           { type: 'value', position: 'right', show: false },
+          { type: 'value', position: 'right', show: false, min: 0, max: 100 },
         ],
         dataZoom: [
           { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
@@ -1213,6 +1278,14 @@
               const dotColor = STORAGE_MODE_DOT[modeAt.mode] || '#9e9e9e';
               const label    = STORAGE_MODE_LABEL[modeAt.mode] || modeAt.mode;
               lines.push(`<div>${sq(dotColor)} Inverter mode: <strong>${label}</strong></div>`);
+            }
+
+            if (xMs <= now) {
+              const socPt = findSocAt(xMs);
+              if (socPt) lines.push(`<div>${dot('#4db6ac')} Battery SOC: <strong>${socPt[1].toFixed(1)}</strong>%</div>`);
+            } else {
+              const socFcPt = findSocForecastAt(xMs);
+              if (socFcPt) lines.push(`<div>${dot('#4db6ac')} SOC forecast: <strong>${socFcPt[1].toFixed(1)}</strong>%</div>`);
             }
 
             if (!lines.length) return '';
