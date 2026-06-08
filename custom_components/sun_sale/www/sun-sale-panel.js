@@ -273,6 +273,8 @@
             font-size: 0.85rem;
             color: var(--primary-text-color, #fff);
           }
+          .sched-row.sched-row-stacked { flex-wrap: wrap; }
+          .sched-row.sched-row-stacked .sched-readout { flex: 1 0 100%; }
           .sched-row .sched-label {
             color: var(--secondary-text-color, #bbb);
             flex: 1 1 auto;
@@ -334,6 +336,29 @@
           .sched-num .sched-unit {
             color: var(--secondary-text-color, #888);
             font-size: 0.75rem;
+          }
+          .sched-select select {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--primary-text-color, #fff);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-family: inherit;
+            font-size: 0.85rem;
+            min-width: 140px;
+          }
+          .sched-select select:focus { outline: 1px solid #42a5f5; outline-offset: -1px; }
+          .sched-select select:disabled { opacity: 0.4; cursor: not-allowed; }
+          .sched-readout {
+            margin-top: 4px;
+            font-size: 0.78rem;
+            color: var(--secondary-text-color, #888);
+            word-break: break-all;
+            font-family: ui-monospace, "SF Mono", Menlo, monospace;
+          }
+          .sched-readout .sched-readout-label {
+            color: var(--secondary-text-color, #666);
+            margin-right: 4px;
           }
         </style>
         <div id="card">
@@ -461,6 +486,13 @@
       { key: 'max_discharge_to_grid',  label: 'Max discharge to grid',  match: ['max_discharge_to_grid'], unit: 'kW' },
     ];
 
+    _SCHEDULE_SELECTS = [
+      { key: 'mode_override', label: 'Mode override', match: ['mode_override'],
+        // Sensor that shows the observed inverter state next to the override.
+        readout_sensor_match: ['observed_inverter_mode'],
+        readout_label: 'Observed' },
+    ];
+
     _findEntityId(domain, matchAll) {
       if (!this._hass?.states) return null;
       const prefix = `${domain}.sunsale_`;
@@ -523,7 +555,40 @@
         </div>`;
       };
 
+      const selectRow = (spec) => {
+        const eid = this._findEntityId('select', spec.match);
+        if (!eid) {
+          return `<div class="sched-row sched-row-stacked" data-spec="${spec.key}">
+            <span class="sched-missing">entity not found</span>
+            <span class="sched-label">${spec.label}</span>
+          </div>`;
+        }
+        const st = this._hass.states[eid];
+        const options = Array.isArray(st?.attributes?.options) ? st.attributes.options : [];
+        const current = st?.state ?? '';
+        const unavailable = !st || st.state === 'unavailable';
+        const optsHtml = options.map(opt =>
+          `<option value="${opt}" ${opt === current ? 'selected' : ''}>${opt}</option>`
+        ).join('');
+        const readout = this._renderReadout(spec);
+        return `<div class="sched-row sched-row-stacked" data-spec="${spec.key}">
+          <span class="sched-select">
+            <select data-eid="${eid}" data-kind="select" ${unavailable ? 'disabled' : ''}>
+              ${optsHtml}
+            </select>
+          </span>
+          <span class="sched-label" title="${eid}">${spec.label}</span>
+          ${readout}
+        </div>`;
+      };
+
       panel.innerHTML = `
+        <div class="sched-section">
+          <div class="sched-section-title">Mode override</div>
+          <div class="sched-grid">
+            ${this._SCHEDULE_SELECTS.map(selectRow).join('')}
+          </div>
+        </div>
         <div class="sched-section">
           <div class="sched-section-title">Policy switches</div>
           <div class="sched-grid">
@@ -544,6 +609,24 @@
       panel.querySelectorAll('input[data-kind="number"]').forEach((el) => {
         el.addEventListener('change', () => this._onNumberChange(el));
       });
+      panel.querySelectorAll('select[data-kind="select"]').forEach((el) => {
+        el.addEventListener('change', () => this._onSelectChange(el));
+      });
+    }
+
+    _renderReadout(spec) {
+      // Look up the companion sensor that backs a select's "Observed: ..." line.
+      // Returns an empty string when no sensor is configured for this spec or
+      // when the entity hasn't been published yet.
+      if (!spec.readout_sensor_match) return '';
+      const sid = this._findEntityId('sensor', spec.readout_sensor_match);
+      if (!sid) return '';
+      const st = this._hass.states[sid];
+      const value = st?.state ?? 'unavailable';
+      const label = spec.readout_label || 'Observed';
+      return `<div class="sched-readout" data-readout-eid="${sid}">
+        <span class="sched-readout-label">${label}:</span><span class="sched-readout-value">${value}</span>
+      </div>`;
     }
 
     _syncScheduleDrawer() {
@@ -553,7 +636,9 @@
       const panel = this.shadowRoot.querySelector('#schedule-panel');
       if (!panel) return;
       const expected =
-        this._SCHEDULE_SWITCHES.length + this._SCHEDULE_NUMBERS.length;
+        this._SCHEDULE_SWITCHES.length +
+        this._SCHEDULE_NUMBERS.length +
+        this._SCHEDULE_SELECTS.length;
       const rows = panel.querySelectorAll('.sched-row');
       if (rows.length !== expected) { this._renderScheduleDrawer(); return; }
 
@@ -572,6 +657,18 @@
         const unavailable = st.state === 'unavailable' || st.state === 'unknown';
         el.disabled = unavailable;
         if (!unavailable) el.value = st.state;
+      });
+      panel.querySelectorAll('select[data-kind="select"]').forEach((el) => {
+        if (el === active) return;
+        const st = this._hass.states[el.dataset.eid];
+        if (!st) return;
+        el.disabled = st.state === 'unavailable';
+        if (st.state !== 'unavailable' && el.value !== st.state) el.value = st.state;
+      });
+      panel.querySelectorAll('.sched-readout').forEach((el) => {
+        const st = this._hass.states[el.dataset.readoutEid];
+        const valueEl = el.querySelector('.sched-readout-value');
+        if (valueEl) valueEl.textContent = st?.state ?? 'unavailable';
       });
     }
 
@@ -601,6 +698,20 @@
         await this._hass.callService('number', 'set_value', { entity_id: eid, value });
       } catch (e) {
         console.warn('sunSale: number service call failed', eid, e);
+      }
+    }
+
+    async _onSelectChange(el) {
+      const eid = el.dataset.eid;
+      const previous = el.dataset.lastOption ?? '';
+      const option = el.value;
+      try {
+        await this._hass.callService('select', 'select_option', { entity_id: eid, option });
+        el.dataset.lastOption = option;
+      } catch (e) {
+        console.warn('sunSale: select service call failed', eid, e);
+        // Revert visual state — HA push will re-sync on next update.
+        if (previous) el.value = previous;
       }
     }
 
