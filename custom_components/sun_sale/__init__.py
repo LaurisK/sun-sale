@@ -7,7 +7,8 @@ from pathlib import Path
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .contract.const import DOMAIN
@@ -55,6 +56,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+
+    if not hass.is_running:
+        @callback
+        def _on_ha_started(_event) -> None:
+            """Refresh once HA finishes starting so solar forecast entity has its watts attribute."""
+            hass.async_create_task(coordinator.async_request_refresh())
+
+        entry.async_on_unload(
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
+        )
 
     if not hass.data.get(_DEBUG_VIEW_KEY):
         hass.http.register_view(SunSaleDebugView())
