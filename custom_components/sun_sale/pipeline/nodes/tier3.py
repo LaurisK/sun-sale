@@ -4,16 +4,13 @@ from __future__ import annotations
 import logging
 
 from .. import calculation
-from .. import charging_profile as charging_profile_module
 from .. import forecast_accuracy
 from .. import monthly_bill as monthly_bill_module
 from ..dag_engine import DagNode, NodeContext
 from ...contract.events import ControlEvent
 from ...contract.models import (
     BatteryState,
-    BatteryStatus,
     CalculationResult,
-    ChargingProfile,
     ForecastAccuracyResult,
     ForecastQualityStore,
     GenerationSeries,
@@ -26,30 +23,6 @@ from ...contract.models import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class ChargingProfileNode(DagNode):
-    """Decide per-slot disposition of today's remaining solar → ChargingProfile."""
-
-    tier = 3
-    output_type = ChargingProfile
-    consumes = [BatteryStatus, GenerationSeries, PriceSeries]
-
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[ChargingProfile, list[ControlEvent]]:
-        """Decide per-slot solar disposition for today's remaining generation."""
-        status = ctx.require(BatteryStatus)
-        generation = ctx.require(GenerationSeries)
-        prices = ctx.require(PriceSeries)
-        profile = charging_profile_module.build_charging_profile(
-            battery_status=status,
-            generation=generation,
-            prices=prices,
-            battery_config=ctx.config.battery,
-            now=ctx.now,
-        )
-        return profile, []
 
 
 class ForecastAccuracyNode(DagNode):

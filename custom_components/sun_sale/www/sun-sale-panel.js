@@ -4,7 +4,7 @@
  *   Compact text pills — 8 days: yesterday → +6 days.
  *   Yesterday/Today show predicted / actual (today also shows remaining-forecast).
  *   Future days show predicted only. Data: forecast_daily_kwh,
- *   actual_yesterday_kwh, actual_today_kwh, charging_profile_summary.
+ *   actual_yesterday_kwh, actual_today_kwh.
  *
  * 72-hour window: yesterday 00:00 → tomorrow 23:59 (local)
  *
@@ -13,13 +13,7 @@
  *   Sell price  coral  solid stepline  — past history + future from pricing sensor (one continuous line)
  *
  * Right Y axis — kWh/slot (15-min):
- *   Solar forecast — vertical bar per 15-min slot (scalar y = forecast_kwh).
- *                    Past + non-today-future slots: grey 25 % opacity.
- *                    Today's remaining slots: per-bar colour from
- *                    charging_profile_slots:
- *                      blue   SOLAR_CHARGE  — going to battery
- *                      amber  SELL          — exporting for €
- *                      red    NO_EXPORT     — curtailed (sell ≤ 0)
+ *   Solar forecast — vertical bar per 15-min slot (scalar y = forecast_kwh), grey 25 % opacity.
  *
  *   Forecast-vs-observed error overlay — green/red rect per slot, anchored
  *   at the top of the forecast bar (y = forecast_kwh):
@@ -28,12 +22,6 @@
  *   Rendered as an ECharts custom series so it survives zoom/pan natively.
  *
  * Overlays:
- *   Translucent bands  ChargingProfile mode windows (today's remaining slots):
- *                        blue   SOLAR_CHARGE
- *                        amber  SELL
- *                        red    NO_EXPORT
- *                      Bands carry no inline text — the colour-coded pills
- *                      in the profile row above the chart act as the legend.
  *   Dashed white line "Now"
  *   Dashed grey line  y = 0 price reference
  */
@@ -93,7 +81,6 @@
       } else {
         const dashAttrs = hass.states[DASHBOARD_ENTITY]?.attributes;
         this._renderBatteryRow(dashAttrs);
-        this._renderProfileRow(dashAttrs);
         this._renderGenerationRow(dashAttrs);
         const panel = this.shadowRoot?.querySelector('#schedule-panel');
         if (panel?.classList.contains('open')) this._syncScheduleDrawer();
@@ -164,31 +151,6 @@
             font-size: 0.75rem;
             color: var(--secondary-text-color, #888);
           }
-          #profile {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 8px;
-            margin: 0 0 12px;
-            font-size: 0.85rem;
-            color: var(--primary-text-color, #fff);
-          }
-          #profile .label { color: var(--secondary-text-color, #888); }
-          #profile .value { font-weight: 600; }
-          #profile .sep { color: var(--secondary-text-color, #444); }
-          #profile .pill {
-            display: inline-flex;
-            align-items: baseline;
-            gap: 6px;
-            padding: 3px 8px;
-            border-radius: 4px;
-            border-left: 3px solid;
-            line-height: 1.3;
-          }
-          #profile .pill .value { font-weight: 600; }
-          #profile .pill.charge  { background: rgba(66, 165, 245, 0.16); border-left-color: #42a5f5; }
-          #profile .pill.sell    { background: rgba(255, 179, 0, 0.16);  border-left-color: #ffb300; }
-          #profile .pill.curtail { background: rgba(229, 57, 53, 0.16);  border-left-color: #e53935; }
           #generation {
             display: flex;
             flex-wrap: wrap;
@@ -386,7 +348,6 @@
           </div>
           <div id="schedule-panel"></div>
           <div id="battery"></div>
-          <div id="profile"></div>
           <div id="generation"></div>
           <div id="status">Loading…</div>
           <div id="chart"></div>
@@ -428,32 +389,6 @@
       `;
     }
 
-    _renderProfileRow(dashAttrs) {
-      const el = this.shadowRoot.querySelector('#profile');
-      if (!el) return;
-      const sum = dashAttrs?.charging_profile_summary;
-      if (!sum) { el.innerHTML = ''; return; }
-
-      const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
-      const remaining = fmt(sum.today_remaining_generation_kwh);
-      const free      = fmt(sum.free_capacity_kwh);
-      const charge    = fmt(sum.allocated_solar_kwh);
-      const sell      = fmt(sum.total_sell_kwh);
-      const curtail   = fmt(sum.total_no_export_kwh);
-
-      el.innerHTML = `
-        <span class="label">Today remaining:</span>
-        <span class="value">${remaining} kWh</span>
-        <span class="sep">·</span>
-        <span class="label">Free capacity:</span>
-        <span class="value">${free} kWh</span>
-        <span class="sep">→</span>
-        <span class="pill charge">Battery <span class="value">${charge}</span> kWh</span>
-        <span class="pill sell">Sell <span class="value">${sell}</span> kWh</span>
-        <span class="pill curtail">Curtail <span class="value">${curtail}</span> kWh</span>
-      `;
-    }
-
     _renderGenerationRow(dashAttrs) {
       const el = this.shadowRoot.querySelector('#generation');
       if (!el) return;
@@ -463,7 +398,6 @@
       if (!daily) { el.innerHTML = ''; return; }
 
       const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
-      const remainingToday = dashAttrs.charging_profile_summary?.today_remaining_generation_kwh;
 
       const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const OFFSETS   = [-1, 0, 1, 2, 3, 4, 5, 6];
@@ -492,11 +426,7 @@
                 +  `<span class="unit">kWh</span>`;
         } else if (off === 0) {
           const actual = dashAttrs.actual_today_kwh;
-          let predCell = `<span class="pred">${predTxt}</span>`;
-          if (typeof remainingToday === 'number') {
-            predCell += `<span class="remain">(${fmt(remainingToday)} rem)</span>`;
-          }
-          inner += predCell
+          inner += `<span class="pred">${predTxt}</span>`
                 +  `<span class="sep">/</span>`
                 +  `<span class="actual">${fmt(actual)}</span>`
                 +  `<span class="unit">kWh</span>`;
@@ -748,24 +678,6 @@
       return slots;
     }
 
-    // ── Data: per-slot charging-profile disposition from dashboard sensor ─────
-    // Returns Map<slotStartMs, { mode, expected_kwh, sell_eur_kwh }>.
-    // Only today's remaining slots are present (backend convention).
-
-    _readChargingProfile(dashAttrs) {
-      const slots = new Map();
-      if (!Array.isArray(dashAttrs?.charging_profile_slots)) return slots;
-      for (const s of dashAttrs.charging_profile_slots) {
-        if (typeof s?.t !== 'number' || typeof s.mode !== 'string') continue;
-        slots.set(s.t, {
-          mode:          s.mode,
-          expected_kwh:  Number(s.expected_kwh)  || 0,
-          sell_eur_kwh:  Number(s.sell_eur_kwh)  || 0,
-        });
-      }
-      return slots;
-    }
-
     // ── Data: per-slot forecast accuracy from dashboard sensor ────────────────
     // Returns [{x, forecastKwh, errorKwh}] for slots inside the window with a
     // non-zero error. error_kwh = observed_kwh - forecast_kwh.
@@ -813,7 +725,6 @@
       const pricingSlots  = this._readPricingSlots(windowEnd);
       const dashAttrs     = this._hass.states[DASHBOARD_ENTITY]?.attributes;
       const forecastSlots = this._buildForecastSlots(dashAttrs, windowStart, windowEnd);
-      const profileSlots  = this._readChargingProfile(dashAttrs);
       const errorSlots    = this._readForecastErrors(dashAttrs, windowStart, windowEnd);
 
       this._renderBatteryRow(dashAttrs);
@@ -837,53 +748,19 @@
         return;
       }
 
-      // Single forecast bar per slot. Per-point colour by charging-profile mode
-      // for today's remaining slots; grey 25 % opacity everywhere else.
       const GREY_BAR = 'rgba(158,158,158,0.25)';
-      const MODE_COLORS = {
-        solar_charge: '#42a5f5',
-        sell:         '#ffb300',
-        no_export:    '#e53935',
-      };
-
       const forecastBars = [];
       let t = Math.floor(windowStart / SLOT_MS) * SLOT_MS;
       while (t <= windowEnd) {
         const fKwh = forecastSlots.get(t);
         if (fKwh != null && fKwh > 0.001) {
-          const prof  = profileSlots.get(t);
-          const color = (prof && MODE_COLORS[prof.mode]) || GREY_BAR;
-          forecastBars.push({ x: t, y: fKwh, color });
+          forecastBars.push({ x: t, y: fKwh, color: GREY_BAR });
         }
         t += SLOT_MS;
       }
 
       this._clearStatus();
       if (this._chart) { this._chart.dispose(); this._chart = null; }
-
-      // Translucent bands grouping contiguous ChargingProfile-mode slots.
-      // Legend lives in the pill row above the chart — no inline label here.
-      const MODE_BAND_FILL = {
-        solar_charge: 'rgba(66, 165, 245, 0.12)',
-        sell:         'rgba(255, 179, 0, 0.10)',
-        no_export:    'rgba(229, 57, 53, 0.14)',
-      };
-      const profileBands = [];
-      {
-        const sorted = [...profileSlots.entries()]
-          .filter(([, p]) => MODE_BAND_FILL[p.mode])
-          .sort((a, b) => a[0] - b[0]);
-        let run = null;
-        for (const [slotT, prof] of sorted) {
-          if (run && prof.mode === run.mode && slotT === run.x2) {
-            run.x2 = slotT + SLOT_MS;
-            continue;
-          }
-          if (run) profileBands.push(run);
-          run = { mode: prof.mode, x: slotT, x2: slotT + SLOT_MS };
-        }
-        if (run) profileBands.push(run);
-      }
 
       // ─── Inverter StorageMode bands (history yesterday→now + plan today→tomorrow).
       // History entries from inverter_mode_history are {t, mode} change events;
@@ -926,26 +803,12 @@
         }
       }
 
-      // markArea data: one entry per ChargingProfile band (today's solar-disposition
-      // mode). StorageMode history/plan bands live in the dedicated top strip
-      // (renderModeStripBlock) instead — drawing them as full-height markAreas as
-      // well would double the visual noise without adding information.
-      const allBandAreas = profileBands.map(b => [
-        { xAxis: b.x, itemStyle: { color: MODE_BAND_FILL[b.mode] } },
-        { xAxis: b.x2 },
-      ]);
-
       const STORAGE_MODE_LABEL = {
         feed_in: 'Feed-in', self_use: 'Self-use', no_export: 'No export',
         discharge: 'Discharge', grid_charge: 'Grid charge', stand_by: 'Standby',
         auto: 'Auto', track: 'Track', unknown: 'Unknown',
       };
       const STORAGE_MODE_DOT = STORAGE_MODE_STRIP;
-      const PROFILE_MODE_LABEL = {
-        solar_charge: 'battery',
-        sell:         'sell',
-        no_export:    'curtail',
-      };
 
       const billingData = this._buildBillingSeries(windowStart, now);
       const { imported: importData, exported: exportData } =
@@ -1084,7 +947,6 @@
           data:       forecastBars.map(b => [b.x + SLOT_MS / 2, b.y]),
           itemStyle:  { color: GREY_BAR },   // legend swatch fallback
           z:          2,
-          markArea:   { silent: true, data: allBandAreas },
           markLine:   {
             symbol: 'none',
             silent: true,
@@ -1320,16 +1182,7 @@
 
             const fBar = forecastBarBySlot.get(slotT);
             if (fBar) {
-              const prof = profileSlots.get(slotT);
-              let line = `<div>${dot(fBar.color)} Solar forecast: <strong>${fBar.y.toFixed(3)}</strong> kWh`;
-              if (prof) {
-                if (prof.mode === 'sell') {
-                  line += ` → sell @ ${prof.sell_eur_kwh.toFixed(3)} €/kWh`;
-                } else if (PROFILE_MODE_LABEL[prof.mode]) {
-                  line += ` → ${PROFILE_MODE_LABEL[prof.mode]}`;
-                }
-              }
-              line += '</div>';
+              const line = `<div>${dot(fBar.color)} Solar forecast: <strong>${fBar.y.toFixed(3)}</strong> kWh</div>`;
               lines.push(line);
             }
 

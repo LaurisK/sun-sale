@@ -10,7 +10,6 @@ from ...contract.models import (
     BaseLoadProfile,
     BatteryState,
     CalculationResult,
-    ChargingProfile,
     DegradationCost,
     GenerationSeries,
     InverterModeReading,
@@ -28,9 +27,7 @@ class ScheduleNode(DagNode):
 
     Consumes the BaseLoadProfile so the DP's per-slot physics accounts for
     household draw (slot_physics.simulate_slot uses it to model
-    battery-discharge-for-load and AC deficit/surplus). ChargingProfile is
-    listed for tier-ordering only — the DP does not consume it; mode choice
-    is driven by simulate_slot outcomes.
+    battery-discharge-for-load and AC deficit/surplus).
     """
 
     tier = 4
@@ -42,7 +39,6 @@ class ScheduleNode(DagNode):
         BatteryState,
         DegradationCost,
         BaseLoadProfile,
-        ChargingProfile,
         SchedulePolicy,
     ]
 
@@ -55,9 +51,8 @@ class ScheduleNode(DagNode):
         battery_state = ctx.require(BatteryState)
         deg_cost = ctx.require(DegradationCost)
         base_load_profile = ctx.require(BaseLoadProfile)
-        # GenerationSeries and ChargingProfile are consumed for tier-ordering only.
+        # GenerationSeries is consumed for tier-ordering only.
         ctx.get(GenerationSeries)
-        ctx.get(ChargingProfile)
         # Optional inputs — schedule still runs without them.
         profit_score = ctx.get(ProfitabilityScore)
         mode_reading = ctx.get(InverterModeReading)

@@ -532,48 +532,6 @@ def test_current_mode_prevents_first_slot_penalty():
     )
 
 
-def test_charging_profile_argument_is_accepted_but_ignored():
-    """The DP does not consume ChargingProfile; passing one must not error."""
-    from custom_components.sun_sale.contract.models import (
-        ChargeMode,
-        ChargingProfile,
-        ChargingProfileSlot,
-    )
-
-    prices = [make_price(h, 0.10) for h in range(4)]
-    solar = [make_solar(2, 2.0)]
-    bc = default_battery_config()
-    tc = default_tariff_config()
-    state = default_battery_state(0.50)
-    state.estimated_capacity_kwh = bc.nominal_capacity_kwh
-    deg = degradation_cost_per_kwh(bc, state)
-    ps = build_price_series(prices, tc, now=NOW)
-    gen = _make_gen_series(solar)
-    calc = calculate(ps, gen, state, NOW)
-    solar_start = solar[0].start
-    profile = ChargingProfile(
-        slots=(
-            ChargingProfileSlot(
-                start=solar_start,
-                end=solar_start + timedelta(hours=1),
-                mode=ChargeMode.NO_EXPORT,
-                expected_kwh=2.0,
-                sell_eur_kwh=-0.01,
-            ),
-        ),
-        free_capacity_kwh=5.0,
-        today_remaining_generation_kwh=2.0,
-        solar_exceeds_capacity=False,
-        allocated_solar_kwh=2.0,
-        total_no_export_kwh=2.0,
-        computed_at=NOW,
-    )
-
-    # Should run without error and produce a schedule of the right size.
-    result = optimize_schedule(ps, calc, bc, state, deg, NOW, charging_profile=profile)
-    assert len(result.slots) == len(ps.slots)
-
-
 # ---------------------------------------------------------------------------
 # Policy flags — use_standby / allow_grid_charging
 # ---------------------------------------------------------------------------

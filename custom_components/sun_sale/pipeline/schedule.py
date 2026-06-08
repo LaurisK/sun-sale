@@ -37,7 +37,6 @@ from ..contract.models import (
     BatteryConfig,
     BatteryState,
     CalculationResult,
-    ChargingProfile,
     PriceSeries,
     PriceSlot,
     ProfitabilityScore,
@@ -93,7 +92,6 @@ def optimize_schedule(
     now: datetime,
     base_load_profile: BaseLoadProfile | None = None,
     local_tz: tzinfo | None = None,
-    charging_profile: ChargingProfile | None = None,
     export_limit_kw: float | None = None,
     profitability_score: ProfitabilityScore | None = None,
     current_mode: StorageMode | None = None,
@@ -119,9 +117,6 @@ def optimize_schedule(
             when ``None`` baseload is treated as 0 for every slot.
         local_tz: Local timezone used to map slot timestamps to baseload-profile
             buckets; required when ``base_load_profile`` is provided.
-        charging_profile: Accepted for back-compat — the DP picks mode directly
-            from slot physics, so this argument is ignored. ChargingProfile is
-            kept as a separate node that builds the dashboard mode-bands view.
         export_limit_kw: Deployment-wide export cap in kW; ``None`` for uncapped.
         profitability_score: Today's day-class-normalised peak percentile; tilts
             the terminal value of end-of-horizon SoC. ``None`` (cold start)
@@ -154,8 +149,6 @@ def optimize_schedule(
     Returns:
         Schedule with one ScheduleSlot per future price slot.
     """
-    del charging_profile    # accepted for back-compat; DP does not consume it.
-
     if not price_series.slots:
         return _empty_schedule(degradation_cost, now)
 

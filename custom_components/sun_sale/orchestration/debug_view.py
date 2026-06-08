@@ -73,7 +73,6 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
     snapshot_history = data.get("counter_snapshot_history")
     observed_gen = data.get("observed_generation")
     forecast_err = data.get("forecast_error")
-    charging_prof = data.get("charging_profile")
     base_load_prof = data.get("base_load_profile")
     batt_status = data.get("battery_status")
     batt_runtime = data.get("battery_runtime")
@@ -343,24 +342,6 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                     for s in forecast_err.slots
                 ],
             } if forecast_err is not None else None,
-            "charging_profile": {
-                "slot_count": len(charging_prof.slots),
-                "free_capacity_kwh": round(charging_prof.free_capacity_kwh, 4),
-                "today_remaining_generation_kwh": round(charging_prof.today_remaining_generation_kwh, 4),
-                "solar_exceeds_capacity": charging_prof.solar_exceeds_capacity,
-                "allocated_solar_kwh": round(charging_prof.allocated_solar_kwh, 4),
-                "total_no_export_kwh": round(charging_prof.total_no_export_kwh, 4),
-                "computed_at": charging_prof.computed_at.isoformat(),
-                "slots": [
-                    {
-                        "start": s.start.isoformat(),
-                        "mode": s.mode.value,
-                        "expected_kwh": round(s.expected_kwh, 4),
-                        "sell_eur_kwh": round(s.sell_eur_kwh, 4),
-                    }
-                    for s in charging_prof.slots
-                ],
-            } if charging_prof is not None else None,
             "base_load_profile": {
                 "fallback_kw": round(base_load_prof.fallback_kw, 4),
                 "overall_p10_kw": round(base_load_prof.overall_p10_kw, 4),

@@ -8,7 +8,7 @@ Tier map:
   T1: PricingNode, BatteryStateNode, BatteryStatusNode, BaseLoadProfileNode
   T2: GenerationNode, ObservedGenerationNode, ObservedGridNode, DegradationNode,
       BatteryRuntimeNode, ProfitabilityNode
-  T3: ChargingProfileNode, ForecastAccuracyNode, LockoutNode, MonthlyBillNode
+  T3: ForecastAccuracyNode, LockoutNode, MonthlyBillNode
   T4: ScheduleNode
 """
 from .tier1 import (
@@ -28,7 +28,6 @@ from .tier2 import (
     ProfitabilityNode,
 )
 from .tier3 import (
-    ChargingProfileNode,
     ForecastAccuracyNode,
     LockoutNode,
     MonthlyBillNode,
@@ -40,7 +39,6 @@ __all__ = [
     "BatteryRuntimeNode",
     "BatteryStateNode",
     "BatteryStatusNode",
-    "ChargingProfileNode",
     "DegradationNode",
     "ForecastAccuracyNode",
     "GenerationNode",

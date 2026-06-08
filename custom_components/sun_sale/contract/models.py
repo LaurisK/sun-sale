@@ -141,36 +141,6 @@ class SchedulePolicy:
     max_discharge_to_grid_kw: float | None = None  # None → hardware max
 
 
-class ChargeMode(Enum):
-    """Per-slot disposition of today's remaining solar generation."""
-    SOLAR_CHARGE = "solar_charge"   # store solar in battery
-    SELL = "sell"                    # export to grid (sell_eur_kwh > 0)
-    NO_EXPORT = "no_export"          # excess solar but sell_eur_kwh <= 0 → curtail
-    IDLE = "idle"                    # no generation this slot
-
-
-@dataclass(frozen=True)
-class ChargingProfileSlot:
-    """One slot of today's charging profile."""
-    start: datetime
-    end: datetime
-    mode: ChargeMode
-    expected_kwh: float
-    sell_eur_kwh: float          # for traceability
-
-
-@dataclass(frozen=True)
-class ChargingProfile:
-    """Today's solar disposition: which slots go to battery, sell, or curtail."""
-    slots: tuple[ChargingProfileSlot, ...]   # today's remaining slots only
-    free_capacity_kwh: float                  # (max_soc - soc) * total_capacity_kwh
-    today_remaining_generation_kwh: float
-    solar_exceeds_capacity: bool              # case 1 (False) vs case 2 (True)
-    allocated_solar_kwh: float                # sum of SOLAR_CHARGE slot kWh
-    total_no_export_kwh: float                # sum of NO_EXPORT slot kWh
-    computed_at: datetime
-
-
 @dataclass(frozen=True)
 class CapacityObservation:
     """One charge/discharge observation for capacity learning."""
@@ -254,9 +224,8 @@ class GenerationSeries:
 
     - slots: price-grid-aligned GenerationSlots covering yesterday 00:00 → tomorrow 23:59,
       one per pricing slot. Consumed by calculation (energy_between, per-slot expected solar
-      for lockout logic) and charging_profile (today's remaining slots to decide store vs sell).
+      for lockout logic).
     - today_remaining_kwh: sum of expected_kwh for today's slots with start >= now.
-      Consumed by charging_profile to select case 1 (fits in battery) vs case 2 (sell excess).
     - total_yesterday_kwh, total_today_kwh, total_tomorrow_kwh: full-day sums over the slot
       grid, sensor attributes only.
     - total_d2_kwh … total_d6_kwh: daily totals for days 2–6 ahead, summed directly from raw

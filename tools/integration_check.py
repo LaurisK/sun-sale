@@ -1885,104 +1885,6 @@ def check_forecast_accuracy(snap: Snapshot) -> ForecastAccuracyCheckResult:
 
 
 # ---------------------------------------------------------------------------
-# Charging profile deep check
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ChargingProfileCheckResult:
-    """Result of the charging-profile deep-check: mode logic and aggregate kWh sums."""
-
-    skipped: bool = False
-    skip_reason: str = ""
-    slot_count: int = 0
-    free_capacity_kwh: float = 0.0
-    today_remaining_generation_kwh: float = 0.0
-    solar_exceeds_capacity: bool = False
-    allocated_solar_kwh: float = 0.0
-    total_no_export_kwh: float = 0.0
-    computed_allocated_kwh: float = 0.0
-    computed_no_export_kwh: float = 0.0
-    computed_at: str = ""
-    slot_rows: list[dict] = field(default_factory=list)
-    mismatches: list[str] = field(default_factory=list)
-    overall_ok: bool = True
-
-
-def check_charging_profile(snap: Snapshot) -> ChargingProfileCheckResult:
-    """Verify charging profile sell/no-export mode logic and allocated kWh sums.
-
-    SELL slots must have positive sell price; NO_EXPORT slots must have non-positive sell price.
-    Slot-level sums of each mode must match the declared allocated_solar_kwh and total_no_export_kwh.
-
-    Args:
-        snap: Coordinator snapshot containing pipeline.charging_profile.
-
-    Returns:
-        ChargingProfileCheckResult with per-slot mode data and overall pass/fail.
-    """
-    result = ChargingProfileCheckResult()
-
-    cp = snap.pipeline.get("charging_profile")
-    if not cp:
-        result.skipped = True
-        result.skip_reason = "pipeline.charging_profile is null"
-        return result
-
-    result.slot_count = cp.get("slot_count", 0)
-    result.free_capacity_kwh = cp.get("free_capacity_kwh", 0.0)
-    result.today_remaining_generation_kwh = cp.get("today_remaining_generation_kwh", 0.0)
-    result.solar_exceeds_capacity = cp.get("solar_exceeds_capacity", False)
-    result.allocated_solar_kwh = cp.get("allocated_solar_kwh", 0.0)
-    result.total_no_export_kwh = cp.get("total_no_export_kwh", 0.0)
-    result.computed_at = cp.get("computed_at", "")
-
-    comp_allocated = 0.0
-    comp_no_export = 0.0
-
-    for s in cp.get("slots") or []:
-        start_str = s.get("start", "")
-        mode = (s.get("mode") or "").lower()
-        expected_kwh = s.get("expected_kwh", 0.0)
-        sell_eur = s.get("sell_eur_kwh", 0.0)
-
-        ok = True
-        if mode == "sell" and sell_eur <= 0:
-            result.mismatches.append(f"sell_no_price:{start_str[:16]}")
-            result.overall_ok = False
-            ok = False
-        elif mode == "no_export" and sell_eur > 0:
-            result.mismatches.append(f"no_export_positive_price:{start_str[:16]}")
-            result.overall_ok = False
-            ok = False
-
-        if mode == "solar_charge":
-            comp_allocated += expected_kwh
-        elif mode == "no_export":
-            comp_no_export += expected_kwh
-
-        result.slot_rows.append({
-            "start": start_str,
-            "mode": mode,
-            "expected_kwh": expected_kwh,
-            "sell_eur_kwh": sell_eur,
-            "ok": ok,
-        })
-
-    result.computed_allocated_kwh = round(comp_allocated, 4)
-    result.computed_no_export_kwh = round(comp_no_export, 4)
-    TOL = 0.01
-    if abs(comp_allocated - result.allocated_solar_kwh) > TOL:
-        result.mismatches.append("allocated_solar_sum_mismatch")
-        result.overall_ok = False
-    if abs(comp_no_export - result.total_no_export_kwh) > TOL:
-        result.mismatches.append("no_export_sum_mismatch")
-        result.overall_ok = False
-
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Base load deep check
 # ---------------------------------------------------------------------------
 
@@ -3012,112 +2914,6 @@ class ForecastAccuracyCheckWidget(Static):
             yield Static(lines)
             with Collapsible(title="Slots", collapsed=False):
                 yield ForecastAccuracySlotsTable(fa)
-
-
-class ChargingProfileSlotsTable(Static):
-    """DataTable: Time | Mode | Expected (kWh) | Sell (€/kWh) | ✓/✗."""
-
-    DEFAULT_CSS = """
-    ChargingProfileSlotsTable { height: auto; }
-    ChargingProfileSlotsTable DataTable { height: 15; }
-    """
-
-    def __init__(self, cp: ChargingProfileCheckResult) -> None:
-        """Initialise with the charging profile check result.
-
-        Args:
-            cp: Result of check_charging_profile() containing per-slot mode assignments.
-        """
-        super().__init__()
-        self._cp = cp
-
-    def compose(self) -> ComposeResult:
-        """Yield the DataTable placeholder; rows are added in on_mount."""
-        yield DataTable(show_cursor=False, zebra_stripes=True)
-
-    def on_mount(self) -> None:
-        """Populate the DataTable with one row per charging profile slot."""
-        table = self.query_one(DataTable)
-        table.add_columns("Time", "Mode", "Expected (kWh)", "Sell (€/kWh)", "")
-        dim = "dim"
-
-        mode_styles = {
-            "solar_charge": "green",
-            "sell": "cyan",
-            "no_export": "yellow",
-            "idle": "dim",
-        }
-
-        for row in self._cp.slot_rows:
-            try:
-                dt = datetime.fromisoformat(row["start"]).astimezone(timezone.utc)
-                time_str = dt.strftime("%H:%M")
-            except (ValueError, AttributeError):
-                time_str = row["start"]
-
-            mode = row["mode"]
-            ok = row["ok"]
-            kwh = row["expected_kwh"]
-            sell = row["sell_eur_kwh"]
-            m_style = mode_styles.get(mode, "")
-
-            table.add_row(
-                Text(time_str, style="cyan"),
-                Text(mode, style=m_style),
-                Text(f"{kwh:.4f}", style=dim if kwh == 0 else ""),
-                Text(f"{sell:.4f}", style=dim if sell == 0 else ""),
-                Text("✗" if not ok else "", style="red"),
-            )
-
-
-class ChargingProfileCheckWidget(Static):
-    """Collapsible charging-profile deep-check: mode logic and kWh allocation sums."""
-
-    DEFAULT_CSS = "ChargingProfileCheckWidget { height: auto; }"
-
-    def __init__(self, cp: ChargingProfileCheckResult) -> None:
-        """Initialise with the pre-computed charging profile check result.
-
-        Args:
-            cp: Result of check_charging_profile() for one coordinator.
-        """
-        super().__init__()
-        self._cp = cp
-
-    def compose(self) -> ComposeResult:
-        """Render profile summary line and Slots sub-Collapsible."""
-        cp = self._cp
-
-        if cp.skipped:
-            yield Static(f"  ⚠  charging_profile_check   SKIP   {cp.skip_reason}")
-            return
-
-        color = "green" if cp.overall_ok else "red"
-        mark = "✓" if cp.overall_ok else "✗"
-        status = "PASS" if cp.overall_ok else "FAIL"
-        exceed = "  ⚠ solar>capacity" if cp.solar_exceeds_capacity else ""
-        title = (
-            f"[{color}]{mark}[/{color}]  charging_profile_check   [{color}]{status}[/{color}]"
-            f"   {cp.slot_count} slots"
-            f"   free={cp.free_capacity_kwh:.3f}kWh"
-            f"   allocated={cp.allocated_solar_kwh:.3f}kWh"
-            f"   no_export={cp.total_no_export_kwh:.3f}kWh{exceed}"
-        )
-
-        with Collapsible(title=title, collapsed=True):
-            alloc_ok = "allocated_solar_sum_mismatch" not in cp.mismatches
-            noexp_ok = "no_export_sum_mismatch" not in cp.mismatches
-            alloc_style = "green" if alloc_ok else "red"
-            noexp_style = "green" if noexp_ok else "red"
-            yield Static(
-                f"  allocated:  computed [{alloc_style}]{cp.computed_allocated_kwh:.4f}[/{alloc_style}]kWh"
-                f"  declared {cp.allocated_solar_kwh:.4f}kWh\n"
-                f"  no_export:  computed [{noexp_style}]{cp.computed_no_export_kwh:.4f}[/{noexp_style}]kWh"
-                f"  declared {cp.total_no_export_kwh:.4f}kWh",
-                markup=True,
-            )
-            with Collapsible(title="Slots", collapsed=False):
-                yield ChargingProfileSlotsTable(cp)
 
 
 class BaseLoadSlotsTable(Static):
@@ -4260,7 +4056,7 @@ class MonthlyBillCheckWidget(Static):
 _DEEP_CATS: frozenset[str] = frozenset({
     "forecast", "pricing", "calculation", "schedule", "battery",
     "observed_generation", "observed_grid", "forecast_accuracy",
-    "charging_profile", "base_load", "battery_runtime",
+    "base_load", "battery_runtime",
     "household_consumption", "profitability", "forecast_quality",
     "monthly_bill", "baked_observed",
     "observed_consumption", "observed_losses",
@@ -4847,8 +4643,6 @@ class IntegrationCheckApp(App):
     BakedObservedRowsTable DataTable { height: 20; }
     ForecastAccuracyCheckWidget { height: auto; }
     ForecastAccuracySlotsTable DataTable { height: 18; }
-    ChargingProfileCheckWidget { height: auto; }
-    ChargingProfileSlotsTable DataTable { height: 15; }
     BaseLoadCheckWidget { height: auto; }
     BaseLoadSlotsTable DataTable { height: 15; }
     BatteryRuntimeCheckWidget { height: auto; }
@@ -4873,7 +4667,6 @@ class IntegrationCheckApp(App):
         observed_grid_results: dict[str, ObservedGridCheckResult],
         baked_observed_results: dict[str, BakedObservedCheckResult],
         forecast_acc_results: dict[str, ForecastAccuracyCheckResult],
-        charging_profile_results: dict[str, ChargingProfileCheckResult],
         base_load_results: dict[str, BaseLoadCheckResult],
         battery_runtime_results: dict[str, BatteryRuntimeCheckResult],
         household_consumption_results: dict[str, HouseholdConsumptionCheckResult],
@@ -4897,7 +4690,6 @@ class IntegrationCheckApp(App):
             observed_grid_results: Per-entry observed grid import/export deep-check results.
             baked_observed_results: Per-entry bake-in (counter vs baked) deep-check results.
             forecast_acc_results: Per-entry forecast accuracy deep-check results.
-            charging_profile_results: Per-entry charging profile deep-check results.
             base_load_results: Per-entry base load profile deep-check results.
             battery_runtime_results: Per-entry battery runtime deep-check results.
             household_consumption_results: Per-entry household consumption deep-check results.
@@ -4919,7 +4711,6 @@ class IntegrationCheckApp(App):
         self._observed_grid_results = observed_grid_results
         self._baked_observed_results = baked_observed_results
         self._forecast_acc_results = forecast_acc_results
-        self._charging_profile_results = charging_profile_results
         self._base_load_results = base_load_results
         self._battery_runtime_results = battery_runtime_results
         self._household_consumption_results = household_consumption_results
@@ -4947,7 +4738,6 @@ class IntegrationCheckApp(App):
             + list(self._observed_grid_results.values())
             + list(self._baked_observed_results.values())
             + list(self._forecast_acc_results.values())
-            + list(self._charging_profile_results.values())
             + list(self._base_load_results.values())
             + list(self._battery_runtime_results.values())
             + list(self._household_consumption_results.values())
@@ -4988,7 +4778,6 @@ class IntegrationCheckApp(App):
                 ("observed_grid",           ObservedGridCheckWidget,            self._observed_grid_results),
                 ("baked_observed",          BakedObservedCheckWidget,           self._baked_observed_results),
                 ("forecast_accuracy",       ForecastAccuracyCheckWidget,        self._forecast_acc_results),
-                ("charging_profile",        ChargingProfileCheckWidget,         self._charging_profile_results),
                 ("base_load",               BaseLoadCheckWidget,                self._base_load_results),
                 ("battery_runtime",         BatteryRuntimeCheckWidget,          self._battery_runtime_results),
                 ("household_consumption",   HouseholdConsumptionCheckWidget,    self._household_consumption_results),
@@ -5240,7 +5029,6 @@ def main(argv: list[str] | None = None) -> int:
     observed_grid_results          = {s.entry_id: check_observed_grid(s)             for s in snapshots}
     baked_observed_results         = {s.entry_id: check_baked_observed(s)            for s in snapshots}
     forecast_acc_results           = {s.entry_id: check_forecast_accuracy(s)         for s in snapshots}
-    charging_profile_results       = {s.entry_id: check_charging_profile(s)          for s in snapshots}
     base_load_results              = {s.entry_id: check_base_load(s)                 for s in snapshots}
     battery_runtime_results        = {s.entry_id: check_battery_runtime(s)           for s in snapshots}
     household_consumption_results  = {s.entry_id: check_household_consumption(s)     for s in snapshots}
@@ -5256,7 +5044,7 @@ def main(argv: list[str] | None = None) -> int:
         schedule_results, battery_results,
         observed_gen_results, observed_grid_results,
         baked_observed_results,
-        forecast_acc_results, charging_profile_results,
+        forecast_acc_results,
         base_load_results, battery_runtime_results,
         household_consumption_results, profitability_results,
         forecast_quality_results,
