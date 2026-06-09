@@ -337,18 +337,35 @@
             color: var(--secondary-text-color, #888);
             font-size: 0.75rem;
           }
-          .sched-select select {
+          .sched-select {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            flex: 1 1 auto;
+            min-width: 0;
+          }
+          .sched-select button {
             background: rgba(255, 255, 255, 0.06);
             color: var(--primary-text-color, #fff);
             border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 4px;
-            padding: 4px 6px;
+            padding: 3px 8px;
             font-family: inherit;
-            font-size: 0.85rem;
-            min-width: 140px;
+            font-size: 0.78rem;
+            cursor: pointer;
+            transition: background 0.12s, border-color 0.12s, color 0.12s;
           }
-          .sched-select select:focus { outline: 1px solid #42a5f5; outline-offset: -1px; }
-          .sched-select select:disabled { opacity: 0.4; cursor: not-allowed; }
+          .sched-select button:hover { background: rgba(255, 255, 255, 0.10); }
+          .sched-select button.selected {
+            background: rgba(66, 165, 245, 0.22);
+            border-color: rgba(66, 165, 245, 0.55);
+            color: #fff;
+          }
+          .sched-select button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            background: rgba(255, 255, 255, 0.04);
+          }
           .sched-readout {
             margin-top: 4px;
             font-size: 0.78rem;
@@ -567,17 +584,17 @@
         const options = Array.isArray(st?.attributes?.options) ? st.attributes.options : [];
         const current = st?.state ?? '';
         const unavailable = !st || st.state === 'unavailable';
-        const optsHtml = options.map(opt =>
-          `<option value="${opt}" ${opt === current ? 'selected' : ''}>${opt}</option>`
+        // Render each option as a button — native <select> dropdowns are
+        // unreliable inside HA's shadow-DOM panel surface on some setups.
+        const btnsHtml = options.map(opt =>
+          `<button type="button" data-eid="${eid}" data-kind="select" data-option="${opt}"
+                   class="${opt === current ? 'selected' : ''}"
+                   ${unavailable ? 'disabled' : ''}>${opt}</button>`
         ).join('');
         const readout = this._renderReadout(spec);
         return `<div class="sched-row sched-row-stacked" data-spec="${spec.key}">
-          <span class="sched-select">
-            <select data-eid="${eid}" data-kind="select" ${unavailable ? 'disabled' : ''}>
-              ${optsHtml}
-            </select>
-          </span>
           <span class="sched-label" title="${eid}">${spec.label}</span>
+          <span class="sched-select">${btnsHtml}</span>
           ${readout}
         </div>`;
       };
@@ -609,8 +626,8 @@
       panel.querySelectorAll('input[data-kind="number"]').forEach((el) => {
         el.addEventListener('change', () => this._onNumberChange(el));
       });
-      panel.querySelectorAll('select[data-kind="select"]').forEach((el) => {
-        el.addEventListener('change', () => this._onSelectChange(el));
+      panel.querySelectorAll('button[data-kind="select"]').forEach((el) => {
+        el.addEventListener('click', () => this._onSelectClick(el));
       });
     }
 
@@ -658,12 +675,15 @@
         el.disabled = unavailable;
         if (!unavailable) el.value = st.state;
       });
-      panel.querySelectorAll('select[data-kind="select"]').forEach((el) => {
-        if (el === active) return;
+      // For the button-group selects, sync the `.selected` class on each
+      // button against the entity state. A full re-render is unnecessary
+      // because the option set doesn't change at runtime.
+      panel.querySelectorAll('button[data-kind="select"]').forEach((el) => {
         const st = this._hass.states[el.dataset.eid];
         if (!st) return;
-        el.disabled = st.state === 'unavailable';
-        if (st.state !== 'unavailable' && el.value !== st.state) el.value = st.state;
+        const unavailable = st.state === 'unavailable';
+        el.disabled = unavailable;
+        el.classList.toggle('selected', !unavailable && el.dataset.option === st.state);
       });
       panel.querySelectorAll('.sched-readout').forEach((el) => {
         const st = this._hass.states[el.dataset.readoutEid];
@@ -701,17 +721,22 @@
       }
     }
 
-    async _onSelectChange(el) {
+    async _onSelectClick(el) {
       const eid = el.dataset.eid;
-      const previous = el.dataset.lastOption ?? '';
-      const option = el.value;
+      const option = el.dataset.option;
+      if (!eid || !option || el.disabled) return;
+      // Optimistic UI: light up the clicked button immediately; the next HA
+      // state push will reconcile if the call fails.
+      const group = el.parentElement;
+      if (group) {
+        group.querySelectorAll('button[data-kind="select"]').forEach(b => {
+          b.classList.toggle('selected', b === el);
+        });
+      }
       try {
         await this._hass.callService('select', 'select_option', { entity_id: eid, option });
-        el.dataset.lastOption = option;
       } catch (e) {
-        console.warn('sunSale: select service call failed', eid, e);
-        // Revert visual state — HA push will re-sync on next update.
-        if (previous) el.value = previous;
+        console.warn('sunSale: select service call failed', eid, option, e);
       }
     }
 
