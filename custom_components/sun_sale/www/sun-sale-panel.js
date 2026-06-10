@@ -428,6 +428,45 @@
             border-color: rgba(239, 83, 80, 0.75);
             background: rgba(239, 83, 80, 0.18);
           }
+          /* Per-register desired→observed readout. Forced onto its own line
+             below the commanded→observed headline via flex-basis:100%. */
+          .sched-readout-mode .reg-grid {
+            flex-basis: 100%;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            margin-top: 4px;
+          }
+          .sched-readout-mode .reg-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 1px 6px;
+            border-left: 2px solid transparent;
+            border-radius: 3px;
+            font-size: 0.72rem;
+          }
+          .sched-readout-mode .reg-row .reg-label {
+            color: var(--secondary-text-color, #888);
+          }
+          .sched-readout-mode .reg-row .reg-vals {
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+            font-weight: 600;
+          }
+          .sched-readout-mode .reg-row.reg-ok {
+            border-left-color: rgba(102, 187, 106, 0.5);
+          }
+          .sched-readout-mode .reg-row.reg-ok .reg-vals { color: #66bb6a; }
+          .sched-readout-mode .reg-row.reg-wait {
+            border-left-color: rgba(255, 167, 38, 0.5);
+          }
+          .sched-readout-mode .reg-row.reg-wait .reg-vals { color: #ffa726; }
+          .sched-readout-mode .reg-row.reg-bad {
+            border-left-color: rgba(239, 83, 80, 0.5);
+          }
+          .sched-readout-mode .reg-row.reg-bad .reg-vals { color: #ef5350; }
         </style>
         <div id="card">
           <div class="header-row">
@@ -758,7 +797,39 @@
         ? `<span class="verify-badge ${badgeCls}">${badgeText}</span>`
         : '';
 
-      return `${commandedHtml}<span class="label">Observed:</span><span class="value">${observed}</span>${badgeHtml}`;
+      return `${commandedHtml}<span class="label">Observed:</span>` +
+        `<span class="value">${observed}</span>${badgeHtml}` +
+        this._renderRegisterGrid(attrs.register_status, verify);
+    }
+
+    _renderRegisterGrid(rows, verify) {
+      // Per-register desired→observed table for the commanded mode. Each row
+      // is coloured from its own `match` flag plus the overall verify phase:
+      //   match            → green  ("set and confirmed")
+      //   no match, pending → amber  (waiting on the verify window)
+      //   no match, settled → red    (window closed / mismatch verdict)
+      // Returns '' when no mode has been commanded yet (nothing to compare).
+      if (!Array.isArray(rows) || rows.length === 0) return '';
+      const items = rows.map((r) => {
+        let cls = 'reg-ok';
+        if (!r.match) cls = (verify === 'mismatch') ? 'reg-bad' : 'reg-wait';
+        const d = this._fmtReg(r.desired);
+        const o = this._fmtReg(r.observed);
+        return `<div class="reg-row ${cls}">` +
+          `<span class="reg-label">${r.label}</span>` +
+          `<span class="reg-vals">${d} → ${o}</span></div>`;
+      }).join('');
+      return `<div class="reg-grid">${items}</div>`;
+    }
+
+    _fmtReg(v) {
+      // Compact render of a register value: em-dash for missing, trimmed
+      // decimals for floats, as-is for ints / strings.
+      if (v == null) return '—';
+      if (typeof v === 'number') {
+        return Number.isInteger(v) ? String(v) : v.toFixed(1);
+      }
+      return String(v);
     }
 
     _syncScheduleDrawer() {

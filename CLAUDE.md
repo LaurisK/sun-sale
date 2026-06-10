@@ -56,12 +56,20 @@ Options are the dispatchable `StorageMode` values plus the sentinel
 `sunsale` (rendered as **"sunSale"** in the panel UI via an option-label
 map in `sun-sale-panel.js`; entity option strings stay snake_case for HA).
 
-Two rules govern dispatch in
+Three rules govern dispatch in
 `outbound/inverter_control_module.py:InverterControlModule.tick`:
 
+- **Write once, on change.** `apply_mode` runs only on the cycle the
+  resolved target *differs* from `last_commanded_mode` — a button press, or
+  a schedule slot boundary. Holding the same target re-asserts nothing:
+  `_dispatch_current_slot` returns the `holding` outcome and issues no
+  Modbus write. The mode is set once and then observed; a failed or drifted
+  write is recovered by the verify loop (below), not by blind re-asserts
+  every cycle. This is the fix for the inverter mode being "constantly set".
 - **Override bypasses `automation_enabled`.** When `coordinator.mode_override`
-  is set, `apply_mode` is called every cycle regardless of the automation
-  switch. Operator intent always reaches the inverter.
+  is set, the dispatcher resolves the override as the target regardless of
+  the automation switch. Operator intent always reaches the inverter (once,
+  on the cycle it changes).
 - **`automation_enabled` only gates the scheduler path.** When the override
   is `None`, the dispatcher only writes the current schedule slot's mode
   while the switch is on; with it off, the module is observer-only.
@@ -71,10 +79,11 @@ handler in `select.py:async_added_to_hass`, so upgrading from a pre-rename
 install does not strand persisted state.
 
 `sensor.sunsale_observed_inverter_mode` surfaces per-tick dispatch
-diagnostics — `last_dispatch_outcome` (`ok` / `no_target` / `no_spec` /
-`automation_disabled`), `last_dispatch_target`, `last_dispatch_tick_at`,
-and `automation_enabled_at_dispatch` — so a user can confirm whether a UI
-mode change actually reached `apply_mode` or fell through one of the gates.
+diagnostics — `last_dispatch_outcome` (`ok` write issued / `holding` target
+unchanged / `no_target` / `no_spec` / `automation_disabled`),
+`last_dispatch_target`, `last_dispatch_tick_at`, and
+`automation_enabled_at_dispatch` — so a user can confirm whether a UI mode
+change actually reached `apply_mode` or fell through one of the gates.
 
 ### Commanded-mode tracking + verify loop (Phase 2)
 
@@ -90,19 +99,32 @@ from this stored value:
    cycle would risk silently dropping the write.
 2. The first verify is scheduled at +2 s (`_VERIFY_INITIAL_DELAY_S`),
    then poll every 5 s (`_VERIFY_POLL_INTERVAL_S`) up to 30 s of total
-   elapsed wall-clock (`_VERIFY_WINDOW_S`). Each tick reads register
-   43110 fresh and compares to the commanded spec's `reg_43110_value`.
-3. Match at any poll → `verify_state = "ok"` and the loop stops. Mismatch
-   within the window → keep polling. Mismatch past the window (first
-   time) → log warning, force-rewrite, reset the window, resume polling.
-   Mismatch past the second window → `verify_state = "mismatch"`, log
-   error, stop. Worst-case time to verdict ≈ 60 s.
+   elapsed wall-clock (`_VERIFY_WINDOW_S`). Each poll re-reads **every
+   register the commanded mode writes** — the 43110 bitmask plus whichever
+   of `charge_a` / `discharge_a` / `export_limit_w` / `rc_setpoint_w` the
+   spec carries — and compares each to its target (`_build_register_status`,
+   exact match for the bitmask, `_NUMBER_WRITE_EPSILON` slack for the
+   numbers, mirroring `apply_mode`'s write tolerance).
+3. **All** registers match → `verify_state = "ok"` and the loop stops.
+   Any mismatch within the window → keep polling. Mismatch past the window
+   (first time) → log warning, force-rewrite, reset the window, resume
+   polling. Mismatch past the second window → `verify_state = "mismatch"`,
+   log error, stop. Worst-case time to verdict ≈ 60 s.
 
 A new commanded change always supersedes any pending verify (cancel +
 reschedule). `sensor.sunsale_observed_inverter_mode` exposes
 `last_commanded_mode`, `last_commanded_at`, `verify_state`,
-`last_verify_at`, and `last_verify_observed_reg` so the operator can see
-the loop status at a glance.
+`last_verify_at`, `last_verify_observed_reg`, and `register_status` (the
+per-register desired-vs-observed rows) so the operator can see the loop
+status at a glance.
+
+Because the verify loop runs on `async_call_later` *between* coordinator
+ticks, the module pushes an `on_state_change` callback
+(`coordinator._on_control_state_change`) after each verify mutation; the
+coordinator mirrors the fresh state via `_mirror_control_module_state` and
+calls `async_update_listeners`, so the panel's badge and per-register
+colours track the verify loop in real time instead of lagging to the next
+5-minute cycle.
 
 ### Panel readout + force-verify service (Phase 3)
 
@@ -115,6 +137,14 @@ outline) and `.mismatch` (red) classes, so engagement is visible at a
 glance without reading the badge text. `_renderModeReadoutInner` is the
 single source of truth — `_renderScheduleDrawer` and `_syncScheduleDrawer`
 both call it.
+
+Below the headline, `_renderRegisterGrid` lists one `desired → observed`
+row per participating register (from the `register_status` attribute),
+each coloured independently: **green** when the register matches, **amber**
+while the verify window is still open (`verify_state` pending), **red**
+once the window has closed on a mismatch. This gives the operator the full
+register-level picture of why a mode is or isn't engaged, not just the
+aggregate badge.
 
 `sun_sale.force_verify_inverter_mode` is a HA service that bypasses the
 +30 s scheduled verify and runs one immediately. Useful for confirming

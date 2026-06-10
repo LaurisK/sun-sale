@@ -916,6 +916,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self.verify_state: str | None = None
         self.last_verify_at: datetime | None = None
         self.last_verify_observed_reg: int | None = None
+        # Per-register desired-vs-observed comparison for the last-commanded
+        # mode, mirrored from the control module. Drives the panel's
+        # green/amber/red register readout.
+        self.register_status: list[dict] = []
 
     @property
     def battery_config(self) -> BatteryConfig | None:
@@ -933,6 +937,50 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         if self._control_module is None:
             return
         await self._control_module.force_verify_now()
+
+    def _mirror_control_module_state(self) -> None:
+        """Copy the control module's dispatch + verify state onto the coordinator.
+
+        Pulls every module-derived diagnostic field (dispatch outcome, the
+        commanded-mode truth, the verify-loop state, and the per-register
+        comparison) into the coordinator's public attributes so the
+        ``ObservedInverterModeSensor`` and panel read a single, current
+        snapshot. Tick-local fields (``last_dispatched_action`` / ``_at``) are
+        owned by ``_async_update_data`` and not touched here.
+        """
+        module = self._control_module
+        if module is None:
+            return
+        self.last_dispatch_outcome = module.last_dispatch_outcome
+        module_target = module.last_dispatch_target
+        self.last_dispatch_target = (
+            module_target.value if module_target is not None else None
+        )
+        self.last_dispatch_tick_at = module.last_dispatch_at
+        self.automation_enabled_at_dispatch = (
+            module.automation_enabled_at_last_dispatch
+        )
+        commanded = module.last_commanded_mode
+        self.last_commanded_mode = (
+            commanded.value if commanded is not None else None
+        )
+        self.last_commanded_at = module.last_commanded_at
+        self.verify_state = module.verify_state
+        self.last_verify_at = module.last_verify_at
+        self.last_verify_observed_reg = module.last_verify_observed_reg
+        self.register_status = module.register_status
+
+    def _on_control_state_change(self) -> None:
+        """Refresh entity state when the verify loop mutates outside a tick.
+
+        Wired into ``InverterControlModule`` as ``on_state_change``. The verify
+        loop runs on ``async_call_later`` between coordinator cycles, so without
+        this push the engagement badge and per-register colours would lag up to
+        one 5-minute cycle. Mirrors the fresh module state, then notifies the
+        coordinator's listeners so ``ObservedInverterModeSensor`` re-renders.
+        """
+        self._mirror_control_module_state()
+        self.async_update_listeners()
 
     @property
     def tariff_config(self) -> TariffConfig | None:
@@ -1163,6 +1211,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             battery_config=battery_config,
             local_tz=local_tz,
             hass=self.hass,
+            on_state_change=self._on_control_state_change,
         )
 
         self._capacity_store = PersistentStore(
@@ -1727,29 +1776,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 target = self._control_module.current_target(
                     now, schedule, mode_override=self.mode_override,
                 )
-                # Surface module-level dispatch outcome for the diagnostic
-                # sensor — set every cycle regardless of write success so a
-                # stale value never masks the current state.
-                self.last_dispatch_outcome = self._control_module.last_dispatch_outcome
-                module_target = self._control_module.last_dispatch_target
-                self.last_dispatch_target = (
-                    module_target.value if module_target is not None else None
-                )
-                self.last_dispatch_tick_at = self._control_module.last_dispatch_at
-                self.automation_enabled_at_dispatch = (
-                    self._control_module.automation_enabled_at_last_dispatch
-                )
-                # Phase 2: mirror commanded + verify state.
-                commanded = self._control_module.last_commanded_mode
-                self.last_commanded_mode = (
-                    commanded.value if commanded is not None else None
-                )
-                self.last_commanded_at = self._control_module.last_commanded_at
-                self.verify_state = self._control_module.verify_state
-                self.last_verify_at = self._control_module.last_verify_at
-                self.last_verify_observed_reg = (
-                    self._control_module.last_verify_observed_reg
-                )
+                # Surface module-level dispatch + verify state for the
+                # diagnostic sensor — set every cycle regardless of write
+                # success so a stale value never masks the current state.
+                self._mirror_control_module_state()
                 if self.automation_enabled and target is not None:
                     self.last_dispatched_action = target.value
                     self.last_dispatched_at = now

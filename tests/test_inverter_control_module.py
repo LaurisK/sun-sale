@@ -24,7 +24,32 @@ NOW = datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc)
 def _mock_inverter() -> MagicMock:
     inv = MagicMock()
     inv.apply_mode = AsyncMock()
+    # Default every readback to None so the register-status comparison treats
+    # ancillary registers as "unavailable" (no match) rather than choking on a
+    # bare MagicMock. Tests that need a match wire concrete values via
+    # ``_wire_inverter_to_spec``.
+    inv.get_storage_control_word = MagicMock(return_value=None)
+    inv.get_charge_current_a = MagicMock(return_value=None)
+    inv.get_discharge_current_a = MagicMock(return_value=None)
+    inv.get_backflow_power_w = MagicMock(return_value=None)
+    inv.get_rc_setpoint_w = MagicMock(return_value=None)
     return inv
+
+
+def _wire_inverter_to_spec(
+    inv: MagicMock, mod: InverterControlModule, mode: StorageMode
+) -> None:
+    """Make every inverter readback return the spec values for ``mode``.
+
+    After this, the module's all-register verify sees a full match for
+    ``mode`` — the standard "inverter accepted the command" fixture.
+    """
+    spec = mod._specs[mode]
+    inv.get_storage_control_word = MagicMock(return_value=spec.reg_43110_value)
+    inv.get_charge_current_a = MagicMock(return_value=spec.charge_a)
+    inv.get_discharge_current_a = MagicMock(return_value=spec.discharge_a)
+    inv.get_backflow_power_w = MagicMock(return_value=spec.export_limit_w)
+    inv.get_rc_setpoint_w = MagicMock(return_value=spec.rc_setpoint_w)
 
 
 def _module(inverter=None) -> InverterControlModule:
@@ -399,19 +424,20 @@ async def test_commanded_change_force_writes_and_schedules_verify(call_later):
 
 
 @pytest.mark.asyncio
-async def test_unchanged_command_does_not_force_or_reschedule(call_later):
+async def test_unchanged_command_holds_without_rewriting(call_later):
+    """Holding the same target re-asserts nothing — the mode is set once."""
     inv = _mock_inverter()
-    inv.get_storage_control_word = MagicMock(return_value=None)
     mod = _module_with_hass(inv)
-    # First tick commands Discharge — force=True, one verify scheduled.
+    # First tick commands Discharge — force-write, one verify scheduled.
     await mod.tick(
         now=NOW, schedule=_schedule_with(StorageMode.Discharge),
         reading=_reading(StorageMode.SelfUse, reg=1),
         history=InverterModeHistory(samples=()),
         automation_enabled=True,
     )
+    assert inv.apply_mode.await_count == 1
     assert len(call_later.calls) == 1
-    # Second tick same command — force=False, no new verify.
+    # Second tick same target — no write, no new verify, "holding" outcome.
     later = NOW + timedelta(minutes=5)
     await mod.tick(
         now=later, schedule=_schedule_with(StorageMode.Discharge, now=later),
@@ -419,8 +445,8 @@ async def test_unchanged_command_does_not_force_or_reschedule(call_later):
         history=InverterModeHistory(samples=()),
         automation_enabled=True,
     )
-    assert inv.apply_mode.await_count == 2
-    assert inv.apply_mode.await_args.kwargs.get("force") is False
+    assert inv.apply_mode.await_count == 1  # no re-write
+    assert mod.last_dispatch_outcome == "holding"
     assert len(call_later.calls) == 1  # no new schedule
 
 
@@ -429,7 +455,8 @@ async def test_verify_tick_marks_state_ok_when_observed_matches(call_later):
     inv = _mock_inverter()
     mod = _module_with_hass(inv)
     spec_reg_for_discharge = mod._specs[StorageMode.Discharge].reg_43110_value
-    inv.get_storage_control_word = MagicMock(return_value=spec_reg_for_discharge)
+    # Every register reads back its commanded value → full match.
+    _wire_inverter_to_spec(inv, mod, StorageMode.Discharge)
     await mod.tick(
         now=NOW, schedule=_schedule_with(StorageMode.Discharge),
         reading=_reading(StorageMode.SelfUse, reg=1),
@@ -442,6 +469,7 @@ async def test_verify_tick_marks_state_ok_when_observed_matches(call_later):
     assert mod.verify_state == "ok"
     assert mod.last_verify_observed_reg == spec_reg_for_discharge
     assert mod.last_verify_at == NOW + timedelta(seconds=2)
+    assert all(r["match"] for r in mod.register_status)
 
 
 @pytest.mark.asyncio
@@ -509,8 +537,7 @@ async def test_force_verify_now_noop_before_any_command(call_later):
 async def test_force_verify_now_runs_verify_immediately(call_later):
     inv = _mock_inverter()
     mod = _module_with_hass(inv)
-    discharge_reg = mod._specs[StorageMode.Discharge].reg_43110_value
-    inv.get_storage_control_word = MagicMock(return_value=discharge_reg)
+    _wire_inverter_to_spec(inv, mod, StorageMode.Discharge)
     # Establish a commanded mode first.
     await mod.tick(
         now=NOW, schedule=_schedule_with(StorageMode.Discharge),

@@ -511,6 +511,10 @@ class ObservedInverterModeSensor(_BaseSensor):
             "verify_state": self.coordinator.verify_state,
             "last_verify_at": verify_at.isoformat() if verify_at else None,
             "last_verify_observed_reg": self.coordinator.last_verify_observed_reg,
+            # Per-register desired-vs-observed comparison for the last-commanded
+            # mode — the panel colours each row green / amber / red from its
+            # ``match`` flag combined with ``verify_state``.
+            "register_status": self.coordinator.register_status,
         }
 
     def _reading(self) -> InverterModeReading | None:

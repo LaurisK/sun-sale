@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later
@@ -58,7 +58,7 @@ from ..contract.models import (
     StorageModeSpec,
 )
 from ..pipeline.storage_mode_specs import build_specs
-from .inverter import InverterController
+from .inverter import _NUMBER_WRITE_EPSILON, InverterController
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ class InverterControlModule:
         export_limit_w: int = DEFAULT_EXPORT_LIMIT_W,
         inverter_max_power_w: int = DEFAULT_INVERTER_MAX_POWER_W,
         hass: HomeAssistant | None = None,
+        on_state_change: Callable[[], None] | None = None,
     ) -> None:
         """Initialise with the inverter, battery limits, and deployment caps.
 
@@ -106,9 +107,16 @@ class InverterControlModule:
                 unit tests, in which case verify-ticks are disabled (a
                 ``MagicMock`` works equally well — the module just calls
                 ``async_call_later`` on it).
+            on_state_change: Optional callback fired whenever the verify loop
+                mutates engagement state *outside* a coordinator tick (i.e.
+                from a scheduled verify-tick). Lets the coordinator push a
+                fresh entity state so the panel's per-register colours track
+                the verify loop in real time instead of lagging to the next
+                5-minute cycle. ``None`` disables the push (unit tests).
         """
         self._inverter = inverter
         self._hass = hass
+        self._on_state_change = on_state_change
         self._local_tz = local_tz
         self._specs: dict[StorageMode, StorageModeSpec] = build_specs(
             battery_config,
@@ -135,6 +143,10 @@ class InverterControlModule:
         # Start of the current verify window — used to decide between "still
         # polling" and "window exhausted, retry or give up".
         self._verify_window_started_at: datetime | None = None
+        # Per-register desired-vs-observed comparison for the last-commanded
+        # mode. Refreshed every tick and every verify-tick; drives the panel's
+        # green/amber/red register readout. Empty until the first command.
+        self._register_status: list[dict[str, Any]] = []
 
     async def tick(
         self,
@@ -178,6 +190,7 @@ class InverterControlModule:
         if not automation_enabled and mode_override is None:
             self._last_dispatch_outcome = "automation_disabled"
             self._last_dispatch_target = None
+            self._register_status = self._build_register_status()
             return updated_history
 
         outcome, target = await self._dispatch_current_slot(
@@ -185,18 +198,36 @@ class InverterControlModule:
         )
         self._last_dispatch_outcome = outcome
         self._last_dispatch_target = target
+        self._register_status = self._build_register_status()
         return updated_history
 
     @property
     def last_dispatch_outcome(self) -> str | None:
         """Return the outcome label of the most recent ``tick``.
 
-        One of ``ok`` (write attempted), ``no_target`` (no override + no
-        schedule slot covering now), ``no_spec`` (target mode lacks a
-        register spec), ``automation_disabled`` (no override and automation
-        off — observer-only), or ``None`` before the first tick.
+        One of ``ok`` (a write was issued — the resolved target differed from
+        the last-commanded mode), ``holding`` (target unchanged — no write,
+        observer + verify only), ``no_target`` (no override + no schedule
+        slot covering now), ``no_spec`` (target mode lacks a register spec),
+        ``automation_disabled`` (no override and automation off —
+        observer-only), or ``None`` before the first tick.
         """
         return self._last_dispatch_outcome
+
+    @property
+    def register_status(self) -> list[dict[str, Any]]:
+        """Return the per-register desired-vs-observed comparison.
+
+        One row per register that participates in the last-commanded mode —
+        ``reg_43110`` plus whichever of ``charge_a`` / ``discharge_a`` /
+        ``export_limit_w`` / ``rc_setpoint_w`` the mode's spec writes. Each
+        row carries ``name``, ``label``, ``desired``, ``observed`` and
+        ``match``. Empty before any mode has been commanded. The panel
+        colours each row from ``match`` plus the overall ``verify_state``
+        (green = matched, amber = still verifying, red = mismatch after the
+        verify window closed).
+        """
+        return self._register_status
 
     @property
     def last_dispatch_target(self) -> StorageMode | None:
@@ -335,9 +366,11 @@ class InverterControlModule:
                 is ignored. ``None`` falls back to the slot covering ``now``.
 
         Returns:
-            ``(outcome, target)`` — outcome is one of ``ok``, ``no_target``,
-            ``no_spec``; target is the StorageMode the dispatcher resolved
-            to (``None`` only when ``outcome == no_target``).
+            ``(outcome, target)`` — outcome is one of ``ok`` (a write was
+            issued because the target changed), ``holding`` (target unchanged,
+            no write), ``no_target``, or ``no_spec``; target is the
+            StorageMode the dispatcher resolved to (``None`` only when
+            ``outcome == no_target``).
         """
         source = "override" if mode_override is not None else "schedule"
         if mode_override is not None:
@@ -358,36 +391,41 @@ class InverterControlModule:
                 target.value, source,
             )
             return ("no_spec", target)
-        # A commanded-mode change is the trigger for force-write + verify:
-        # the solis_modbus state cache may lag a successful write by up to a
-        # poll interval, so trusting per-register idempotency on the very
-        # cycle that issues a new command risks silently dropping the write.
-        commanded_changed = target != self._last_commanded_mode
-        await self._inverter.apply_mode(target, spec, force=commanded_changed)
-        if commanded_changed:
-            self._last_commanded_mode = target
-            self._last_commanded_at = now
-            self._verify_state = "pending"
-            self._last_verify_at = None
-            self._last_verify_observed_reg = None
-            self._verify_retried = False
-            self._verify_window_started_at = now
-            _LOGGER.info(
-                "inverter_control: dispatched %s (source=%s, force-write, "
-                "first verify in %ds, polling every %ds up to %ds)",
-                target.value, source,
-                _VERIFY_INITIAL_DELAY_S,
-                _VERIFY_POLL_INTERVAL_S,
-                _VERIFY_WINDOW_S,
-            )
-            self._last_applied_mode = target
-            self._schedule_verify(_VERIFY_INITIAL_DELAY_S)
-        else:
+        # The mode is written exactly once, on the cycle the resolved target
+        # changes (a button press, or a schedule slot boundary). Holding the
+        # same target re-asserts nothing — the inverter was already commanded
+        # and the verify loop confirms it took. Re-writing every cycle is what
+        # the operator experiences as the mode being "constantly set"; it also
+        # risks fighting a deliberate manual change between slots. A failed or
+        # drifted write is recovered by the verify loop, not by blind re-asserts.
+        if target == self._last_commanded_mode:
             _LOGGER.debug(
-                "inverter_control: re-dispatched %s (source=%s, no commanded "
-                "change)",
+                "inverter_control: holding %s (source=%s, no commanded change "
+                "— observe + verify only)",
                 target.value, source,
             )
+            return ("holding", target)
+        # Commanded-mode change → force-write (bypass the solis_modbus cache,
+        # which can lag a successful write by up to a poll interval) and start
+        # the verify loop.
+        await self._inverter.apply_mode(target, spec, force=True)
+        self._last_commanded_mode = target
+        self._last_commanded_at = now
+        self._verify_state = "pending"
+        self._last_verify_at = None
+        self._last_verify_observed_reg = None
+        self._verify_retried = False
+        self._verify_window_started_at = now
+        _LOGGER.info(
+            "inverter_control: dispatched %s (source=%s, force-write, "
+            "first verify in %ds, polling every %ds up to %ds)",
+            target.value, source,
+            _VERIFY_INITIAL_DELAY_S,
+            _VERIFY_POLL_INTERVAL_S,
+            _VERIFY_WINDOW_S,
+        )
+        self._last_applied_mode = target
+        self._schedule_verify(_VERIFY_INITIAL_DELAY_S)
         return ("ok", target)
 
     @staticmethod
@@ -398,6 +436,111 @@ class InverterControlModule:
         if schedule is None or not schedule.slots:
             return None
         return next((s for s in schedule.slots if s.start <= now < s.end), None)
+
+    def _build_register_status(self) -> list[dict[str, Any]]:
+        """Build the desired-vs-observed comparison for the last-commanded mode.
+
+        Reads each register that the commanded mode's spec writes and pairs the
+        target with the current readback. ``reg_43110`` and ``rc_setpoint_w`` are
+        always written by ``apply_mode``; the battery currents and export limit
+        are written only when the spec carries a non-``None`` value, so they only
+        appear here when they participate.
+
+        Returns:
+            One row per participating register (``name``, ``label``,
+            ``desired``, ``observed``, ``match``), in ``apply_mode`` write
+            order. Empty when no mode has been commanded yet.
+        """
+        commanded = self._last_commanded_mode
+        if commanded is None:
+            return []
+        spec = self._specs.get(commanded)
+        if spec is None:
+            return []
+        rows: list[dict[str, Any]] = [
+            self._register_row(
+                "reg_43110", "Storage control word (43110)",
+                spec.reg_43110_value,
+                self._inverter.get_storage_control_word(),
+                exact=True,
+            ),
+        ]
+        if spec.charge_a is not None:
+            rows.append(self._register_row(
+                "charge_a", "Charge current (A)",
+                spec.charge_a, self._inverter.get_charge_current_a(),
+            ))
+        if spec.discharge_a is not None:
+            rows.append(self._register_row(
+                "discharge_a", "Discharge current (A)",
+                spec.discharge_a, self._inverter.get_discharge_current_a(),
+            ))
+        if spec.export_limit_w is not None:
+            rows.append(self._register_row(
+                "export_limit_w", "Export limit (W)",
+                spec.export_limit_w, self._inverter.get_backflow_power_w(),
+            ))
+        rows.append(self._register_row(
+            "rc_setpoint_w", "RC setpoint (W)",
+            spec.rc_setpoint_w, self._inverter.get_rc_setpoint_w(),
+        ))
+        return rows
+
+    @staticmethod
+    def _register_row(
+        name: str,
+        label: str,
+        desired: Any,
+        observed: Any,
+        exact: bool = False,
+    ) -> dict[str, Any]:
+        """Build one register comparison row.
+
+        Args:
+            name: Stable machine key for the register (e.g. ``reg_43110``).
+            label: Human-readable label rendered in the panel.
+            desired: The value ``apply_mode`` targets for this register.
+            observed: The current readback, or ``None`` when unavailable.
+            exact: When ``True``, require an exact integer match (the register
+                bitmask). Otherwise allow ``_NUMBER_WRITE_EPSILON`` slack — the
+                same tolerance ``apply_mode`` uses to decide a number write, so
+                "match" here means "no write would be issued".
+
+        Returns:
+            A dict with ``name``, ``label``, ``desired``, ``observed``,
+            ``match``. ``match`` is ``False`` whenever ``observed`` is ``None``.
+        """
+        if observed is None:
+            match = False
+        elif exact:
+            match = int(observed) == int(desired)
+        else:
+            match = abs(float(observed) - float(desired)) <= _NUMBER_WRITE_EPSILON
+        return {
+            "name": name,
+            "label": label,
+            "desired": desired,
+            "observed": observed,
+            "match": match,
+        }
+
+    def _notify_state_change(self) -> None:
+        """Fire the coordinator's state-change callback, if one was supplied.
+
+        Called from the verify loop (which runs between coordinator ticks) so
+        the panel's engagement badge and per-register colours refresh in real
+        time instead of waiting for the next 5-minute cycle. Never raises — a
+        push failure must not break the verify loop.
+        """
+        if self._on_state_change is None:
+            return
+        try:
+            self._on_state_change()
+        except Exception:  # noqa: BLE001 — push is best-effort
+            _LOGGER.debug(
+                "inverter_control: on_state_change callback raised — ignoring",
+                exc_info=True,
+            )
 
     def _yesterday_local_midnight(self, now: datetime) -> datetime:
         """Compute ``00:00`` of yesterday in the configured local timezone."""
@@ -480,10 +623,11 @@ class InverterControlModule:
           * Window exhausted, already retried → ``mismatch``, log error,
             stop. Manual operator intervention required.
 
-        The check is intentionally narrow — it compares register 43110 to
-        the spec's ``reg_43110_value``, the single bitmask that defines
-        mode membership. Ancillary values (currents, RC setpoint, export
-        cap) are left to the next dispatch cycle's natural idempotency.
+        The check spans **every** register the commanded mode writes — the
+        43110 bitmask plus whichever currents / RC setpoint / export cap the
+        spec carries. ``verify_state`` flips to ``ok`` only when all of them
+        match (within ``apply_mode``'s write tolerance), so an engaged badge
+        means the full mode composition is in place, not just the bitmask.
 
         Args:
             now: Tick time supplied by HA's ``async_call_later`` (or by
@@ -500,23 +644,24 @@ class InverterControlModule:
             # Shouldn't happen — _dispatch_current_slot already guarded —
             # but if a future StorageMode lacks a spec, fail closed.
             self._verify_state = "mismatch"
+            self._notify_state_change()
             return
 
-        observed_reg = self._inverter.get_storage_control_word()
+        rows = self._build_register_status()
+        self._register_status = rows
         self._last_verify_at = now
-        self._last_verify_observed_reg = observed_reg
+        self._last_verify_observed_reg = self._inverter.get_storage_control_word()
 
-        if observed_reg == spec.reg_43110_value:
+        if rows and all(r["match"] for r in rows):
             self._verify_state = "ok"
             _LOGGER.info(
-                "inverter_control: verify OK — commanded=%s reg=0x%x",
-                commanded.value, observed_reg,
+                "inverter_control: verify OK — commanded=%s all %d registers "
+                "match", commanded.value, len(rows),
             )
+            self._notify_state_change()
             return
 
-        observed_str = (
-            f"0x{observed_reg:x}" if observed_reg is not None else "None"
-        )
+        mismatched = [r["name"] for r in rows if not r["match"]]
         window_start = self._verify_window_started_at or now
         elapsed = (now - window_start).total_seconds()
 
@@ -525,33 +670,34 @@ class InverterControlModule:
             # so a normal pending→ok transition stays quiet.
             _LOGGER.debug(
                 "inverter_control: verify pending — commanded=%s "
-                "target_reg=0x%x observed_reg=%s elapsed=%.0fs; next poll "
-                "in %ds",
-                commanded.value, spec.reg_43110_value, observed_str,
-                elapsed, _VERIFY_POLL_INTERVAL_S,
+                "mismatched=%s elapsed=%.0fs; next poll in %ds",
+                commanded.value, mismatched, elapsed, _VERIFY_POLL_INTERVAL_S,
             )
             self._schedule_verify(_VERIFY_POLL_INTERVAL_S)
+            self._notify_state_change()
             return
 
         # Window exhausted.
         if not self._verify_retried:
             _LOGGER.warning(
                 "inverter_control: verify mismatch after %.0fs — commanded=%s "
-                "target_reg=0x%x observed_reg=%s; re-issuing force-write",
-                elapsed, commanded.value, spec.reg_43110_value, observed_str,
+                "mismatched=%s; re-issuing force-write",
+                elapsed, commanded.value, mismatched,
             )
             self._verify_retried = True
             await self._inverter.apply_mode(commanded, spec, force=True)
             self._verify_window_started_at = now  # fresh window for the retry
             self._schedule_verify(_VERIFY_INITIAL_DELAY_S)
             # verify_state stays "pending" — the retry is still in flight
+            self._notify_state_change()
             return
 
         self._verify_state = "mismatch"
         _LOGGER.error(
             "inverter_control: verify mismatch persists after retry "
-            "(%.0fs elapsed in retry window) — commanded=%s "
-            "target_reg=0x%x observed_reg=%s. The write is not taking "
-            "effect; check the Modbus chain and inverter.",
-            elapsed, commanded.value, spec.reg_43110_value, observed_str,
+            "(%.0fs elapsed in retry window) — commanded=%s mismatched=%s. "
+            "The write is not taking effect; check the Modbus chain and "
+            "inverter.",
+            elapsed, commanded.value, mismatched,
         )
+        self._notify_state_change()
