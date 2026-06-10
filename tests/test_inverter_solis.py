@@ -183,6 +183,34 @@ async def test_apply_mode_idempotent_when_readback_matches_target():
 
 
 @pytest.mark.asyncio
+async def test_apply_mode_force_bypasses_cache_idempotency():
+    """force=True must write every register even when cache already matches."""
+    spec = _specs()[StorageMode.GridCharge]
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State(str(spec.reg_43110_value)),
+        SOLIS_ENTITY_IDS["battery_max_charge_current"]: _State(str(spec.charge_a)),
+        SOLIS_ENTITY_IDS["battery_max_discharge_current"]: _State(str(spec.discharge_a)),
+        SOLIS_ENTITY_IDS["backflow_power"]: _State(str(spec.export_limit_w)),
+        SOLIS_ENTITY_IDS["rc_setpoint"]: _State(str(spec.rc_setpoint_w)),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.apply_mode(StorageMode.GridCharge, spec, force=True)
+    # All four bit switches were force-toggled even though cache claimed they
+    # already matched — covers the case where solis_modbus cache lags reality.
+    toggled = _switches_toggled(hass)
+    assert SOLIS_ENTITY_IDS["self_use_switch"] in toggled
+    assert SOLIS_ENTITY_IDS["tou_mode_switch"] in toggled
+    assert SOLIS_ENTITY_IDS["allow_grid_charge_switch"] in toggled
+    assert SOLIS_ENTITY_IDS["feed_in_priority_switch"] in toggled
+    # All four number entities were force-written.
+    writes = _numbers_written(hass)
+    assert SOLIS_ENTITY_IDS["battery_max_charge_current"] in writes
+    assert SOLIS_ENTITY_IDS["battery_max_discharge_current"] in writes
+    assert SOLIS_ENTITY_IDS["backflow_power"] in writes
+    assert SOLIS_ENTITY_IDS["rc_setpoint"] in writes
+
+
+@pytest.mark.asyncio
 async def test_apply_mode_writes_numbers_only_when_outside_tolerance():
     spec = _specs()[StorageMode.SelfUse]
     # Readback says 43110 already at target. Currents differ; export limit matches.

@@ -71,7 +71,12 @@ async def test_async_setup_entry_registers_service():
 
         await async_setup_entry(hass, entry)
 
-    hass.services.async_register.assert_called_once()
+    # Both force_recalculate and force_verify_inverter_mode should register.
+    service_names = {
+        c.args[1] for c in hass.services.async_register.call_args_list
+    }
+    assert "force_recalculate" in service_names
+    assert "force_verify_inverter_mode" in service_names
 
 
 async def test_async_setup_entry_skips_duplicate_debug_view():

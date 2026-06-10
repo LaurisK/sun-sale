@@ -49,6 +49,80 @@ HA entity registry for entities belonging to that config entry. Matching is done
 Existing configs that store individual entity IDs directly (no `solis_config_entry_id`)
 continue to work unchanged via the legacy path in `coordinator.py`.
 
+## Mode override semantics
+
+`select.sunsale_mode_override` is the single source of operator mode intent.
+Options are the dispatchable `StorageMode` values plus the sentinel
+`sunsale` (rendered as **"sunSale"** in the panel UI via an option-label
+map in `sun-sale-panel.js`; entity option strings stay snake_case for HA).
+
+Two rules govern dispatch in
+`outbound/inverter_control_module.py:InverterControlModule.tick`:
+
+- **Override bypasses `automation_enabled`.** When `coordinator.mode_override`
+  is set, `apply_mode` is called every cycle regardless of the automation
+  switch. Operator intent always reaches the inverter.
+- **`automation_enabled` only gates the scheduler path.** When the override
+  is `None`, the dispatcher only writes the current schedule slot's mode
+  while the switch is on; with it off, the module is observer-only.
+
+The legacy sentinel `"auto"` is folded into `"sunsale"` by the restore
+handler in `select.py:async_added_to_hass`, so upgrading from a pre-rename
+install does not strand persisted state.
+
+`sensor.sunsale_observed_inverter_mode` surfaces per-tick dispatch
+diagnostics — `last_dispatch_outcome` (`ok` / `no_target` / `no_spec` /
+`automation_disabled`), `last_dispatch_target`, `last_dispatch_tick_at`,
+and `automation_enabled_at_dispatch` — so a user can confirm whether a UI
+mode change actually reached `apply_mode` or fell through one of the gates.
+
+### Commanded-mode tracking + verify loop (Phase 2)
+
+The control module keeps its own truth of what the inverter was last asked
+to do — `last_commanded_mode` / `last_commanded_at` — independent of the
+solis_modbus state cache. On any cycle where the resolved target differs
+from this stored value:
+
+1. `apply_mode` is invoked with `force=True`, which bypasses the cached-
+   readback comparison in `_apply_43110_bits` / `_set_number`. The Solis
+   integration's polling cache can lag a successful write by up to one
+   slow-poll interval (~30 s), so trusting it on the commanded-change
+   cycle would risk silently dropping the write.
+2. The first verify is scheduled at +2 s (`_VERIFY_INITIAL_DELAY_S`),
+   then poll every 5 s (`_VERIFY_POLL_INTERVAL_S`) up to 30 s of total
+   elapsed wall-clock (`_VERIFY_WINDOW_S`). Each tick reads register
+   43110 fresh and compares to the commanded spec's `reg_43110_value`.
+3. Match at any poll → `verify_state = "ok"` and the loop stops. Mismatch
+   within the window → keep polling. Mismatch past the window (first
+   time) → log warning, force-rewrite, reset the window, resume polling.
+   Mismatch past the second window → `verify_state = "mismatch"`, log
+   error, stop. Worst-case time to verdict ≈ 60 s.
+
+A new commanded change always supersedes any pending verify (cancel +
+reschedule). `sensor.sunsale_observed_inverter_mode` exposes
+`last_commanded_mode`, `last_commanded_at`, `verify_state`,
+`last_verify_at`, and `last_verify_observed_reg` so the operator can see
+the loop status at a glance.
+
+### Panel readout + force-verify service (Phase 3)
+
+The panel's mode-override row uses a structured readout instead of the
+plain `"Observed: <state>"` line: `Commanded: <X> → Observed: <Y> [badge]`,
+where the badge renders the verify state — green "Engaged" (ok), amber
+"Verifying…" (pending), red "Mismatch" (after retry). The currently-
+selected button mirrors the same state via the `.pending` (pulsing amber
+outline) and `.mismatch` (red) classes, so engagement is visible at a
+glance without reading the badge text. `_renderModeReadoutInner` is the
+single source of truth — `_renderScheduleDrawer` and `_syncScheduleDrawer`
+both call it.
+
+`sun_sale.force_verify_inverter_mode` is a HA service that bypasses the
++30 s scheduled verify and runs one immediately. Useful for confirming
+engagement right after a manual mode change without waiting on the next
+verify-tick. Implementation: `InverterControlModule.force_verify_now`
+cancels any pending verify and re-runs the same `_on_verify_tick` body
+the scheduled callback would have.
+
 ## Integration check coverage
 
 Every pipeline module that consumes or produces data must have a corresponding deep-check in `tools/integration_check.py`. The check must validate:

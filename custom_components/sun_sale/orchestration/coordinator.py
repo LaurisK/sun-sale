@@ -894,15 +894,45 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self.max_discharge_to_grid_kw: float | None = DEFAULT_SCHEDULE_MAX_DISCHARGE_TO_GRID_KW
         # Manual override for the dispatched StorageMode. When set, the control
         # module forwards this to the inverter regardless of the scheduler's
-        # current-slot choice. ``None`` (default) keeps sunSale's auto choice.
+        # current-slot choice AND regardless of ``automation_enabled`` —
+        # operator intent always reaches the inverter. ``None`` (default)
+        # keeps sunSale's scheduled choice (the "sunsale" option in the UI).
         self.mode_override: StorageMode | None = None
         self.last_dispatched_action: str | None = None
         self.last_dispatched_at: datetime | None = None
+        # Phase 0 visibility: per-tick dispatch outcome surfaced on the
+        # ObservedInverterModeSensor. ``last_dispatched_action`` reflects only
+        # successful writes; these fields reflect the latest tick regardless
+        # of outcome (no_target, no_spec, automation_disabled, ok).
+        self.last_dispatch_outcome: str | None = None
+        self.last_dispatch_target: str | None = None
+        self.last_dispatch_tick_at: datetime | None = None
+        self.automation_enabled_at_dispatch: bool | None = None
+        # Phase 2 visibility: commanded-mode + verify-loop state, mirrored
+        # from the InverterControlModule after each tick. See
+        # ``inverter_control_module.py`` for the verify-state vocabulary.
+        self.last_commanded_mode: str | None = None
+        self.last_commanded_at: datetime | None = None
+        self.verify_state: str | None = None
+        self.last_verify_at: datetime | None = None
+        self.last_verify_observed_reg: int | None = None
 
     @property
     def battery_config(self) -> BatteryConfig | None:
         """Return the configured BatteryConfig, or None before async_setup completes."""
         return self._sun_sale_config.battery if self._sun_sale_config else None
+
+    async def force_verify_inverter_mode(self) -> None:
+        """Run an inverter-mode verify cycle immediately.
+
+        Backs the ``sun_sale.force_verify_inverter_mode`` service. Delegates
+        to ``InverterControlModule.force_verify_now``; when the control
+        module isn't ready yet (during early ``async_setup``), the call is
+        a no-op so the service handler doesn't have to special-case startup.
+        """
+        if self._control_module is None:
+            return
+        await self._control_module.force_verify_now()
 
     @property
     def tariff_config(self) -> TariffConfig | None:
@@ -1132,6 +1162,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             inverter=inverter,
             battery_config=battery_config,
             local_tz=local_tz,
+            hass=self.hass,
         )
 
         self._capacity_store = PersistentStore(
@@ -1695,6 +1726,29 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     await self._mode_history_store.save(updated_history)
                 target = self._control_module.current_target(
                     now, schedule, mode_override=self.mode_override,
+                )
+                # Surface module-level dispatch outcome for the diagnostic
+                # sensor — set every cycle regardless of write success so a
+                # stale value never masks the current state.
+                self.last_dispatch_outcome = self._control_module.last_dispatch_outcome
+                module_target = self._control_module.last_dispatch_target
+                self.last_dispatch_target = (
+                    module_target.value if module_target is not None else None
+                )
+                self.last_dispatch_tick_at = self._control_module.last_dispatch_at
+                self.automation_enabled_at_dispatch = (
+                    self._control_module.automation_enabled_at_last_dispatch
+                )
+                # Phase 2: mirror commanded + verify state.
+                commanded = self._control_module.last_commanded_mode
+                self.last_commanded_mode = (
+                    commanded.value if commanded is not None else None
+                )
+                self.last_commanded_at = self._control_module.last_commanded_at
+                self.verify_state = self._control_module.verify_state
+                self.last_verify_at = self._control_module.last_verify_at
+                self.last_verify_observed_reg = (
+                    self._control_module.last_verify_observed_reg
                 )
                 if self.automation_enabled and target is not None:
                     self.last_dispatched_action = target.value

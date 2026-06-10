@@ -21,6 +21,7 @@ state-read telemetry needed by the rest of the pipeline; their
 """
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import Iterable
 
@@ -31,6 +32,8 @@ from ..contract.models import (
     StorageMode,
     StorageModeSpec,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class InverterPlatform(Enum):
@@ -211,6 +214,7 @@ class InverterController:
         self,
         mode: StorageMode,
         spec: StorageModeSpec,
+        force: bool = False,
     ) -> None:
         """Drive the inverter to the target StorageMode via the minimum set of writes.
 
@@ -227,47 +231,67 @@ class InverterController:
             mode: Target StorageMode (used for logging only — the concrete
                 register targets live in ``spec``).
             spec: Concrete register targets for the requested mode.
+            force: When ``True``, skip the cached-readback comparison and
+                always issue the underlying service call. Used by the
+                control module's verify-loop on commanded-mode change and
+                on retry-after-mismatch, where trusting the (possibly
+                stale) solis_modbus cache would risk hiding a failed write.
         """
         if self._platform != InverterPlatform.SOLIS:
-            import logging
-            logging.getLogger(__name__).debug(
+            _LOGGER.debug(
                 "apply_mode(%s) — platform %s has no register-level implementation",
                 mode.value, self._platform.value,
             )
             return
+        _LOGGER.debug(
+            "apply_mode(%s, force=%s) — reg_43110=0x%x charge_a=%s "
+            "discharge_a=%s export_limit_w=%s rc_setpoint_w=%s",
+            mode.value, force,
+            spec.reg_43110_value,
+            spec.charge_a,
+            spec.discharge_a,
+            spec.export_limit_w,
+            spec.rc_setpoint_w,
+        )
 
-        await self._apply_43110_bits(spec.reg_43110_value)
+        await self._apply_43110_bits(spec.reg_43110_value, force=force)
         if spec.charge_a is not None:
             await self._set_number(
                 "battery_max_charge_current",
                 spec.charge_a,
                 tolerance_a=_NUMBER_WRITE_EPSILON,
+                force=force,
             )
         if spec.discharge_a is not None:
             await self._set_number(
                 "battery_max_discharge_current",
                 spec.discharge_a,
                 tolerance_a=_NUMBER_WRITE_EPSILON,
+                force=force,
             )
         if spec.export_limit_w is not None:
             await self._set_number(
                 "backflow_power",
                 float(spec.export_limit_w),
                 tolerance_a=_NUMBER_WRITE_EPSILON,
+                force=force,
             )
         # RC setpoint always written — 0 W is the explicit "no override" value.
         await self._set_number(
             "rc_setpoint",
             float(spec.rc_setpoint_w),
             tolerance_a=_NUMBER_WRITE_EPSILON,
+            force=force,
         )
 
     # ------------------------------------------------------------------ #
     # Internals                                                            #
     # ------------------------------------------------------------------ #
 
-    async def _apply_43110_bits(self, target_value: int) -> None:
-        """Toggle only the bit switches whose desired state differs from the readback.
+    async def _apply_43110_bits(
+        self, target_value: int, force: bool = False,
+    ) -> None:
+        """Toggle the bit switches whose desired state differs from the readback.
 
         Reads the current value of register 43110 via the ``storage_control_readback``
         sensor; for each known bit (0/1/5/6) compares the target's bit to the
@@ -276,17 +300,36 @@ class InverterController:
 
         Args:
             target_value: Desired bitmask value for register 43110.
+            force: When ``True``, skip the readback comparison and always
+                call the underlying switch service. The solis_modbus state
+                cache can lag a failed-or-pending write by up to a poll
+                interval, so trusting it on commanded-mode change is unsafe.
         """
         current = self.get_storage_control_word()
         for bit, role in _REG_43110_BIT_ROLES.items():
             target_bit = (target_value >> bit) & 1
             current_bit = ((current >> bit) & 1) if current is not None else None
-            if current_bit == target_bit:
-                continue
             entity_id = self._entity_ids.get(role, "")
+            if not force and current_bit == target_bit:
+                _LOGGER.debug(
+                    "inverter: 43110 bit %d (%s) skip — cached_bit=%s "
+                    "target_bit=%s cached_reg=%s",
+                    bit, role, current_bit, target_bit, current,
+                )
+                continue
             if not entity_id:
+                _LOGGER.debug(
+                    "inverter: 43110 bit %d (%s) skip — no entity mapped "
+                    "(cached_bit=%s target_bit=%s force=%s)",
+                    bit, role, current_bit, target_bit, force,
+                )
                 continue
             service = "turn_on" if target_bit else "turn_off"
+            _LOGGER.debug(
+                "inverter: 43110 bit %d (%s) write — cached_bit=%s "
+                "target_bit=%s service=switch.%s entity=%s force=%s",
+                bit, role, current_bit, target_bit, service, entity_id, force,
+            )
             await self._hass.services.async_call(
                 "switch", service,
                 {"entity_id": entity_id},
@@ -298,6 +341,7 @@ class InverterController:
         role: str,
         target_value: float,
         tolerance_a: float,
+        force: bool = False,
     ) -> None:
         """Write a number entity only when its readback differs by more than tolerance.
 
@@ -305,13 +349,31 @@ class InverterController:
             role: Entity-ID map key (e.g. ``battery_max_charge_current``).
             target_value: Desired value to set.
             tolerance_a: Absolute tolerance under which the write is skipped.
+            force: When ``True``, skip the readback comparison and always
+                issue the underlying ``number.set_value`` service call.
         """
         entity_id = self._entity_ids.get(role, "")
         if not entity_id:
+            _LOGGER.debug(
+                "inverter: number(%s) skip — no entity mapped (target=%g force=%s)",
+                role, target_value, force,
+            )
             return
         current = self._read_optional_float(role)
-        if current is not None and abs(current - target_value) <= tolerance_a:
+        if (
+            not force
+            and current is not None
+            and abs(current - target_value) <= tolerance_a
+        ):
+            _LOGGER.debug(
+                "inverter: number(%s) skip — cached=%g target=%g tol=%g entity=%s",
+                role, current, target_value, tolerance_a, entity_id,
+            )
             return
+        _LOGGER.debug(
+            "inverter: number(%s) write — cached=%s target=%g entity=%s force=%s",
+            role, current, target_value, entity_id, force,
+        )
         await self._hass.services.async_call(
             "number", "set_value",
             {"entity_id": entity_id, "value": target_value},

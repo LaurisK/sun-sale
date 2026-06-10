@@ -8,7 +8,7 @@ import pytest
 
 from custom_components.sun_sale.contract.models import StorageMode
 from custom_components.sun_sale.select import (
-    MODE_OVERRIDE_AUTO,
+    MODE_OVERRIDE_SUNSALE,
     ModeOverrideSelect,
     _OVERRIDE_OPTIONS,
 )
@@ -24,8 +24,8 @@ def _make_select(mode_override: StorageMode | None = None) -> tuple[ModeOverride
     return ModeOverrideSelect(coord, entry), coord
 
 
-def test_options_include_auto_sentinel_and_all_dispatchable_modes():
-    assert MODE_OVERRIDE_AUTO in _OVERRIDE_OPTIONS
+def test_options_include_sunsale_sentinel_and_all_dispatchable_modes():
+    assert MODE_OVERRIDE_SUNSALE in _OVERRIDE_OPTIONS
     for mode in (
         StorageMode.SelfUse,
         StorageMode.NoExport,
@@ -38,14 +38,15 @@ def test_options_include_auto_sentinel_and_all_dispatchable_modes():
     # UNKNOWN, TRACK, AUTO are not exposed as overrides.
     assert StorageMode.UNKNOWN.value not in _OVERRIDE_OPTIONS
     assert StorageMode.TRACK.value not in _OVERRIDE_OPTIONS
-    # StorageMode.AUTO.value == "auto" would collide with the sentinel; the
-    # sentinel itself is the only "auto" entry in the list.
-    assert _OVERRIDE_OPTIONS.count(MODE_OVERRIDE_AUTO) == 1
+    # StorageMode.AUTO (the inverter's hardware-default mode) is also not
+    # surfaced — the sunsale sentinel covers "release control" semantics.
+    assert StorageMode.AUTO.value not in _OVERRIDE_OPTIONS
+    assert _OVERRIDE_OPTIONS.count(MODE_OVERRIDE_SUNSALE) == 1
 
 
-def test_current_option_returns_auto_when_no_override():
+def test_current_option_returns_sunsale_when_no_override():
     sel, _ = _make_select(mode_override=None)
-    assert sel.current_option == MODE_OVERRIDE_AUTO
+    assert sel.current_option == MODE_OVERRIDE_SUNSALE
 
 
 def test_current_option_returns_mode_value_when_override_set():
@@ -53,9 +54,9 @@ def test_current_option_returns_mode_value_when_override_set():
     assert sel.current_option == "discharge"
 
 
-async def test_select_option_clears_override_when_auto():
+async def test_select_option_clears_override_when_sunsale():
     sel, coord = _make_select(mode_override=StorageMode.Discharge)
-    await sel.async_select_option(MODE_OVERRIDE_AUTO)
+    await sel.async_select_option(MODE_OVERRIDE_SUNSALE)
     assert coord.mode_override is None
     coord.async_request_refresh.assert_awaited_once()
 
@@ -107,11 +108,24 @@ async def test_restore_state_applies_persisted_override(monkeypatch):
     assert coord.mode_override == StorageMode.Discharge
 
 
-async def test_restore_state_clears_override_when_auto(monkeypatch):
+async def test_restore_state_clears_override_when_sunsale(monkeypatch):
     sel, coord = _make_select(mode_override=StorageMode.Discharge)
 
     async def _fake_last_state():
-        return SimpleNamespace(state=MODE_OVERRIDE_AUTO)
+        return SimpleNamespace(state=MODE_OVERRIDE_SUNSALE)
+
+    monkeypatch.setattr(sel, "async_get_last_state", _fake_last_state)
+    await sel.async_added_to_hass()
+
+    assert coord.mode_override is None
+
+
+async def test_restore_state_legacy_auto_treated_as_release(monkeypatch):
+    """Pre-rename installs persisted "auto"; ensure that maps to no-override."""
+    sel, coord = _make_select(mode_override=StorageMode.Discharge)
+
+    async def _fake_last_state():
+        return SimpleNamespace(state="auto")
 
     monkeypatch.setattr(sel, "async_get_last_state", _fake_last_state)
     await sel.async_added_to_hass()

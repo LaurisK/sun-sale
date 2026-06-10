@@ -41,6 +41,7 @@ _DEBUG_VIEW_KEY = f"{DOMAIN}_debug_view_registered"
 PLATFORMS = ["sensor", "switch", "number", "select"]
 
 SERVICE_FORCE_RECALCULATE = "force_recalculate"
+SERVICE_FORCE_VERIFY_INVERTER_MODE = "force_verify_inverter_mode"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -96,8 +97,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for coord in hass.data[DOMAIN].values():
             await coord.async_request_refresh()
 
+    async def handle_force_verify_inverter_mode(call: ServiceCall) -> None:
+        """Run an inverter-mode verify cycle now (skip the +30 s wait).
+
+        Useful for confirming engagement after a manual mode change without
+        waiting on the scheduled verify-tick. Fans out to every configured
+        sunSale instance so a multi-inverter setup verifies them all.
+        """
+        for coord in hass.data[DOMAIN].values():
+            await coord.force_verify_inverter_mode()
+
     if not hass.services.has_service(DOMAIN, SERVICE_FORCE_RECALCULATE):
         hass.services.async_register(DOMAIN, SERVICE_FORCE_RECALCULATE, handle_force_recalculate)
+    if not hass.services.has_service(DOMAIN, SERVICE_FORCE_VERIFY_INVERTER_MODE):
+        hass.services.async_register(
+            DOMAIN, SERVICE_FORCE_VERIFY_INVERTER_MODE,
+            handle_force_verify_inverter_mode,
+        )
 
     return True
 

@@ -472,12 +472,22 @@ class ObservedInverterModeSensor(_BaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Surface raw register readbacks alongside the decoded mode."""
+        """Surface raw register readbacks alongside the decoded mode.
+
+        Includes Phase 0 dispatch-engagement attributes (``last_dispatch_*``,
+        ``automation_enabled_at_dispatch``) so an operator can tell whether a
+        UI mode change actually reached ``apply_mode`` or was blocked by the
+        ``automation_enabled`` gate / lack of a schedule slot.
+        """
         reading = self._reading()
         if reading is None:
             return {}
         override = self.coordinator.mode_override
         target = self.coordinator.last_dispatched_action
+        dispatched_at = self.coordinator.last_dispatched_at
+        tick_at = self.coordinator.last_dispatch_tick_at
+        commanded_at = self.coordinator.last_commanded_at
+        verify_at = self.coordinator.last_verify_at
         return {
             "reg_43110_value": reading.reg_43110_value,
             "charge_a": reading.charge_a,
@@ -485,7 +495,22 @@ class ObservedInverterModeSensor(_BaseSensor):
             "rc_setpoint_w": reading.rc_setpoint_w,
             "backflow_power_w": reading.backflow_power_w,
             "last_dispatched_action": target,
+            "last_dispatched_at": dispatched_at.isoformat() if dispatched_at else None,
             "mode_override": override.value if override is not None else None,
+            "last_dispatch_outcome": self.coordinator.last_dispatch_outcome,
+            "last_dispatch_target": self.coordinator.last_dispatch_target,
+            "last_dispatch_tick_at": tick_at.isoformat() if tick_at else None,
+            "automation_enabled_at_dispatch": (
+                self.coordinator.automation_enabled_at_dispatch
+            ),
+            # Phase 2 verify loop: "commanded" is what we asked the inverter
+            # to do (our truth); "verify_state" answers "did it actually
+            # take effect" by reading register 43110 ~30s after the write.
+            "last_commanded_mode": self.coordinator.last_commanded_mode,
+            "last_commanded_at": commanded_at.isoformat() if commanded_at else None,
+            "verify_state": self.coordinator.verify_state,
+            "last_verify_at": verify_at.isoformat() if verify_at else None,
+            "last_verify_observed_reg": self.coordinator.last_verify_observed_reg,
         }
 
     def _reading(self) -> InverterModeReading | None:

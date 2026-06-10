@@ -1,10 +1,12 @@
 """Select entities for sunSale: manual StorageMode override.
 
 Exposes ``select.sunsale_mode_override`` with a list of all dispatchable
-``StorageMode`` values plus a sentinel ``auto`` option (the default). When
-``auto`` is selected the inverter control module follows the scheduler's
-current-slot choice; any other value is dispatched verbatim, regardless of
-what the planner picked. State persists across HA restarts via RestoreEntity.
+``StorageMode`` values plus a sentinel ``sunsale`` option (the default,
+rendered as "sunSale" in the panel UI). When ``sunsale`` is selected the
+inverter control module follows the scheduler's current-slot choice; any
+other value is dispatched verbatim — and bypasses the ``automation_enabled``
+gate (operator intent always reaches the inverter). State persists across
+HA restarts via RestoreEntity.
 
 Useful for experimentation: pair with the diagnostic
 ``sensor.sunsale_observed_inverter_mode`` to see whether the inverter
@@ -25,15 +27,22 @@ from .orchestration.coordinator import SunSaleCoordinator
 
 
 # Sentinel value indicating "no override — follow the scheduler's choice".
-MODE_OVERRIDE_AUTO = "auto"
+# Rendered as "sunSale" in the panel UI via the panel's option-label map.
+MODE_OVERRIDE_SUNSALE = "sunsale"
+
+# Legacy sentinel value from before the rename (was "auto"). Recognised by
+# the restore handler so users who had the old option persisted in HA state
+# come back as no-override after the upgrade.
+_LEGACY_AUTO_OPTION = "auto"
 
 # Modes the dispatcher can apply.
 #  - UNKNOWN  : observed-only label, never dispatched.
 #  - TRACK    : requires per-cycle setpoint plumbing the control module
 #               doesn't expose yet.
-#  - AUTO     : would label as "auto", colliding with the sentinel below — and
-#               its hardware-default semantics make it a poor manual choice
-#               anyway. Use the sentinel to release control instead.
+#  - AUTO     : the inverter's hardware-default mode; semantically a poor
+#               manual choice (the user wants a concrete mode, not the
+#               inverter's own default). Use the sunsale sentinel to release
+#               control to the scheduler instead.
 _DISPATCHABLE_MODES: tuple[StorageMode, ...] = (
     StorageMode.SelfUse,
     StorageMode.NoExport,
@@ -43,7 +52,7 @@ _DISPATCHABLE_MODES: tuple[StorageMode, ...] = (
     StorageMode.FeedIn,
 )
 
-_OVERRIDE_OPTIONS: list[str] = [MODE_OVERRIDE_AUTO] + [m.value for m in _DISPATCHABLE_MODES]
+_OVERRIDE_OPTIONS: list[str] = [MODE_OVERRIDE_SUNSALE] + [m.value for m in _DISPATCHABLE_MODES]
 
 
 async def async_setup_entry(
@@ -65,9 +74,10 @@ async def async_setup_entry(
 class ModeOverrideSelect(CoordinatorEntity, RestoreEntity, SelectEntity):
     """Manual StorageMode override exposed as a HA select entity.
 
-    ``auto`` releases the override so the scheduler drives mode selection;
-    any other option is dispatched verbatim each cycle. Persists via
-    RestoreEntity.
+    ``sunsale`` (rendered as "sunSale" in the panel) releases the override so
+    the scheduler drives mode selection; any other option is dispatched
+    verbatim each cycle, regardless of the ``automation_enabled`` switch.
+    Persists via RestoreEntity.
     """
 
     _attr_name = "sunSale Mode Override"
@@ -90,13 +100,17 @@ class ModeOverrideSelect(CoordinatorEntity, RestoreEntity, SelectEntity):
 
         HA may restore as ``unknown``/``unavailable`` during boot — those
         carry no decision, so we leave the coordinator at its init default
-        (no override).
+        (no override). The legacy ``auto`` sentinel (used before the rename
+        to ``sunsale``) is folded into the same "release override" path so
+        an upgrade from a previous install doesn't strand persisted state.
         """
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         if last is None:
             return
         state = last.state
+        if state == _LEGACY_AUTO_OPTION:
+            state = MODE_OVERRIDE_SUNSALE
         if state not in _OVERRIDE_OPTIONS:
             return
         self.coordinator.mode_override = _option_to_mode(state)
@@ -114,7 +128,7 @@ class ModeOverrideSelect(CoordinatorEntity, RestoreEntity, SelectEntity):
     def current_option(self) -> str:
         """Return the option label currently active on the coordinator."""
         override = self.coordinator.mode_override
-        return override.value if override is not None else MODE_OVERRIDE_AUTO
+        return override.value if override is not None else MODE_OVERRIDE_SUNSALE
 
     async def async_select_option(self, option: str) -> None:
         """Update the coordinator's override and request an immediate dispatch.
@@ -133,15 +147,15 @@ class ModeOverrideSelect(CoordinatorEntity, RestoreEntity, SelectEntity):
 
 
 def _option_to_mode(option: str) -> StorageMode | None:
-    """Resolve a select-option label to its StorageMode (or None for auto).
+    """Resolve a select-option label to its StorageMode (or None for sunsale).
 
     Args:
-        option: Option label such as ``"auto"`` or ``"discharge"``.
+        option: Option label such as ``"sunsale"`` or ``"discharge"``.
 
     Returns:
         The matching StorageMode, or ``None`` when ``option`` is the
-        ``auto`` sentinel.
+        ``sunsale`` sentinel (or the legacy ``auto`` sentinel).
     """
-    if option == MODE_OVERRIDE_AUTO:
+    if option == MODE_OVERRIDE_SUNSALE or option == _LEGACY_AUTO_OPTION:
         return None
     return StorageMode(option)

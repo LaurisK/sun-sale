@@ -377,6 +377,57 @@
             color: var(--secondary-text-color, #666);
             margin-right: 4px;
           }
+          /* Mode-override readout: commanded → observed + verify badge */
+          .sched-readout-mode {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px 8px;
+            align-items: center;
+            font-family: inherit;
+          }
+          .sched-readout-mode .label {
+            color: var(--secondary-text-color, #888);
+          }
+          .sched-readout-mode .value {
+            color: var(--primary-text-color, #eee);
+            font-weight: 600;
+          }
+          .sched-readout-mode .arrow {
+            color: var(--secondary-text-color, #666);
+          }
+          .sched-readout-mode .verify-badge {
+            padding: 1px 6px;
+            border-radius: 10px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+          }
+          .sched-readout-mode .verify-badge.ok {
+            background: rgba(102, 187, 106, 0.18);
+            color: #66bb6a;
+          }
+          .sched-readout-mode .verify-badge.pending {
+            background: rgba(255, 167, 38, 0.18);
+            color: #ffa726;
+          }
+          .sched-readout-mode .verify-badge.mismatch {
+            background: rgba(239, 83, 80, 0.22);
+            color: #ef5350;
+          }
+          /* Pending button: pulsing orange outline while verify is in flight. */
+          .sched-select button.selected.pending {
+            border-color: rgba(255, 167, 38, 0.75);
+            animation: sched-pulse 1.4s ease-in-out infinite;
+          }
+          @keyframes sched-pulse {
+            0%, 100% { box-shadow: 0 0 0 1px rgba(255, 167, 38, 0.35); }
+            50%      { box-shadow: 0 0 0 4px rgba(255, 167, 38, 0.10); }
+          }
+          /* Mismatch button: red outline, persistent (not animated). */
+          .sched-select button.selected.mismatch {
+            border-color: rgba(239, 83, 80, 0.75);
+            background: rgba(239, 83, 80, 0.18);
+          }
         </style>
         <div id="card">
           <div class="header-row">
@@ -507,7 +558,19 @@
       { key: 'mode_override', label: 'Mode override', match: ['mode_override'],
         // Sensor that shows the observed inverter state next to the override.
         readout_sensor_match: ['observed_inverter_mode'],
-        readout_label: 'Observed' },
+        readout_label: 'Observed',
+        // Display labels for the select options. The raw entity option strings
+        // (e.g. "sunsale", "self_use") are snake_case for HA compatibility;
+        // these prettier labels are used only when rendering buttons.
+        option_labels: {
+          sunsale:     'sunSale',
+          self_use:    'Self-use',
+          no_export:   'No export',
+          stand_by:    'Standby',
+          grid_charge: 'Grid charge',
+          discharge:   'Discharge',
+          feed_in:     'Feed-in',
+        } },
     ];
 
     _findEntityId(domain, matchAll) {
@@ -584,12 +647,13 @@
         const options = Array.isArray(st?.attributes?.options) ? st.attributes.options : [];
         const current = st?.state ?? '';
         const unavailable = !st || st.state === 'unavailable';
+        const labels = spec.option_labels || {};
         // Render each option as a button — native <select> dropdowns are
         // unreliable inside HA's shadow-DOM panel surface on some setups.
         const btnsHtml = options.map(opt =>
           `<button type="button" data-eid="${eid}" data-kind="select" data-option="${opt}"
                    class="${opt === current ? 'selected' : ''}"
-                   ${unavailable ? 'disabled' : ''}>${opt}</button>`
+                   ${unavailable ? 'disabled' : ''}>${labels[opt] || opt}</button>`
         ).join('');
         const readout = this._renderReadout(spec);
         return `<div class="sched-row sched-row-stacked" data-spec="${spec.key}">
@@ -635,6 +699,7 @@
       // Look up the companion sensor that backs a select's "Observed: ..." line.
       // Returns an empty string when no sensor is configured for this spec or
       // when the entity hasn't been published yet.
+      if (spec.key === 'mode_override') return this._renderModeReadout(spec);
       if (!spec.readout_sensor_match) return '';
       const sid = this._findEntityId('sensor', spec.readout_sensor_match);
       if (!sid) return '';
@@ -644,6 +709,51 @@
       return `<div class="sched-readout" data-readout-eid="${sid}">
         <span class="sched-readout-label">${label}:</span><span class="sched-readout-value">${value}</span>
       </div>`;
+    }
+
+    _renderModeReadout(spec) {
+      // Commanded → Observed comparison + verify-state badge. Wraps the inner
+      // render so _syncScheduleDrawer can refresh just the contents in place
+      // without rebuilding the surrounding row.
+      const sid = this._findEntityId('sensor', spec.readout_sensor_match);
+      if (!sid) return '';
+      const inner = this._renderModeReadoutInner(spec, sid);
+      return `<div class="sched-readout sched-readout-mode"
+                   data-readout-eid="${sid}" data-spec-key="${spec.key}">${inner}</div>`;
+    }
+
+    _renderModeReadoutInner(spec, sid) {
+      // Pure inner-HTML producer — no wrapper div. Reads the observed-mode
+      // sensor's attributes (Phase 2) and produces:
+      //   "Commanded: <X> → Observed: <Y>  [badge]"
+      // The badge reflects the verify loop: ok / pending / mismatch.
+      const st = this._hass.states[sid];
+      const attrs = st?.attributes || {};
+      const labels = spec.option_labels || {};
+      const pretty = (v) => (v == null ? null : (labels[v] || v));
+
+      const commanded = pretty(attrs.last_commanded_mode);
+      // Observed state string is "<mode>(reg=..., chg_a=..., ...)" — pull
+      // just the mode word for the headline; full string still on the sensor.
+      const obsRaw = st?.state ?? 'unavailable';
+      const obsMode = (obsRaw.match(/^([^(\s]+)/) || [null, obsRaw])[1];
+      const observed = pretty(obsMode) || obsRaw;
+
+      const verify = attrs.verify_state || null;
+      let badgeCls = '';
+      let badgeText = '';
+      if (verify === 'ok')        { badgeCls = 'ok';       badgeText = '✓ Engaged'; }
+      else if (verify === 'pending')  { badgeCls = 'pending';  badgeText = '⏳ Verifying…'; }
+      else if (verify === 'mismatch') { badgeCls = 'mismatch'; badgeText = '⚠ Mismatch'; }
+
+      const commandedHtml = commanded
+        ? `<span class="label">Commanded:</span><span class="value">${commanded}</span><span class="arrow">→</span>`
+        : '';
+      const badgeHtml = badgeText
+        ? `<span class="verify-badge ${badgeCls}">${badgeText}</span>`
+        : '';
+
+      return `${commandedHtml}<span class="label">Observed:</span><span class="value">${observed}</span>${badgeHtml}`;
     }
 
     _syncScheduleDrawer() {
@@ -678,14 +788,42 @@
       // For the button-group selects, sync the `.selected` class on each
       // button against the entity state. A full re-render is unnecessary
       // because the option set doesn't change at runtime.
+      // For the mode-override group only, also mirror the verify_state
+      // (pending / mismatch) of the observed-mode sensor onto the selected
+      // button so the operator sees the engagement state at a glance.
+      const modeSpec = this._SCHEDULE_SELECTS.find(s => s.key === 'mode_override');
+      const modeReadoutSid = modeSpec
+        ? this._findEntityId('sensor', modeSpec.readout_sensor_match) : null;
+      const modeVerifyState = modeReadoutSid
+        ? this._hass.states[modeReadoutSid]?.attributes?.verify_state : null;
       panel.querySelectorAll('button[data-kind="select"]').forEach((el) => {
         const st = this._hass.states[el.dataset.eid];
         if (!st) return;
         const unavailable = st.state === 'unavailable';
         el.disabled = unavailable;
-        el.classList.toggle('selected', !unavailable && el.dataset.option === st.state);
+        const isSelected = !unavailable && el.dataset.option === st.state;
+        el.classList.toggle('selected', isSelected);
+        // Verify-state badges only meaningful for the mode-override group.
+        const isModeOverride = el.dataset.eid &&
+          el.dataset.eid.includes('mode_override');
+        el.classList.toggle(
+          'pending', isModeOverride && isSelected && modeVerifyState === 'pending'
+        );
+        el.classList.toggle(
+          'mismatch', isModeOverride && isSelected && modeVerifyState === 'mismatch'
+        );
       });
       panel.querySelectorAll('.sched-readout').forEach((el) => {
+        // The mode-override readout is a structured commanded-vs-observed
+        // composition (built by _renderModeReadoutInner) — re-render its
+        // inner HTML in place rather than swapping a single value span.
+        if (el.dataset.specKey === 'mode_override') {
+          const spec = this._SCHEDULE_SELECTS.find(s => s.key === el.dataset.specKey);
+          if (spec) el.innerHTML = this._renderModeReadoutInner(
+            spec, el.dataset.readoutEid,
+          );
+          return;
+        }
         const st = this._hass.states[el.dataset.readoutEid];
         const valueEl = el.querySelector('.sched-readout-value');
         if (valueEl) valueEl.textContent = st?.state ?? 'unavailable';
