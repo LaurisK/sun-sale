@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from homeassistant.components.frontend import async_remove_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
@@ -15,7 +16,11 @@ from .contract.const import DOMAIN
 from .orchestration.coordinator import SunSaleCoordinator
 from .orchestration.debug_view import SunSaleDebugView
 
-_PANEL_KEY = f"{DOMAIN}_panel_registered"
+# Stores the JS hash the panel is currently registered with; a value mismatch
+# on subsequent setups means the panel.js changed and we must re-register so
+# the frontend ``?v=<hash>`` query bypasses the browser's cached ES module.
+_PANEL_KEY = f"{DOMAIN}_panel_registered_hash"
+_STATIC_REGISTERED_KEY = f"{DOMAIN}_static_registered"
 _STATIC_PATH = "/sun_sale"
 _PANEL_URL = "sun-sale"
 _WEBCOMPONENT = "sun-sale-panel"
@@ -72,7 +77,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(SunSaleDebugView())
         hass.data[_DEBUG_VIEW_KEY] = True
 
-    if not hass.data.get(_PANEL_KEY):
+    if not hass.data.get(_STATIC_REGISTERED_KEY):
         await hass.http.async_register_static_paths([
             StaticPathConfig(
                 _STATIC_PATH,
@@ -80,17 +85,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 cache_headers=False,
             )
         ])
+        hass.data[_STATIC_REGISTERED_KEY] = True
+
+    # Re-register the panel whenever the JS hash changes so an integration
+    # reload (without a full HA restart) busts the browser's ES-module cache
+    # via the ?v=<hash> query string in the module URL.
+    current_hash = _js_hash("sun-sale-panel.js")
+    if hass.data.get(_PANEL_KEY) != current_hash:
+        if hass.data.get(_PANEL_KEY) is not None:
+            # Stale registration from a previous setup — clear it so the
+            # new module_url takes effect. async_remove_panel raises if the
+            # panel was never registered; we already checked the key.
+            try:
+                async_remove_panel(hass, _PANEL_URL)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
         await async_register_panel(
             hass,
             frontend_url_path=_PANEL_URL,
             webcomponent_name=_WEBCOMPONENT,
             sidebar_title="Sun Sale",
             sidebar_icon="mdi:solar-panel",
-            module_url=f"{_STATIC_PATH}/sun-sale-panel.js?v={_js_hash('sun-sale-panel.js')}",
+            module_url=f"{_STATIC_PATH}/sun-sale-panel.js?v={current_hash}",
             require_admin=False,
             config={},
         )
-        hass.data[_PANEL_KEY] = True
+        hass.data[_PANEL_KEY] = current_hash
 
     async def handle_force_recalculate(call: ServiceCall) -> None:
         """Trigger an immediate refresh on all sunSale coordinator instances."""

@@ -733,13 +733,18 @@
       const pretty = (v) => (v == null ? null : (labels[v] || v));
 
       const commanded = pretty(attrs.last_commanded_mode);
+      const verify = attrs.verify_state || null;
       // Observed state string is "<mode>(reg=..., chg_a=..., ...)" — pull
       // just the mode word for the headline; full string still on the sensor.
+      // BUT: sensor.state only updates on the 5-min coordinator cycle, while
+      // verify_state flips to "ok" within seconds of the inverter accepting
+      // the write. To avoid showing "Commanded: Feed-in → Observed: Self-use
+      // ✓ Engaged" during that window, trust the verify verdict: when ok,
+      // observed == commanded by definition (register 43110 matched).
       const obsRaw = st?.state ?? 'unavailable';
       const obsMode = (obsRaw.match(/^([^(\s]+)/) || [null, obsRaw])[1];
-      const observed = pretty(obsMode) || obsRaw;
-
-      const verify = attrs.verify_state || null;
+      let observed = pretty(obsMode) || obsRaw;
+      if (verify === 'ok' && commanded) observed = commanded;
       let badgeCls = '';
       let badgeText = '';
       if (verify === 'ok')        { badgeCls = 'ok';       badgeText = '✓ Engaged'; }

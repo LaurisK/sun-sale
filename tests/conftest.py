@@ -50,6 +50,7 @@ _HA_MODULES = [
     "homeassistant.helpers.storage",
     "homeassistant.helpers.entity_platform",
     "homeassistant.components",
+    "homeassistant.components.frontend",
     "homeassistant.components.http",
     "homeassistant.components.panel_custom",
     "homeassistant.components.sensor",
