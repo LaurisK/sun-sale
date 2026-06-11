@@ -353,6 +353,72 @@ async def test_current_target_override_wins_even_without_schedule():
 
 
 # ---------------------------------------------------------------------------
+# Direct dispatch entry point (panel button — no full coordinator refresh)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_override_force_writes_the_override():
+    """dispatch_override pushes the override straight to the inverter."""
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.dispatch_override(
+        now=NOW, schedule=None,
+        mode_override=StorageMode.Discharge,
+        automation_enabled=False,
+    )
+    inv.apply_mode.assert_awaited_once()
+    assert inv.apply_mode.await_args.args[0] == StorageMode.Discharge
+    # Force-write bypasses the solis_modbus readback cache, same as a tick.
+    assert inv.apply_mode.await_args.kwargs.get("force") is True
+    assert mod.last_dispatch_outcome == "ok"
+    assert mod.last_commanded_mode == StorageMode.Discharge
+
+
+@pytest.mark.asyncio
+async def test_dispatch_override_release_falls_back_to_schedule_slot():
+    """Releasing to sunsale (None) dispatches the current slot's mode at once."""
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.dispatch_override(
+        now=NOW, schedule=_schedule_with(StorageMode.GridCharge),
+        mode_override=None,
+        automation_enabled=True,
+    )
+    inv.apply_mode.assert_awaited_once()
+    assert inv.apply_mode.await_args.args[0] == StorageMode.GridCharge
+
+
+@pytest.mark.asyncio
+async def test_dispatch_override_observer_only_when_off_and_released():
+    """No override + automation off → observer-only, no write."""
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.dispatch_override(
+        now=NOW, schedule=_schedule_with(StorageMode.SelfUse),
+        mode_override=None,
+        automation_enabled=False,
+    )
+    inv.apply_mode.assert_not_awaited()
+    assert mod.last_dispatch_outcome == "automation_disabled"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_override_does_not_touch_automation_tracking():
+    """An override press is not an automation toggle — reassert stays disarmed."""
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.dispatch_override(
+        now=NOW, schedule=None,
+        mode_override=StorageMode.FeedIn,
+        automation_enabled=True,
+    )
+    # tick's False→True re-assert bookkeeping is untouched by a direct dispatch.
+    assert mod._reassert_next is False
+    assert mod._last_automation_enabled is None
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: commanded-mode tracking + verify loop
 # ---------------------------------------------------------------------------
 

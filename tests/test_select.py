@@ -18,7 +18,7 @@ def _make_select(mode_override: StorageMode | None = None) -> tuple[ModeOverride
     """Build a ModeOverrideSelect wired to a MagicMock coordinator."""
     coord = MagicMock()
     coord.mode_override = mode_override
-    coord.async_request_refresh = AsyncMock()
+    coord.dispatch_mode_override = AsyncMock()
     entry = MagicMock()
     entry.entry_id = "test_entry"
     return ModeOverrideSelect(coord, entry), coord
@@ -58,7 +58,7 @@ async def test_select_option_clears_override_when_sunsale():
     sel, coord = _make_select(mode_override=StorageMode.Discharge)
     await sel.async_select_option(MODE_OVERRIDE_SUNSALE)
     assert coord.mode_override is None
-    coord.async_request_refresh.assert_awaited_once()
+    coord.dispatch_mode_override.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -75,14 +75,14 @@ async def test_select_option_sets_override_to_chosen_mode(option, expected):
     sel, coord = _make_select(mode_override=None)
     await sel.async_select_option(option)
     assert coord.mode_override == expected
-    coord.async_request_refresh.assert_awaited_once()
+    coord.dispatch_mode_override.assert_awaited_once()
 
 
 async def test_select_option_ignores_unknown_label():
     sel, coord = _make_select(mode_override=StorageMode.SelfUse)
     await sel.async_select_option("bogus")
     assert coord.mode_override == StorageMode.SelfUse
-    coord.async_request_refresh.assert_not_awaited()
+    coord.dispatch_mode_override.assert_not_awaited()
 
 
 def test_unique_id_uses_entry_id():

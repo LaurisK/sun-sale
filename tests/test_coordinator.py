@@ -275,3 +275,43 @@ def test_pipeline_calculation_is_calculation_result():
 def test_pipeline_schedule_is_schedule():
     from custom_components.sun_sale.contract.models import Schedule
     assert isinstance(_make_pipeline_data()["schedule"], Schedule)
+
+
+# ---------------------------------------------------------------------------
+# dispatch_mode_override — lightweight panel-button dispatch path
+# ---------------------------------------------------------------------------
+
+async def test_dispatch_mode_override_noop_before_control_module():
+    """Returns quietly when the control module isn't built yet (early setup)."""
+    coord, _ = _make_coordinator()
+    coord._control_module = None
+    await coord.dispatch_mode_override()  # must not raise
+
+
+async def test_dispatch_mode_override_forwards_to_control_module():
+    """Forwards override + schedule to dispatch_override without a full refresh."""
+    from unittest.mock import AsyncMock
+    from custom_components.sun_sale.contract.models import StorageMode
+
+    coord, _ = _make_coordinator()
+    module = MagicMock()
+    module.dispatch_override = AsyncMock()
+    coord._control_module = module
+    coord.mode_override = StorageMode.Discharge
+    coord.automation_enabled = False
+    schedule = _make_pipeline_data()["schedule"]
+    coord.data = {"schedule": schedule}
+    coord.async_request_refresh = AsyncMock()
+    coord.async_update_listeners = MagicMock()
+
+    await coord.dispatch_mode_override()
+
+    module.dispatch_override.assert_awaited_once()
+    kwargs = module.dispatch_override.await_args.kwargs
+    assert kwargs["mode_override"] == StorageMode.Discharge
+    assert kwargs["schedule"] is schedule
+    assert kwargs["automation_enabled"] is False
+    # The lightweight path must not trigger a full DAG refresh...
+    coord.async_request_refresh.assert_not_awaited()
+    # ...but must push fresh state to the panel.
+    coord.async_update_listeners.assert_called_once()

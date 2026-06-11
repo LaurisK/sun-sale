@@ -208,7 +208,6 @@ class InverterControlModule:
             back to the rolling-history store.
         """
         updated_history = self._record_observation(now, reading, history)
-        self._last_dispatch_at = now
         # A False→True automation transition is an operator request to
         # re-assert the scheduled mode: while automation was paused the
         # inverter may have drifted (or been changed at its own screen), and
@@ -219,15 +218,76 @@ class InverterControlModule:
             self._reassert_next = True
         self._last_automation_enabled = automation_enabled
 
-        # Dispatch when scheduled automation is on OR an explicit operator
-        # override is set. The override bypasses ``automation_enabled`` by
-        # design — selecting a mode in the UI is an operator command and must
-        # reach the inverter even when scheduled writes are paused.
+        await self._apply_dispatch(now, schedule, automation_enabled, mode_override)
+        return updated_history
+
+    async def dispatch_override(
+        self,
+        now: datetime,
+        schedule: Schedule | None,
+        mode_override: StorageMode | None,
+        automation_enabled: bool,
+    ) -> None:
+        """Dispatch the operator's override immediately, skipping the DAG cycle.
+
+        Lightweight entry point for the mode-override select: a button press
+        reaches the inverter without triggering a full coordinator refresh
+        (translators, DAG nodes, store saves). Runs the same plan → act →
+        verify path as ``tick``'s dispatch phase but omits the observe step and
+        the history return — the next regular ``tick`` records the resulting
+        observation. The verify loop started here behaves identically to one
+        started from a scheduled tick.
+
+        Args:
+            now: Cycle timestamp (tz-aware), used for slot resolution and the
+                verify window start.
+            schedule: Latest Schedule (the coordinator's last computed one),
+                consulted only when ``mode_override`` is ``None`` — releasing
+                the override back to ``sunsale`` dispatches the current slot's
+                mode immediately rather than waiting for the next tick.
+            mode_override: The override to dispatch, or ``None`` to release to
+                the scheduler's current-slot choice.
+            automation_enabled: Gates the scheduler path only; an explicit
+                ``mode_override`` dispatches regardless (operator intent).
+
+        Note:
+            Unlike ``tick``, this does **not** touch the automation-transition
+            bookkeeping (``_reassert_next`` / ``_last_automation_enabled``) —
+            an override press is not an automation toggle.
+        """
+        await self._apply_dispatch(now, schedule, automation_enabled, mode_override)
+
+    async def _apply_dispatch(
+        self,
+        now: datetime,
+        schedule: Schedule | None,
+        automation_enabled: bool,
+        mode_override: StorageMode | None,
+    ) -> None:
+        """Resolve the target and run the act + verify path; update diagnostics.
+
+        Shared dispatch core for ``tick`` (regular cycle) and
+        ``dispatch_override`` (instant panel button). Records the dispatch
+        timestamp, outcome, target, and per-register status; performs no
+        observation and returns no history. Dispatches when scheduled
+        automation is on OR an explicit override is set — the override bypasses
+        ``automation_enabled`` by design, since selecting a mode in the UI is an
+        operator command that must reach the inverter even when scheduled
+        writes are paused.
+
+        Args:
+            now: Cycle timestamp (tz-aware).
+            schedule: Latest Schedule, or ``None``.
+            automation_enabled: Gates the scheduler path; ignored when
+                ``mode_override`` is set.
+            mode_override: Operator override, or ``None`` for the scheduler.
+        """
+        self._last_dispatch_at = now
         if not automation_enabled and mode_override is None:
             self._last_dispatch_outcome = "automation_disabled"
             self._last_dispatch_target = None
             self._register_status = self._build_register_status()
-            return updated_history
+            return
 
         outcome, target = await self._dispatch_current_slot(
             now, schedule, mode_override
@@ -235,7 +295,6 @@ class InverterControlModule:
         self._last_dispatch_outcome = outcome
         self._last_dispatch_target = target
         self._register_status = self._build_register_status()
-        return updated_history
 
     @property
     def last_dispatch_outcome(self) -> str | None:

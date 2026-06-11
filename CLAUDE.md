@@ -80,6 +80,22 @@ The legacy sentinel `"auto"` is folded into `"sunsale"` by the restore
 handler in `select.py:async_added_to_hass`, so upgrading from a pre-rename
 install does not strand persisted state.
 
+**Direct dispatch on button press.** Selecting an option in
+`select.sunsale_mode_override` does *not* trigger a full coordinator
+refresh — that would re-run 14 translators, 16 DAG nodes, and a dozen store
+saves just to reach the dispatcher. Instead `async_select_option` calls
+`coordinator.dispatch_mode_override`, which routes straight to
+`InverterControlModule.dispatch_override` — a lightweight sibling of `tick`
+that runs only the plan → act → verify path (no observe, no history). It
+shares the act path with `tick` via the private `_apply_dispatch` core;
+releasing the override to `sunsale` (`None`) still dispatches the current
+schedule slot's mode immediately, using the last-computed `Schedule` cached
+in `coordinator.data`. The button thus feels instant, and the next regular
+tick reconciles the rest of the pipeline. Unlike `tick`, the direct path
+deliberately leaves the automation-transition bookkeeping
+(`_reassert_next` / `_last_automation_enabled`) untouched — a button press
+is not an automation toggle.
+
 `sensor.sunsale_observed_inverter_mode` surfaces per-tick dispatch
 diagnostics — `last_dispatch_outcome` (`ok` write issued / `reconcile`
 re-write for an unchanged target / `holding` target unchanged and engaged /

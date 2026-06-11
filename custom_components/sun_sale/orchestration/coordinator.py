@@ -769,6 +769,35 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             return
         await self._control_module.force_verify_now()
 
+    async def dispatch_mode_override(self) -> None:
+        """Push the current ``mode_override`` to the inverter immediately.
+
+        Lightweight alternative to ``async_request_refresh`` for the
+        mode-override select: a button press dispatches through the control
+        module's ``dispatch_override`` entry point, skipping the full DAG
+        refresh (14 translators, 16 nodes, the store saves) that
+        ``async_request_refresh`` would incur just to reach the dispatcher.
+        The override (or, when released to ``sunsale``, the current slot from
+        the last computed Schedule) reaches the inverter at once; the next
+        regular tick reconciles the rest of the pipeline.
+
+        Mirrors the resulting dispatch + verify state and notifies listeners so
+        the panel's badge and per-register colours update instantly. A no-op
+        before the control module is built (early ``async_setup``).
+        """
+        if self._control_module is None:
+            return
+        now = datetime.now(timezone.utc)
+        schedule = self.data.get("schedule") if isinstance(self.data, dict) else None
+        await self._control_module.dispatch_override(
+            now=now,
+            schedule=schedule,
+            mode_override=self.mode_override,
+            automation_enabled=self.automation_enabled,
+        )
+        self._mirror_control_module_state()
+        self.async_update_listeners()
+
     def _mirror_control_module_state(self) -> None:
         """Copy the control module's dispatch + verify state onto the coordinator.
 

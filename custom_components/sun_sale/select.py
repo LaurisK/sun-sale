@@ -142,8 +142,10 @@ class ModeOverrideSelect(CoordinatorEntity, RestoreEntity, SelectEntity):
         self.async_write_ha_state()
         # Push the new override to the inverter without waiting for the next
         # 5-minute tick — manual overrides are usually for experimentation
-        # where the operator expects an immediate effect.
-        await self.coordinator.async_request_refresh()
+        # where the operator expects an immediate effect. This dispatches
+        # straight through the control module rather than triggering a full
+        # coordinator refresh (the whole DAG) just to reach the dispatcher.
+        await self.coordinator.dispatch_mode_override()
 
 
 def _option_to_mode(option: str) -> StorageMode | None:
