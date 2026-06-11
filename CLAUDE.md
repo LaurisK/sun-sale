@@ -209,7 +209,7 @@ When adding a new pipeline module:
 
 ## Observed-series bake-in
 
-`inbound/observed_engine.py` is the shared engine for `observed_generation`
+`inbound/observer/engine.py` is the shared engine for `observed_generation`
 and `observed_grid`. It is parameterised by a list of `Side` specs (1 for
 generation, 2 for grid: import + export). `build_slots_for_window` takes
 `samples_by_side: dict[str, Sequence]` — each side averages its own stream
@@ -233,7 +233,7 @@ The coordinator also synthesises a signed `grid_power_kw` value purely for
 dashboard display — nothing downstream uses it.
 
 Today's slots are raw averaged each cycle; yesterday is finalised once per
-(date, side) by `try_bake_yesterday` in `inbound/observed_bake_in.py`, which:
+(date, side) by `try_bake_yesterday` in `inbound/observer/bake_in.py`, which:
 
 1. Resolves an authoritative yesterday-total via
    `inbound/yesterday_total_resolver.py`. Preferred source is a dedicated HA
