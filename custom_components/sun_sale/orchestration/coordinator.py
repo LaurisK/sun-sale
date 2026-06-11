@@ -906,7 +906,8 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         # Phase 0 visibility: per-tick dispatch outcome surfaced on the
         # ObservedInverterModeSensor. ``last_dispatched_action`` reflects only
         # successful writes; these fields reflect the latest tick regardless
-        # of outcome (no_target, no_spec, automation_disabled, ok).
+        # of outcome (no_target, no_spec, automation_disabled, ok, reconcile,
+        # holding).
         self.last_dispatch_outcome: str | None = None
         self.last_dispatch_target: str | None = None
         self.last_dispatch_tick_at: datetime | None = None

@@ -61,11 +61,13 @@ Three rules govern dispatch in
 
 - **Write once, on change.** `apply_mode` runs only on the cycle the
   resolved target *differs* from `last_commanded_mode` — a button press, or
-  a schedule slot boundary. Holding the same target re-asserts nothing:
-  `_dispatch_current_slot` returns the `holding` outcome and issues no
-  Modbus write. The mode is set once and then observed; a failed or drifted
-  write is recovered by the verify loop (below), not by blind re-asserts
-  every cycle. This is the fix for the inverter mode being "constantly set".
+  a schedule slot boundary. Holding an unchanged, engaged target re-asserts
+  nothing: `_dispatch_current_slot` returns the `holding` outcome and issues
+  no Modbus write. The mode is set once and then observed; a freshly-failed
+  write is recovered by the verify loop (below). A *drift* that appears after
+  the verify window has closed is recovered by the slow reconciliation path
+  (further below) — not by blind re-asserts every cycle. This is the fix for
+  the inverter mode being "constantly set".
 - **Override bypasses `automation_enabled`.** When `coordinator.mode_override`
   is set, the dispatcher resolves the override as the target regardless of
   the automation switch. Operator intent always reaches the inverter (once,
@@ -79,11 +81,12 @@ handler in `select.py:async_added_to_hass`, so upgrading from a pre-rename
 install does not strand persisted state.
 
 `sensor.sunsale_observed_inverter_mode` surfaces per-tick dispatch
-diagnostics — `last_dispatch_outcome` (`ok` write issued / `holding` target
-unchanged / `no_target` / `no_spec` / `automation_disabled`),
-`last_dispatch_target`, `last_dispatch_tick_at`, and
-`automation_enabled_at_dispatch` — so a user can confirm whether a UI mode
-change actually reached `apply_mode` or fell through one of the gates.
+diagnostics — `last_dispatch_outcome` (`ok` write issued / `reconcile`
+re-write for an unchanged target / `holding` target unchanged and engaged /
+`no_target` / `no_spec` / `automation_disabled`), `last_dispatch_target`,
+`last_dispatch_tick_at`, and `automation_enabled_at_dispatch` — so a user can
+confirm whether a UI mode change actually reached `apply_mode` or fell
+through one of the gates.
 
 ### Commanded-mode tracking + verify loop (Phase 2)
 
@@ -117,6 +120,43 @@ reschedule). `sensor.sunsale_observed_inverter_mode` exposes
 `last_verify_at`, `last_verify_observed_reg`, and `register_status` (the
 per-register desired-vs-observed rows) so the operator can see the loop
 status at a glance.
+
+### Slow drift reconciliation (Phase 2.5)
+
+The verify loop only lives ~60 s after a commanded change. Once it settles
+on `verify_state == "ok"`, nothing in Phases 0–2 corrects a *later* drift —
+the inverter being changed at its own screen, or a register slipping — while
+the schedule holds the same mode. `_dispatch_current_slot` would keep
+returning `holding` and the panel would show a red register grid for hours
+without acting. The reconciliation path closes that gap:
+
+- **Drift re-command.** On every `holding` tick where `verify_state == "ok"`,
+  `_registers_drifted()` re-checks the commanded mode's registers against the
+  inverter. A drift increments a consecutive-cycle counter; at
+  `_DRIFT_RECONCILE_CYCLES` (default 2 ticks ≈ 10 min — a debounce against a
+  single transient readback glitch) the unchanged target is re-commanded via
+  the same force-write + verify-loop path (`outcome = "reconcile"`). The
+  counter resets the moment a tick reads clean, or on any write.
+- **Conditioned on `ok`.** Drift reconciliation only runs from the steady
+  engaged state. It deliberately does **not** fire while `verify_state` is
+  `pending` (the verify loop owns that window) or `mismatch` (the verify
+  loop's terminal "this write won't take — check the Modbus chain" verdict is
+  respected; a stuck inverter is not re-spammed every few cycles).
+- **`mismatch` self-heal.** If a `holding` tick finds `verify_state ==
+  "mismatch"` but the registers now all match (operator fixed it at the
+  inverter, comms restored), `verify_state` flips back to `ok` — the terminal
+  mismatch never re-checks on its own, so the badge would otherwise stay red
+  forever.
+- **Automation re-enable re-asserts.** A False→True `automation_enabled`
+  transition arms `_reassert_next`, so the next dispatch re-commands the
+  scheduled mode even if it equals `last_commanded_mode` (the inverter may
+  have drifted while automation was paused). Without this, toggling automation
+  off→on never re-asserted, because `last_commanded_mode` survived the pause.
+
+Both triggers re-enter `_force_write_and_verify` (the shared force-write +
+verify-restart block), so a reconciliation is verified exactly like a fresh
+command — it can itself converge to `ok` or, if the write genuinely won't
+take, settle at `mismatch` and stop.
 
 Because the verify loop runs on `async_call_later` *between* coordinator
 ticks, the module pushes an `on_state_change` callback

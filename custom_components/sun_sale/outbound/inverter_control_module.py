@@ -30,6 +30,17 @@ the DAG run. The module does three things in this fixed order:
      the diagnostic sensor so the operator can see that the write is not
      reaching the inverter (Modbus chain issue, mode lock, etc.).
 
+  5. **Reconcile (slow drift recovery).** The verify loop only lives ~60 s.
+     Past that, an engaged mode (``verify_state == "ok"``) is re-checked
+     against the inverter every tick; if its registers stay drifted for
+     ``_DRIFT_RECONCILE_CYCLES`` consecutive ticks, the unchanged target is
+     re-commanded (back through step 4). A False→True ``automation_enabled``
+     transition arms the same re-command so re-enabling automation re-asserts
+     the scheduled mode. This is what makes "a drifted write is recovered"
+     true beyond the verify window — without it, a held mode that drifts (or
+     is changed at the inverter screen) would show red on the panel and never
+     self-correct.
+
 Persistence is the coordinator's responsibility — this module takes the
 existing history in, returns the updated one, and the coordinator writes
 it back through a ``PersistentStore``.
@@ -74,6 +85,15 @@ _LOGGER = logging.getLogger(__name__)
 _VERIFY_INITIAL_DELAY_S = 2
 _VERIFY_POLL_INTERVAL_S = 5
 _VERIFY_WINDOW_S = 30
+
+# Slow drift-reconciliation threshold. Once the verify loop has confirmed a
+# mode (``verify_state == "ok"``), the registers are re-checked every
+# coordinator tick. If they disagree with the commanded spec for this many
+# *consecutive* ticks, the mode is re-commanded. Two ticks (~5 min cadence →
+# ~10 min) debounces a single transient readback glitch while still catching a
+# real drift — an inverter-screen change or a register that slipped — long
+# after the verify loop's ~60 s window has closed.
+_DRIFT_RECONCILE_CYCLES = 2
 
 
 class InverterControlModule:
@@ -147,6 +167,14 @@ class InverterControlModule:
         # mode. Refreshed every tick and every verify-tick; drives the panel's
         # green/amber/red register readout. Empty until the first command.
         self._register_status: list[dict[str, Any]] = []
+        # Slow drift reconciliation. ``_consecutive_drift_cycles`` counts
+        # consecutive holding ticks where the verified mode's registers no
+        # longer match; at ``_DRIFT_RECONCILE_CYCLES`` we re-command.
+        # ``_reassert_next`` is armed by a False→True ``automation_enabled``
+        # transition so re-enabling automation re-asserts the scheduled mode
+        # (the inverter may have drifted while automation was paused).
+        self._consecutive_drift_cycles: int = 0
+        self._reassert_next: bool = False
 
     async def tick(
         self,
@@ -181,6 +209,14 @@ class InverterControlModule:
         """
         updated_history = self._record_observation(now, reading, history)
         self._last_dispatch_at = now
+        # A False→True automation transition is an operator request to
+        # re-assert the scheduled mode: while automation was paused the
+        # inverter may have drifted (or been changed at its own screen), and
+        # the "write once, then hold" rule would otherwise never re-write it.
+        # ``is False`` excludes the first-ever tick (None→True is a fresh
+        # start, not a re-enable).
+        if automation_enabled and self._last_automation_enabled is False:
+            self._reassert_next = True
         self._last_automation_enabled = automation_enabled
 
         # Dispatch when scheduled automation is on OR an explicit operator
@@ -206,11 +242,13 @@ class InverterControlModule:
         """Return the outcome label of the most recent ``tick``.
 
         One of ``ok`` (a write was issued — the resolved target differed from
-        the last-commanded mode), ``holding`` (target unchanged — no write,
-        observer + verify only), ``no_target`` (no override + no schedule
-        slot covering now), ``no_spec`` (target mode lacks a register spec),
-        ``automation_disabled`` (no override and automation off —
-        observer-only), or ``None`` before the first tick.
+        the last-commanded mode), ``reconcile`` (a re-write was issued for an
+        *unchanged* target — sustained register drift or an automation
+        re-enable; see ``_reconcile_reason``), ``holding`` (target unchanged
+        and engaged — no write, observer + verify only), ``no_target`` (no
+        override + no schedule slot covering now), ``no_spec`` (target mode
+        lacks a register spec), ``automation_disabled`` (no override and
+        automation off — observer-only), or ``None`` before the first tick.
         """
         return self._last_dispatch_outcome
 
@@ -367,10 +405,11 @@ class InverterControlModule:
 
         Returns:
             ``(outcome, target)`` — outcome is one of ``ok`` (a write was
-            issued because the target changed), ``holding`` (target unchanged,
-            no write), ``no_target``, or ``no_spec``; target is the
-            StorageMode the dispatcher resolved to (``None`` only when
-            ``outcome == no_target``).
+            issued because the target changed), ``reconcile`` (a re-write was
+            issued for an unchanged target — drift or automation re-enable),
+            ``holding`` (target unchanged and engaged, no write),
+            ``no_target``, or ``no_spec``; target is the StorageMode the
+            dispatcher resolved to (``None`` only when ``outcome == no_target``).
         """
         source = "override" if mode_override is not None else "schedule"
         if mode_override is not None:
@@ -393,21 +432,127 @@ class InverterControlModule:
             return ("no_spec", target)
         # The mode is written exactly once, on the cycle the resolved target
         # changes (a button press, or a schedule slot boundary). Holding the
-        # same target re-asserts nothing — the inverter was already commanded
-        # and the verify loop confirms it took. Re-writing every cycle is what
-        # the operator experiences as the mode being "constantly set"; it also
-        # risks fighting a deliberate manual change between slots. A failed or
-        # drifted write is recovered by the verify loop, not by blind re-asserts.
+        # same target re-asserts nothing on the common path — the inverter was
+        # already commanded and the verify loop confirms it took. Re-writing
+        # every cycle is what the operator experiences as the mode being
+        # "constantly set". The verify loop only lives ~60 s, though, so two
+        # things still warrant a re-command of an *unchanged* target: a
+        # sustained register drift after engagement, and an automation
+        # re-enable. ``_reconcile_reason`` decides; everything else holds.
         if target == self._last_commanded_mode:
-            _LOGGER.debug(
-                "inverter_control: holding %s (source=%s, no commanded change "
-                "— observe + verify only)",
-                target.value, source,
+            drifted = self._registers_drifted()
+            # Self-heal a stale terminal ``mismatch``: the verify loop's
+            # mismatch verdict never re-checks, but if the inverter has since
+            # returned to the commanded spec (operator fixed it, comms
+            # restored) reflect that instead of showing red forever.
+            if self._verify_state == "mismatch" and not drifted:
+                self._verify_state = "ok"
+                self._consecutive_drift_cycles = 0
+                _LOGGER.info(
+                    "inverter_control: %s re-converged after mismatch — "
+                    "verify_state back to ok", target.value,
+                )
+                return ("holding", target)
+            reason = self._reconcile_reason(drifted)
+            if reason is None:
+                _LOGGER.debug(
+                    "inverter_control: holding %s (source=%s, no commanded "
+                    "change — observe + verify only)",
+                    target.value, source,
+                )
+                return ("holding", target)
+            _LOGGER.warning(
+                "inverter_control: reconciling %s (source=%s, %s) — "
+                "re-commanding",
+                target.value, source, reason,
             )
-            return ("holding", target)
+            await self._force_write_and_verify(now, target, spec, source)
+            return ("reconcile", target)
         # Commanded-mode change → force-write (bypass the solis_modbus cache,
         # which can lag a successful write by up to a poll interval) and start
         # the verify loop.
+        await self._force_write_and_verify(now, target, spec, source)
+        return ("ok", target)
+
+    def _reconcile_reason(self, drifted: bool) -> str | None:
+        """Decide whether an unchanged-target hold must be re-commanded.
+
+        Called only on the holding path (resolved target equals
+        ``last_commanded_mode``). Returns a short human-readable reason when a
+        re-command is warranted, or ``None`` to keep holding.
+
+        Two conditions break the hold:
+
+          * **Automation re-enabled** — ``_reassert_next`` was armed by a
+            False→True ``automation_enabled`` transition. Always wins; the
+            flag is consumed by the subsequent ``_force_write_and_verify``.
+          * **Sustained drift** — once ``verify_state == "ok"`` (the steady
+            engaged state), a drifted readback increments the consecutive-cycle
+            counter; at ``_DRIFT_RECONCILE_CYCLES`` it trips. Conditioning on
+            ``ok`` keeps this off the verify loop's own retry window (pending)
+            and respects its terminal ``mismatch`` verdict — a write that
+            demonstrably won't take is not re-spammed every few cycles.
+
+        Args:
+            drifted: Whether the commanded mode's registers currently disagree
+                with the readback (from ``_registers_drifted``), computed once
+                by the caller so it isn't read twice.
+
+        Returns:
+            A reason string to re-command, or ``None`` to keep holding. The
+            consecutive-drift counter is reset whenever the hold is kept for a
+            non-drift reason.
+        """
+        if self._reassert_next:
+            return "automation re-enabled"
+        if self._verify_state == "ok" and drifted:
+            self._consecutive_drift_cycles += 1
+            if self._consecutive_drift_cycles >= _DRIFT_RECONCILE_CYCLES:
+                return (
+                    f"register drift sustained {self._consecutive_drift_cycles} "
+                    "cycles"
+                )
+            return None
+        self._consecutive_drift_cycles = 0
+        return None
+
+    def _registers_drifted(self) -> bool:
+        """Return whether the last-commanded mode's registers have drifted.
+
+        Reads the same per-register comparison the panel shows. ``True`` means
+        at least one register the commanded mode writes no longer matches its
+        target (or has become unreadable); ``False`` means every register still
+        matches. An empty status (no mode commanded yet) is "not drifted".
+
+        Returns:
+            ``True`` when any participating register fails to match.
+        """
+        rows = self._build_register_status()
+        return bool(rows) and not all(r["match"] for r in rows)
+
+    async def _force_write_and_verify(
+        self,
+        now: datetime,
+        target: StorageMode,
+        spec: StorageModeSpec,
+        source: str,
+    ) -> None:
+        """Force-write ``target`` and (re)start the verify loop.
+
+        Shared by the commanded-change path and the reconcile path. Bypasses
+        the solis_modbus cache (``force=True``), which can lag a successful
+        write by up to a poll interval, records the new commanded truth, resets
+        verify bookkeeping to ``pending``, and schedules the first verify-tick.
+        Clears both reconciliation triggers so a write satisfies any pending
+        re-assert and starts the drift counter fresh.
+
+        Args:
+            now: Cycle timestamp — recorded as commanded-at and the verify
+                window start.
+            target: Mode being (re-)commanded.
+            spec: Register spec for ``target``.
+            source: ``override`` or ``schedule``; logging only.
+        """
         await self._inverter.apply_mode(target, spec, force=True)
         self._last_commanded_mode = target
         self._last_commanded_at = now
@@ -416,6 +561,9 @@ class InverterControlModule:
         self._last_verify_observed_reg = None
         self._verify_retried = False
         self._verify_window_started_at = now
+        self._reassert_next = False
+        self._consecutive_drift_cycles = 0
+        self._last_applied_mode = target
         _LOGGER.info(
             "inverter_control: dispatched %s (source=%s, force-write, "
             "first verify in %ds, polling every %ds up to %ds)",
@@ -424,9 +572,7 @@ class InverterControlModule:
             _VERIFY_POLL_INTERVAL_S,
             _VERIFY_WINDOW_S,
         )
-        self._last_applied_mode = target
         self._schedule_verify(_VERIFY_INITIAL_DELAY_S)
-        return ("ok", target)
 
     @staticmethod
     def _current_slot(

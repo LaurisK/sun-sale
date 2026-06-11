@@ -14,7 +14,10 @@ from custom_components.sun_sale.contract.models import (
     ScheduleSlot,
     StorageMode,
 )
-from custom_components.sun_sale.outbound.inverter_control_module import InverterControlModule
+from custom_components.sun_sale.outbound.inverter_control_module import (
+    _DRIFT_RECONCILE_CYCLES,
+    InverterControlModule,
+)
 from tests.conftest import default_battery_config
 
 
@@ -577,3 +580,181 @@ async def test_new_command_cancels_pending_verify(call_later):
     assert call_later.cancels == 1
     assert len(call_later.calls) == 2
     assert mod.last_commanded_mode == StorageMode.GridCharge
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: slow drift reconciliation + automation re-enable re-assert
+# ---------------------------------------------------------------------------
+
+
+async def _engage_ok(mod, inv, call_later, mode=StorageMode.Discharge, now=NOW):
+    """Command ``mode`` and drive the verify loop to ``ok``.
+
+    Leaves the inverter wired so every register reads back its commanded
+    value — the steady "engaged" state drift reconciliation watches.
+    """
+    _wire_inverter_to_spec(inv, mod, mode)
+    await mod.tick(
+        now=now, schedule=_schedule_with(mode, now=now),
+        reading=_reading(StorageMode.SelfUse, reg=1, ts=now),
+        history=InverterModeHistory(samples=()), automation_enabled=True,
+    )
+    await call_later.last_callback(now + timedelta(seconds=2))
+    assert mod.verify_state == "ok"
+
+
+async def _hold_tick(mod, mode, minutes, automation_enabled=True):
+    """Run one same-target holding tick ``minutes`` after NOW."""
+    t = NOW + timedelta(minutes=minutes)
+    await mod.tick(
+        now=t, schedule=_schedule_with(mode, now=t),
+        reading=_reading(mode, reg=2, ts=t),
+        history=InverterModeHistory(samples=()),
+        automation_enabled=automation_enabled,
+    )
+
+
+@pytest.mark.asyncio
+async def test_drift_after_ok_reconciles_after_threshold_cycles(call_later):
+    """An engaged mode that drifts is re-commanded once the debounce trips."""
+    inv = _mock_inverter()
+    mod = _module_with_hass(inv)
+    await _engage_ok(mod, inv, call_later)
+    assert inv.apply_mode.await_count == 1
+    # Drift: the storage control word slips away from the commanded spec.
+    inv.get_storage_control_word = MagicMock(return_value=0xDEAD)
+    # First _DRIFT_RECONCILE_CYCLES-1 drifted ticks are debounced → holding.
+    for i in range(1, _DRIFT_RECONCILE_CYCLES):
+        await _hold_tick(mod, StorageMode.Discharge, minutes=5 * i)
+        assert mod.last_dispatch_outcome == "holding"
+        assert inv.apply_mode.await_count == 1
+    # The threshold-th consecutive drifted tick re-commands.
+    await _hold_tick(mod, StorageMode.Discharge, minutes=5 * _DRIFT_RECONCILE_CYCLES)
+    assert mod.last_dispatch_outcome == "reconcile"
+    assert inv.apply_mode.await_count == 2
+    assert inv.apply_mode.await_args.kwargs.get("force") is True
+    assert mod.verify_state == "pending"  # reconcile restarts the verify loop
+
+
+@pytest.mark.asyncio
+async def test_single_drift_cycle_resets_counter_on_recovery(call_later):
+    """A drift that clears before the threshold must not carry over."""
+    inv = _mock_inverter()
+    mod = _module_with_hass(inv)
+    await _engage_ok(mod, inv, call_later)
+    spec_reg = mod._specs[StorageMode.Discharge].reg_43110_value
+    # One drifted tick (counter → 1, below threshold of 2).
+    inv.get_storage_control_word = MagicMock(return_value=0xDEAD)
+    await _hold_tick(mod, StorageMode.Discharge, minutes=5)
+    assert mod.last_dispatch_outcome == "holding"
+    # Recover: register matches again → counter resets.
+    inv.get_storage_control_word = MagicMock(return_value=spec_reg)
+    await _hold_tick(mod, StorageMode.Discharge, minutes=10)
+    assert mod.last_dispatch_outcome == "holding"
+    # Drift once more — because the counter reset, a single cycle is again
+    # below threshold and must not reconcile.
+    inv.get_storage_control_word = MagicMock(return_value=0xDEAD)
+    await _hold_tick(mod, StorageMode.Discharge, minutes=15)
+    assert mod.last_dispatch_outcome == "holding"
+    assert inv.apply_mode.await_count == 1  # never re-commanded
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skipped_while_verify_pending(call_later):
+    """Drift reconciliation defers to the verify loop while it owns the window."""
+    inv = _mock_inverter()
+    inv.get_storage_control_word = MagicMock(return_value=0xDEAD)  # never matches
+    mod = _module_with_hass(inv)
+    await mod.tick(
+        now=NOW, schedule=_schedule_with(StorageMode.Discharge),
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()), automation_enabled=True,
+    )
+    assert mod.verify_state == "pending"
+    # Several drifted holding ticks while verify is still pending → no rewrite.
+    for i in range(1, _DRIFT_RECONCILE_CYCLES + 3):
+        await _hold_tick(mod, StorageMode.Discharge, minutes=5 * i)
+        assert mod.last_dispatch_outcome == "holding"
+    assert inv.apply_mode.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skipped_while_verify_mismatch(call_later):
+    """A terminal mismatch is not re-spammed by the drift path."""
+    inv = _mock_inverter()
+    inv.get_storage_control_word = MagicMock(return_value=0xDEAD)
+    mod = _module_with_hass(inv)
+    await mod.tick(
+        now=NOW, schedule=_schedule_with(StorageMode.Discharge),
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()), automation_enabled=True,
+    )
+    # Drive the verify loop to its terminal mismatch (retry, then give up).
+    await call_later.last_callback(NOW + timedelta(seconds=31))
+    await call_later.last_callback(NOW + timedelta(seconds=62))
+    assert mod.verify_state == "mismatch"
+    writes = inv.apply_mode.await_count  # initial + one retry
+    # Continued drift across many holding ticks must not re-command.
+    for i in range(1, _DRIFT_RECONCILE_CYCLES + 3):
+        await _hold_tick(mod, StorageMode.Discharge, minutes=5 * i)
+        assert mod.last_dispatch_outcome == "holding"
+        assert mod.verify_state == "mismatch"
+    assert inv.apply_mode.await_count == writes
+
+
+@pytest.mark.asyncio
+async def test_mismatch_self_heals_when_registers_reconverge(call_later):
+    """A stale mismatch flips back to ok once the inverter matches again."""
+    inv = _mock_inverter()
+    inv.get_storage_control_word = MagicMock(return_value=0xDEAD)
+    mod = _module_with_hass(inv)
+    await mod.tick(
+        now=NOW, schedule=_schedule_with(StorageMode.Discharge),
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()), automation_enabled=True,
+    )
+    await call_later.last_callback(NOW + timedelta(seconds=31))
+    await call_later.last_callback(NOW + timedelta(seconds=62))
+    assert mod.verify_state == "mismatch"
+    writes = inv.apply_mode.await_count
+    # Inverter returns to the commanded spec (operator fixed it / comms back).
+    _wire_inverter_to_spec(inv, mod, StorageMode.Discharge)
+    await _hold_tick(mod, StorageMode.Discharge, minutes=5)
+    assert mod.verify_state == "ok"
+    assert mod.last_dispatch_outcome == "holding"
+    assert inv.apply_mode.await_count == writes  # self-heal issues no write
+
+
+@pytest.mark.asyncio
+async def test_automation_reenable_reasserts_held_mode(call_later):
+    """Toggling automation off→on re-commands the held mode (no drift needed)."""
+    inv = _mock_inverter()
+    mod = _module_with_hass(inv)
+    await _engage_ok(mod, inv, call_later)
+    assert inv.apply_mode.await_count == 1
+    # Automation OFF — observer-only, no rewrite, commanded truth preserved.
+    await _hold_tick(mod, StorageMode.Discharge, minutes=5, automation_enabled=False)
+    assert mod.last_dispatch_outcome == "automation_disabled"
+    assert inv.apply_mode.await_count == 1
+    # Automation back ON — re-assert even though the target is unchanged and
+    # the registers never drifted.
+    await _hold_tick(mod, StorageMode.Discharge, minutes=10, automation_enabled=True)
+    assert mod.last_dispatch_outcome == "reconcile"
+    assert inv.apply_mode.await_count == 2
+    assert mod.verify_state == "pending"
+
+
+@pytest.mark.asyncio
+async def test_first_tick_does_not_spuriously_reassert(call_later):
+    """The None→True automation start must not be read as a re-enable."""
+    inv = _mock_inverter()
+    mod = _module_with_hass(inv)
+    # First-ever tick with automation already on commands once (a genuine
+    # commanded change), not a reconcile.
+    await mod.tick(
+        now=NOW, schedule=_schedule_with(StorageMode.Discharge),
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()), automation_enabled=True,
+    )
+    assert mod.last_dispatch_outcome == "ok"
+    assert inv.apply_mode.await_count == 1
