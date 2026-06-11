@@ -60,13 +60,20 @@ class NodeContext:
     def get(self, t: type[T]) -> T | None:
         """Look up type t in primary then secondary context; return None if absent.
 
+        Primary takes precedence whenever it holds the key, even if the stored
+        value is falsy (None, empty collection, a NamedTuple). Membership — not
+        truthiness — decides the fallthrough, so a deliberately-stored primary
+        value is never shadowed by a stale secondary one.
+
         Args:
             t: The type key to look up.
 
         Returns:
             The stored value, or None.
         """
-        return self.primary.get(t) or self.secondary.get(t)
+        if t in self.primary:
+            return self.primary[t]
+        return self.secondary.get(t)
 
     def require(self, t: type[T]) -> T:
         """Return the value for type t; raise MissingDependencyError if absent.

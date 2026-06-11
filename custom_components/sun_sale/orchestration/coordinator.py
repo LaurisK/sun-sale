@@ -1558,9 +1558,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             # Default to an empty history when the store exists but holds no
             # value yet (fresh install / first cycle). The DAG node consumes
             # these via ``ctx.require`` so an explicit empty fallback is
-            # required — ``ctx.get`` returns the primary value via
-            # ``primary.get(t) or secondary.get(t)``, so a stored ``None``
-            # would raise ``MissingDependencyError``.
+            # required — ``ctx.get`` returns the primary value whenever the key
+            # is present, so a stored ``None`` would raise
+            # ``MissingDependencyError``.
             current_snapshots = (
                 self._counter_snapshot_store.value
                 if self._counter_snapshot_store else None
