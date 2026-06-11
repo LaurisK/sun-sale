@@ -2,14 +2,17 @@
 
 Architecture:
   - Each DagNode declares its tier, output_type, and consumed types.
-  - DagEngine.wire() auto-builds observer relationships by matching output_type → consumes.
-    It enforces that observers must have a strictly higher tier than their subject
-    (tier constraint prevents cycles and deadlocks).
+  - DagEngine._wire() validates the tier constraint: a node may only consume
+    outputs produced by strictly-lower-tier nodes (this prevents cycles and
+    deadlocks). Same- or higher-tier dependencies are rejected.
   - On each run cycle the engine executes tiers in ascending order; within a tier
-    all eligible nodes run in parallel (asyncio.gather).
-  - When a node completes it deposits its result in NodeContext.secondary and
-    notifies its registered observers (_on_upstream_ready), which record the
-    satisfied dependency so they are ready when their tier is reached.
+    all eligible nodes run in parallel (asyncio.gather). Each tier runs to
+    completion before the next begins, so every lower-tier output is present in
+    NodeContext.secondary by the time a node's tier is evaluated.
+  - Node readiness is therefore derived directly from ctx.secondary. There is no
+    cross-node notification or per-node "satisfied" state, so nothing can leak
+    between cycles. When a node completes it deposits its result in
+    NodeContext.secondary.
 
 No Home Assistant imports — pure Python.
 """
@@ -31,7 +34,7 @@ T = TypeVar("T")
 
 
 class TierViolationError(Exception):
-    """Raised when a node registers as observer of a same- or higher-tier node."""
+    """Raised when a node consumes the output of a same- or higher-tier node."""
 
 
 class MissingDependencyError(KeyError):
@@ -97,54 +100,23 @@ class DagNode(ABC):
     output_type: type | None
     consumes: list[type]
 
-    def __init__(self) -> None:
-        """Initialise empty observer list and satisfied-dependency set."""
-        self._observers: list[DagNode] = []
-        self._satisfied: set[type] = set()
-
-    # ── Observer wiring ──────────────────────────────────────────────────────
-
-    def add_observer(self, node: DagNode) -> None:
-        """Register node as an observer of this node's output.
-
-        Args:
-            node: Downstream node to notify when this node completes.
-
-        Raises:
-            TierViolationError: When node.tier <= self.tier.
-        """
-        if node.tier <= self.tier:
-            raise TierViolationError(
-                f"{type(node).__name__} (T{node.tier}) cannot observe "
-                f"{type(self).__name__} (T{self.tier}): observer tier must be strictly higher"
-            )
-        self._observers.append(node)
-
-    def _notify_observers(self) -> None:
-        """Inform registered observers that this node's output_type is now available."""
-        if self.output_type is not None:
-            for obs in self._observers:
-                obs._on_upstream_ready(self.output_type)
-
-    def _on_upstream_ready(self, data_type: type) -> None:
-        """Record that an upstream dependency of the given type is now available.
-
-        Args:
-            data_type: The output_type that was just deposited by the upstream node.
-        """
-        self._satisfied.add(data_type)
-
     def all_secondary_deps_satisfied(self, ctx: NodeContext) -> bool:
         """Return True when every secondary dependency declared in consumes is available.
+
+        Readiness is derived purely from ctx.secondary: because a node may only
+        consume strictly-lower-tier outputs and each tier runs to completion
+        before the next begins, every secondary dependency it declares is
+        already present in ctx.secondary by the time its own tier is evaluated.
+        There is no per-node "satisfied" state, so nothing can leak across cycles.
 
         Args:
             ctx: Current DAG run context.
 
         Returns:
-            True if every non-primary consumed type is in ctx.secondary or _satisfied.
+            True if every non-primary consumed type is present in ctx.secondary.
         """
         return all(
-            t in self._satisfied or t in ctx.secondary
+            t in ctx.secondary
             for t in self.consumes
             if t not in ctx.primary
         )
@@ -152,7 +124,7 @@ class DagNode(ABC):
     # ── Execution ────────────────────────────────────────────────────────────
 
     async def run(self, ctx: NodeContext) -> list[ControlEvent]:
-        """Execute this node: compute, deposit into ctx.secondary, notify observers.
+        """Execute this node: compute and deposit the result into ctx.secondary.
 
         Args:
             ctx: Shared run context; result is deposited into ctx.secondary.
@@ -162,20 +134,13 @@ class DagNode(ABC):
 
         Raises:
             Exception: Anything raised by _compute propagates so the engine can
-                isolate the failure; the satisfied-dependency set is cleared
-                first via the finally block so a failed node leaves no stale
-                flags for the next cycle.
+                isolate the failure. The node simply deposits nothing, so its
+                downstream consumers stay unready (absent from ctx.secondary)
+                and degrade gracefully — there is no cross-cycle state to reset.
         """
-        try:
-            result, events = await self._compute(ctx)
-        finally:
-            # Clear even when _compute raises: a leftover satisfied flag would
-            # make all_secondary_deps_satisfied() lie next cycle, marking the
-            # node ready before its (now isolated) upstream has re-deposited.
-            self._satisfied.clear()
+        result, events = await self._compute(ctx)
         if result is not None and self.output_type is not None:
             ctx.secondary[self.output_type] = result
-        self._notify_observers()
         return events
 
     @abstractmethod
@@ -217,16 +182,18 @@ class DagEngine:
         self._wire(nodes)
 
     def _wire(self, nodes: list[DagNode]) -> None:
-        """Auto-wire observer relationships by matching output_type to consumed types.
+        """Validate the tier constraint for every producer→consumer dependency.
 
-        For each consumed secondary type, registers the consuming node as an
-        observer of the node that produces it.
+        For each consumed secondary type, finds the node that produces it and
+        enforces that the consumer sits at a strictly higher tier. This is the
+        invariant that lets readiness be read straight from ctx.secondary
+        (see DagNode.all_secondary_deps_satisfied) and prevents cycles/deadlocks.
 
         Args:
-            nodes: All nodes to wire; each node's consumes list is inspected.
+            nodes: All nodes to validate; each node's consumes list is inspected.
 
         Raises:
-            TierViolationError: When a consumer has a tier <= its producer's tier.
+            TierViolationError: When a consumer's tier <= the tier of a node it consumes.
         """
         producer: dict[type, DagNode] = {
             n.output_type: n for n in nodes if n.output_type is not None
@@ -234,8 +201,12 @@ class DagEngine:
         for node in nodes:
             for dep_type in node.consumes:
                 p = producer.get(dep_type)
-                if p is not None:
-                    p.add_observer(node)
+                if p is not None and node.tier <= p.tier:
+                    raise TierViolationError(
+                        f"{type(node).__name__} (T{node.tier}) cannot consume "
+                        f"{type(p).__name__} (T{p.tier}): consumer tier must be "
+                        f"strictly higher"
+                    )
 
     async def run(
         self,
