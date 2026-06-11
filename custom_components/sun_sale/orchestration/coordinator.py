@@ -33,34 +33,9 @@ from ..contract.const import (
     CONF_BATTERY_PURCHASE_PRICE,
     CONF_BATTERY_RATED_CYCLE_LIFE,
     CONF_BATTERY_ROUND_TRIP_EFFICIENCY,
-    CONF_INVERTER_ENTITY_AC_PORT_POWER,
-    CONF_INVERTER_ENTITY_BACKUP_POWER,
-    CONF_INVERTER_ENTITY_BATTERY_POWER,
-    CONF_INVERTER_ENTITY_BATTERY_SOC,
-    CONF_INVERTER_ENTITY_CHARGE_CONTROL,
-    CONF_INVERTER_ENTITY_GRID_POWER,
     CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY,
-    CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY,
-    CONF_INVERTER_ENTITY_GRID_EXPORT_POWER,
-    CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY,
-    CONF_INVERTER_ENTITY_GRID_IMPORT_POWER,
     CONF_INVERTER_ENTITY_INVERTER_CLOCK,
-    CONF_INVERTER_ENTITY_SOLAR_ENERGY,
-    CONF_INVERTER_PLATFORM,
-    CONF_INVERTER_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH,
-    CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
-    CONF_INVERTER_SOLIS_BACKFLOW_POWER,
-    CONF_INVERTER_SOLIS_BATTERY_MAX_CHARGE_CURRENT,
-    CONF_INVERTER_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT,
-    CONF_INVERTER_SOLIS_FEED_IN_PRIORITY_SWITCH,
-    CONF_INVERTER_SOLIS_GRID_FEED_IN_POWER_LIMIT_SWITCH,
-    CONF_INVERTER_SOLIS_PEAK_MAX_USABLE_GRID_POWER,
-    CONF_INVERTER_SOLIS_RC_SETPOINT,
-    CONF_INVERTER_SOLIS_SELF_USE_SWITCH,
-    CONF_INVERTER_SOLIS_STORAGE_CONTROL_READBACK,
-    CONF_INVERTER_SOLIS_TOU_MODE_SWITCH,
     CONF_NORDPOOL_ENTITY,
-    CONF_SOLIS_CONFIG_ENTRY_ID,
     CONF_SOLAR_FORECAST_ENTITY,
     CONF_SOLAR_FORECAST_ENTITY_2,
     CONF_TARIFF_DISTRIBUTION_FEE,
@@ -69,29 +44,12 @@ from ..contract.const import (
     CONF_TARIFF_SELL_MARKUP,
     CONF_TARIFF_SELL_TAX_RATE,
     CONF_TARIFF_TAX_RATE,
-    BAKED_OBSERVED_HISTORY_RETENTION_DAYS,
     CAPACITY_OBS_MAX_INTERVAL_S,
     CAPACITY_OBS_MIN_INTERVAL_S,
     CAPACITY_OBS_MIN_SOC_DELTA,
-    CONSUMPTION_DAILY_WINDOW_DAYS,
     COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS,
     DEFAULT_BATTERY_NOMINAL_VOLTAGE,
-    DERIVED_POWER_HISTORY_RETENTION_DAYS,
-    GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS,
-    GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS,
     GRID_POWER_HISTORY_RETENTION_DAYS,
-    DEFAULT_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH,
-    DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH,
-    DEFAULT_SOLIS_BACKFLOW_POWER,
-    DEFAULT_SOLIS_BATTERY_MAX_CHARGE_CURRENT,
-    DEFAULT_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT,
-    DEFAULT_SOLIS_FEED_IN_PRIORITY_SWITCH,
-    DEFAULT_SOLIS_GRID_FEED_IN_POWER_LIMIT_SWITCH,
-    DEFAULT_SOLIS_PEAK_MAX_USABLE_GRID_POWER,
-    DEFAULT_SOLIS_RC_SETPOINT,
-    DEFAULT_SOLIS_SELF_USE_SWITCH,
-    DEFAULT_SOLIS_STORAGE_CONTROL_READBACK,
-    DEFAULT_SOLIS_TOU_MODE_SWITCH,
     DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID,
     DEFAULT_SCHEDULE_ALLOW_FEED_IN,
     DEFAULT_SCHEDULE_ALLOW_GRID_CHARGING,
@@ -109,31 +67,22 @@ from ..contract.const import (
     SCHEDULE_PROFITABILITY_TILT_ALPHA_MIN,
     SCHEDULE_TERMINAL_VALUE_DISCOUNT_MAX,
     SCHEDULE_TERMINAL_VALUE_DISCOUNT_MIN,
-    CONF_INVERTER_ENTITY_PV_POWER,
-    GENERATION_HISTORY_RETENTION_DAYS,
     PRICE_HISTORY_RETENTION_DAYS,
-    PV_POWER_HISTORY_RETENTION_DAYS,
     STORAGE_KEY_CAPACITY,
     STORAGE_KEY_FORECAST_QUALITY,
-    STORAGE_KEY_GENERATION,
     STORAGE_KEY_BAKED_OBSERVED,
     STORAGE_KEY_COUNTER_SNAPSHOT,
-    STORAGE_KEY_GRID_EXPORT_POWER,
-    STORAGE_KEY_GRID_EXPORT_TOTAL,
     STORAGE_KEY_DERIVED_POWER,
     STORAGE_KEY_CONSUMPTION_DAILY,
-    STORAGE_KEY_GRID_IMPORT_POWER,
-    STORAGE_KEY_GRID_IMPORT_TOTAL,
     STORAGE_KEY_MODE_HISTORY,
     STORAGE_KEY_MONTHLY_BILL,
     STORAGE_KEY_PRICE_HISTORY,
-    STORAGE_KEY_PV_POWER,
     STORAGE_KEY_YESTERDAY,
     STORAGE_VERSION,
     UPDATE_INTERVAL_MINUTES,
 )
 from ..pipeline.dag_engine import DagEngine, run_translators
-from ..outbound.inverter import InverterController, InverterPlatform, normalize_power_to_kw
+from ..outbound.inverter import InverterController, normalize_power_to_kw
 from ..outbound.inverter_control_module import InverterControlModule
 from ..contract.models import (
     BaseLoadProfile,
@@ -156,16 +105,13 @@ from ..contract.models import (
     EstimatedCapacity,
     ForecastAccuracyResult,
     ForecastQualityStore,
-    GenerationHistory,
     GenerationReading,
     GenerationSeries,
     GridExportPowerHistory,
     GridExportPowerReading,
-    GridExportTodayHistory,
     GridExportTodayReading,
     GridImportPowerHistory,
     GridImportPowerReading,
-    GridImportTodayHistory,
     GridImportTodayReading,
     InverterModeChange,
     InverterModeHistory,
@@ -179,7 +125,6 @@ from ..contract.models import (
     AcPortPowerReading,
     BackupPowerReading,
     DerivedPowerHistory,
-    DerivedPowerSample,
     NordpoolData,
     ObservedConsumptionSeries,
     ObservedGenerationSeries,
@@ -221,8 +166,16 @@ from ..pipeline.nodes import (
 from ..pipeline import forecast_accuracy as forecast_accuracy_module
 from ..pipeline import profitability as profitability_module
 from .persistent_store import PersistentStore
+from .history_stores import (
+    ALL_HISTORY_SPECS,
+    DERIVED_POWER_SPEC,
+    GRID_EXPORT_POWER_SPEC,
+    GRID_IMPORT_POWER_SPEC,
+    SAMPLE_HISTORY_SPECS,
+    append_and_inject,
+)
 from ..inbound.battery import BatteryTranslator
-from ..inbound.solis_entity_resolver import resolve_solis_entities
+from ..inbound.inverter_entity_resolver import resolve_inverter_entities
 from ..inbound.forecast import SolarTranslator
 from ..inbound.observer.generation import (
     GENERATION_SIDE_ID,
@@ -416,38 +369,10 @@ def _rotate_yesterday_buckets(
 # ---------------------------------------------------------------------------
 # Per-store serialisation helpers
 # ---------------------------------------------------------------------------
-
-def _serialize_generation(samples: list[GenerationReading]) -> dict:
-    """Serialise a list of generation readings."""
-    return {"samples": [{"ts": s.timestamp.isoformat(), "kwh": s.today_total_kwh} for s in samples]}
-
-
-def _deserialize_generation(d: dict) -> list[GenerationReading]:
-    """Deserialise a list of generation readings."""
-    return [
-        GenerationReading(
-            today_total_kwh=s["kwh"],
-            timestamp=datetime.fromisoformat(s["ts"]),
-        )
-        for s in d.get("samples", [])
-    ]
-
-
-def _serialize_pv_power(samples: list[PvPowerReading]) -> dict:
-    """Serialise a list of PV power readings."""
-    return {"samples": [{"ts": s.timestamp.isoformat(), "w": s.power_w} for s in samples]}
-
-
-def _deserialize_pv_power(d: dict) -> list[PvPowerReading]:
-    """Deserialise a list of PV power readings."""
-    return [
-        PvPowerReading(
-            power_w=s["w"],
-            timestamp=datetime.fromisoformat(s["ts"]),
-        )
-        for s in d.get("samples", [])
-    ]
-
+# The rolling sample-history stores (generation, PV power, the two grid-power
+# directions, the two grid today-totals, and the derived sample) are described
+# declaratively in ``history_stores.py``; only the irregular stores below carry
+# bespoke serialisers.
 
 def _serialize_consumption_daily(buckets: ConsumptionDailyBuckets) -> dict:
     """Serialise the rolling per-day hour-bucket consumption history."""
@@ -511,102 +436,6 @@ def _deserialize_price_history(d: dict) -> list[DailyPeak]:
         except (KeyError, ValueError):
             continue
     return result
-
-
-def _serialize_grid_import_power(samples: list[GridImportPowerReading]) -> dict:
-    """Serialise a list of grid-import power readings."""
-    return {"samples": [{"ts": s.timestamp.isoformat(), "kw": s.power_kw} for s in samples]}
-
-
-def _deserialize_grid_import_power(d: dict) -> list[GridImportPowerReading]:
-    """Deserialise a list of grid-import power readings."""
-    return [
-        GridImportPowerReading(
-            power_kw=s["kw"],
-            timestamp=datetime.fromisoformat(s["ts"]),
-        )
-        for s in d.get("samples", [])
-    ]
-
-
-def _serialize_grid_export_power(samples: list[GridExportPowerReading]) -> dict:
-    """Serialise a list of grid-export power readings."""
-    return {"samples": [{"ts": s.timestamp.isoformat(), "kw": s.power_kw} for s in samples]}
-
-
-def _deserialize_grid_export_power(d: dict) -> list[GridExportPowerReading]:
-    """Deserialise a list of grid-export power readings."""
-    return [
-        GridExportPowerReading(
-            power_kw=s["kw"],
-            timestamp=datetime.fromisoformat(s["ts"]),
-        )
-        for s in d.get("samples", [])
-    ]
-
-
-def _serialize_derived_power(samples: list[DerivedPowerSample]) -> dict:
-    """Serialise a list of derived-power cross-stream samples."""
-    return {
-        "samples": [
-            {
-                "ts":  s.timestamp.isoformat(),
-                "ac":  s.ac_port_kw_signed,
-                "bu":  s.backup_kw,
-                "gn":  s.grid_net_kw_signed,
-                "sol": s.solar_kw,
-                "bat": s.battery_kw_signed,
-            }
-            for s in samples
-        ]
-    }
-
-
-def _deserialize_derived_power(d: dict) -> list[DerivedPowerSample]:
-    """Deserialise a list of derived-power cross-stream samples."""
-    return [
-        DerivedPowerSample(
-            timestamp=datetime.fromisoformat(s["ts"]),
-            ac_port_kw_signed=s["ac"],
-            backup_kw=s["bu"],
-            grid_net_kw_signed=s["gn"],
-            solar_kw=s["sol"],
-            battery_kw_signed=s["bat"],
-        )
-        for s in d.get("samples", [])
-    ]
-
-
-def _serialize_grid_import_total(samples: list[GridImportTodayReading]) -> dict:
-    """Serialise a list of today-total grid-import readings."""
-    return {"samples": [{"ts": s.timestamp.isoformat(), "kwh": s.today_total_kwh} for s in samples]}
-
-
-def _deserialize_grid_import_total(d: dict) -> list[GridImportTodayReading]:
-    """Deserialise a list of today-total grid-import readings."""
-    return [
-        GridImportTodayReading(
-            today_total_kwh=s["kwh"],
-            timestamp=datetime.fromisoformat(s["ts"]),
-        )
-        for s in d.get("samples", [])
-    ]
-
-
-def _serialize_grid_export_total(samples: list[GridExportTodayReading]) -> dict:
-    """Serialise a list of today-total grid-export readings."""
-    return {"samples": [{"ts": s.timestamp.isoformat(), "kwh": s.today_total_kwh} for s in samples]}
-
-
-def _deserialize_grid_export_total(d: dict) -> list[GridExportTodayReading]:
-    """Deserialise a list of today-total grid-export readings."""
-    return [
-        GridExportTodayReading(
-            today_total_kwh=s["kwh"],
-            timestamp=datetime.fromisoformat(s["ts"]),
-        )
-        for s in d.get("samples", [])
-    ]
 
 
 def _serialize_counter_snapshot(history: CounterSnapshotHistory) -> dict:
@@ -868,17 +697,15 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._last_battery_reading: BatteryReading | None = None
         self._last_battery_reading_at: datetime | None = None
         self._yesterday_store: PersistentStore[_YesterdayBuckets] | None = None
-        self._generation_store: PersistentStore[list[GenerationReading]] | None = None
-        self._pv_power_store: PersistentStore[list[PvPowerReading]] | None = None
+        # Rolling sample-history stores keyed by storage key — populated in
+        # async_setup from ``history_stores.ALL_HISTORY_SPECS``. See
+        # orchestration/history_stores.py.
+        self._history_stores: dict[str, PersistentStore] = {}
         self._consumption_daily_store: PersistentStore[ConsumptionDailyBuckets] | None = None
         self._price_history_store: PersistentStore[list[DailyPeak]] | None = None
         self._forecast_quality_store: PersistentStore[ForecastQualityStore] | None = None
-        self._grid_import_power_store: PersistentStore[list[GridImportPowerReading]] | None = None
-        self._grid_export_power_store: PersistentStore[list[GridExportPowerReading]] | None = None
         self._grid_import_power_entity_id: str = ""
         self._grid_export_power_entity_id: str = ""
-        self._grid_import_total_store: PersistentStore[list[GridImportTodayReading]] | None = None
-        self._grid_export_total_store: PersistentStore[list[GridExportTodayReading]] | None = None
         self._monthly_bill_store: PersistentStore[MonthlyBillState] | None = None
         self._mode_history_store: PersistentStore[InverterModeHistory] | None = None
         self._counter_snapshot_store: PersistentStore[CounterSnapshotHistory] | None = None
@@ -1017,133 +844,21 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             nominal_voltage_v=data.get(CONF_BATTERY_NOMINAL_VOLTAGE, DEFAULT_BATTERY_NOMINAL_VOLTAGE),
         )
 
-        inverter_platform = InverterPlatform(data[CONF_INVERTER_PLATFORM])
-        if inverter_platform == InverterPlatform.SOLIS:
-            solis_entry_id = data.get(CONF_SOLIS_CONFIG_ENTRY_ID)
-            # Legacy configs created before solis auto-detect existed don't have
-            # CONF_SOLIS_CONFIG_ENTRY_ID stored. Recover by scanning the registry
-            # for solis_modbus config entries — when exactly one is present the
-            # choice is unambiguous, so we run the resolver against it and let
-            # its findings (grid_power_net + today-counter slugs) override the
-            # legacy manual values. Avoids forcing every existing user through
-            # a reconfigure cycle.
-            if not solis_entry_id:
-                solis_entries = self.hass.config_entries.async_entries("solis_modbus")
-                if len(solis_entries) == 1:
-                    solis_entry_id = solis_entries[0].entry_id
-            if solis_entry_id:
-                # Auto-detected path: resolve all entity IDs from the entity registry.
-                inverter_entity_ids = resolve_solis_entities(self.hass, solis_entry_id)
-                # Telemetry roles share keys with the manual mapping, so ensure
-                # battery_soc / battery_power / grid_power survive auto-detect
-                # even if the resolver missed one (its defaults still work).
-                inverter_entity_ids.setdefault(
-                    "battery_soc", data.get(CONF_INVERTER_ENTITY_BATTERY_SOC, ""),
-                )
-                inverter_entity_ids.setdefault(
-                    "battery_power", data.get(CONF_INVERTER_ENTITY_BATTERY_POWER, ""),
-                )
-                inverter_entity_ids.setdefault(
-                    "grid_power", data.get(CONF_INVERTER_ENTITY_GRID_POWER, ""),
-                )
-                inverter_entity_ids.setdefault(
-                    "grid_import_energy_today",
-                    data.get(CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY, ""),
-                )
-                inverter_entity_ids.setdefault(
-                    "grid_export_energy_today",
-                    data.get(CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY, ""),
-                )
-            else:
-                # Manual-mapping fallback: entity IDs stored directly in config entry data.
-                inverter_entity_ids = {
-                    "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
-                    "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
-                    "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
-                    "grid_import_energy_today":
-                        data.get(CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY, ""),
-                    "grid_export_energy_today":
-                        data.get(CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY, ""),
-                    "storage_control_readback":      data.get(CONF_INVERTER_SOLIS_STORAGE_CONTROL_READBACK, DEFAULT_SOLIS_STORAGE_CONTROL_READBACK),
-                    "battery_max_charge_current":    data.get(CONF_INVERTER_SOLIS_BATTERY_MAX_CHARGE_CURRENT, DEFAULT_SOLIS_BATTERY_MAX_CHARGE_CURRENT),
-                    "battery_max_discharge_current": data.get(CONF_INVERTER_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT, DEFAULT_SOLIS_BATTERY_MAX_DISCHARGE_CURRENT),
-                    "rc_setpoint":                   data.get(CONF_INVERTER_SOLIS_RC_SETPOINT, DEFAULT_SOLIS_RC_SETPOINT),
-                    "backflow_power":                data.get(CONF_INVERTER_SOLIS_BACKFLOW_POWER, DEFAULT_SOLIS_BACKFLOW_POWER),
-                    "peak_max_usable_grid_power":    data.get(CONF_INVERTER_SOLIS_PEAK_MAX_USABLE_GRID_POWER, DEFAULT_SOLIS_PEAK_MAX_USABLE_GRID_POWER),
-                    "self_use_switch":               data.get(CONF_INVERTER_SOLIS_SELF_USE_SWITCH, DEFAULT_SOLIS_SELF_USE_SWITCH),
-                    "tou_mode_switch":               data.get(CONF_INVERTER_SOLIS_TOU_MODE_SWITCH, DEFAULT_SOLIS_TOU_MODE_SWITCH),
-                    "allow_grid_charge_switch":      data.get(CONF_INVERTER_SOLIS_ALLOW_GRID_CHARGE_SWITCH, DEFAULT_SOLIS_ALLOW_GRID_CHARGE_SWITCH),
-                    "feed_in_priority_switch":       data.get(CONF_INVERTER_SOLIS_FEED_IN_PRIORITY_SWITCH, DEFAULT_SOLIS_FEED_IN_PRIORITY_SWITCH),
-                    "allow_export_under_self_use_switch": data.get(CONF_INVERTER_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH, DEFAULT_SOLIS_ALLOW_EXPORT_UNDER_SELF_USE_SWITCH),
-                    "grid_feed_in_power_limit_switch": data.get(CONF_INVERTER_SOLIS_GRID_FEED_IN_POWER_LIMIT_SWITCH, DEFAULT_SOLIS_GRID_FEED_IN_POWER_LIMIT_SWITCH),
-                }
-        else:
-            inverter_entity_ids = {
-                "battery_soc": data[CONF_INVERTER_ENTITY_BATTERY_SOC],
-                "battery_power": data[CONF_INVERTER_ENTITY_BATTERY_POWER],
-                "grid_power": data[CONF_INVERTER_ENTITY_GRID_POWER],
-                "charge_control": data[CONF_INVERTER_ENTITY_CHARGE_CONTROL],
-                "grid_import_energy_today":
-                    data.get(CONF_INVERTER_ENTITY_GRID_IMPORT_ENERGY, ""),
-                "grid_export_energy_today":
-                    data.get(CONF_INVERTER_ENTITY_GRID_EXPORT_ENERGY, ""),
-            }
-        inverter = InverterController(self.hass, inverter_platform, inverter_entity_ids, battery_config)
-        self._inverter_entity_ids = dict(inverter_entity_ids)
-        # Per-direction grid-power observers — prefer the per-direction
-        # entity when configured. When absent (typical for Solis auto-detect,
-        # where solis_modbus only publishes signed ``grid_power_net``), the
-        # observers fall back to the signed sensor and project onto their
-        # side via ``_signed_polarity``. The signed ``grid_power`` entity
-        # also remains in ``inverter_entity_ids`` for
-        # ``InverterController.get_grid_power`` (used by BatteryReading /
-        # capacity estimator), independent of the observer pipeline.
-        self._grid_import_power_entity_id = data.get(
-            CONF_INVERTER_ENTITY_GRID_IMPORT_POWER, "",
+        # Entity-ID resolution (platform branch, Solis auto-detect, observer
+        # entity merge, yesterday-total mapping) lives in
+        # inbound/inverter_entity_resolver.py. It mutates ``data`` in place to
+        # add any auto-detected yesterday-total entities.
+        resolved = resolve_inverter_entities(self.hass, data)
+        inverter = InverterController(
+            self.hass, resolved.platform, resolved.inverter_entity_ids, battery_config,
         )
-        self._grid_export_power_entity_id = data.get(
-            CONF_INVERTER_ENTITY_GRID_EXPORT_POWER, "",
-        )
-        signed_grid_power_entity_id = inverter_entity_ids.get("grid_power", "")
-        grid_import_total_entity_id = inverter_entity_ids.get("grid_import_energy_today", "")
-        grid_export_total_entity_id = inverter_entity_ids.get("grid_export_energy_today", "")
-        # PV power + today-solar-energy: prefer the manual-config value when
-        # set; fall back to the Solis resolver's auto-detected entity. The
-        # resolver omits the role entirely when not present, so dict.get
-        # with empty-string default is the right merge.
-        pv_power_entity_id = (
-            data.get(CONF_INVERTER_ENTITY_PV_POWER, "")
-            or inverter_entity_ids.get("pv_power", "")
-        )
-        solar_energy_today_entity_id = (
-            data.get(CONF_INVERTER_ENTITY_SOLAR_ENERGY, "")
-            or inverter_entity_ids.get("solar_energy_today", "")
-        )
-        self._pv_power_entity_id = pv_power_entity_id
-        self._solar_energy_today_entity_id = solar_energy_today_entity_id
-        # Derived-observer inputs — same manual-first / Solis-auto-second merge.
-        # Both are optional; absence simply disables the consumption + losses
-        # observed series. The grid-net and battery/PV signals already arrive
-        # via the existing translators, so only AC port + backup are new
-        # entities to wire through.
-        self._ac_port_power_entity_id = (
-            data.get(CONF_INVERTER_ENTITY_AC_PORT_POWER, "")
-            or inverter_entity_ids.get("ac_port_power", "")
-        )
-        self._backup_power_entity_id = (
-            data.get(CONF_INVERTER_ENTITY_BACKUP_POWER, "")
-            or inverter_entity_ids.get("backup_power", "")
-        )
-        # Yesterday-total entities: map auto-detected Solis entries into the
-        # raw-config dict so ``yesterday_total_resolver`` finds them via its
-        # ``DEDICATED_ENTITY_CONFIG_KEY`` lookup without further plumbing.
-        for cfg_key, role_key in (
-            ("inverter_entity_generation_yesterday", "solar_energy_yesterday"),
-            ("inverter_entity_grid_import_yesterday", "grid_import_energy_yesterday"),
-            ("inverter_entity_grid_export_yesterday", "grid_export_energy_yesterday"),
-        ):
-            if not data.get(cfg_key) and inverter_entity_ids.get(role_key):
-                data[cfg_key] = inverter_entity_ids[role_key]
+        self._inverter_entity_ids = dict(resolved.inverter_entity_ids)
+        self._grid_import_power_entity_id = resolved.grid_import_power
+        self._grid_export_power_entity_id = resolved.grid_export_power
+        self._pv_power_entity_id = resolved.pv_power
+        self._solar_energy_today_entity_id = resolved.solar_energy_today
+        self._ac_port_power_entity_id = resolved.ac_port_power
+        self._backup_power_entity_id = resolved.backup_power
 
         local_tz = self._resolve_local_tz()
         self._sun_sale_config = SunSaleConfig(
@@ -1168,16 +883,16 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             ),
             GridImportPowerObserver(
                 entity_id=self._grid_import_power_entity_id,
-                signed_entity_id=signed_grid_power_entity_id,
+                signed_entity_id=resolved.signed_grid_power,
             ),
             GridExportPowerObserver(
                 entity_id=self._grid_export_power_entity_id,
-                signed_entity_id=signed_grid_power_entity_id,
+                signed_entity_id=resolved.signed_grid_power,
             ),
-            GridImportTotalTranslator(entity_id=grid_import_total_entity_id),
-            GridExportTotalTranslator(entity_id=grid_export_total_entity_id),
-            GenerationTranslator(entity_id=solar_energy_today_entity_id),
-            PvPowerTranslator(entity_id=pv_power_entity_id),
+            GridImportTotalTranslator(entity_id=resolved.grid_import_total),
+            GridExportTotalTranslator(entity_id=resolved.grid_export_total),
+            GenerationTranslator(entity_id=resolved.solar_energy_today),
+            PvPowerTranslator(entity_id=resolved.pv_power),
             HouseholdConsumptionTranslator(
                 entity_id=data.get(CONF_INVERTER_ENTITY_HOUSEHOLD_CONSUMPTION_ENERGY, ""),
             ),
@@ -1228,19 +943,35 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             or CapacityEstimator(battery_config.nominal_capacity_kwh)
         )
 
-        self._generation_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_GENERATION,
-            serialize=_serialize_generation,
-            deserialize=_deserialize_generation,
-        )
-        await self._generation_store.load()
+        # Rolling sample-history stores — one PersistentStore per spec, all
+        # sharing the spec-driven serialise/deserialise. See
+        # orchestration/history_stores.py.
+        for spec in ALL_HISTORY_SPECS:
+            store = PersistentStore(
+                self.hass, STORAGE_VERSION, spec.storage_key,
+                serialize=spec.serialize,
+                deserialize=spec.deserialize,
+            )
+            await store.load()
+            self._history_stores[spec.storage_key] = store
 
-        self._pv_power_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_PV_POWER,
-            serialize=_serialize_pv_power,
-            deserialize=_deserialize_pv_power,
-        )
-        await self._pv_power_store.load()
+        # Backfill the directional grid-power stores from the recorder so the
+        # monthly bill's yday→now slots have data on the first run after the
+        # integration is installed/upgraded.
+        backfill_now = datetime.now(timezone.utc)
+        backfill_start = backfill_now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
+        for spec, entity_id in (
+            (GRID_IMPORT_POWER_SPEC, self._grid_import_power_entity_id),
+            (GRID_EXPORT_POWER_SPEC, self._grid_export_power_entity_id),
+        ):
+            store = self._history_stores[spec.storage_key]
+            existing_samples = list(store.value or [])
+            merged_samples = await _backfill_directional_power_from_recorder(
+                self.hass, entity_id, spec.reading_type,
+                existing_samples, backfill_start, backfill_now,
+            )
+            if len(merged_samples) != len(existing_samples):
+                await store.save(merged_samples)
 
         self._consumption_daily_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_CONSUMPTION_DAILY,
@@ -1262,48 +993,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             deserialize=forecast_accuracy_module.store_from_dict,
         )
         await self._forecast_quality_store.load()
-
-        self._grid_import_power_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_IMPORT_POWER,
-            serialize=_serialize_grid_import_power,
-            deserialize=_deserialize_grid_import_power,
-        )
-        await self._grid_import_power_store.load()
-
-        self._grid_export_power_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_EXPORT_POWER,
-            serialize=_serialize_grid_export_power,
-            deserialize=_deserialize_grid_export_power,
-        )
-        await self._grid_export_power_store.load()
-
-        backfill_now = datetime.now(timezone.utc)
-        backfill_start = backfill_now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
-        for store, entity_id, reading_cls in (
-            (self._grid_import_power_store, self._grid_import_power_entity_id, GridImportPowerReading),
-            (self._grid_export_power_store, self._grid_export_power_entity_id, GridExportPowerReading),
-        ):
-            existing_samples = list(store.value or [])
-            merged_samples = await _backfill_directional_power_from_recorder(
-                self.hass, entity_id, reading_cls,
-                existing_samples, backfill_start, backfill_now,
-            )
-            if len(merged_samples) != len(existing_samples):
-                await store.save(merged_samples)
-
-        self._grid_import_total_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_IMPORT_TOTAL,
-            serialize=_serialize_grid_import_total,
-            deserialize=_deserialize_grid_import_total,
-        )
-        await self._grid_import_total_store.load()
-
-        self._grid_export_total_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_GRID_EXPORT_TOTAL,
-            serialize=_serialize_grid_export_total,
-            deserialize=_deserialize_grid_export_total,
-        )
-        await self._grid_export_total_store.load()
 
         self._monthly_bill_store = PersistentStore(
             self.hass, STORAGE_VERSION, STORAGE_KEY_MONTHLY_BILL,
@@ -1340,13 +1029,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         )
         await self._baked_observed_store.load()
 
-        self._derived_power_store = PersistentStore(
-            self.hass, STORAGE_VERSION, STORAGE_KEY_DERIVED_POWER,
-            serialize=_serialize_derived_power,
-            deserialize=_deserialize_derived_power,
-        )
-        await self._derived_power_store.load()
-
         # Backfill the consumption-daily store from any complete local days
         # already present in the derived-power history. With the standard
         # 2-day derived retention this seeds 1–2 records (typically
@@ -1354,9 +1036,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         # something to chew on before the regular per-cycle finalise hook
         # accumulates fresh days. Idempotent — skipped for dates already
         # recorded.
+        derived_store = self._history_stores.get(STORAGE_KEY_DERIVED_POWER)
         if (
             self._consumption_daily_store is not None
-            and self._derived_power_store is not None
+            and derived_store is not None
         ):
             local_tz = self._sun_sale_config.local_tz
             existing = (
@@ -1364,7 +1047,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 or ConsumptionDailyBuckets(records=())
             )
             derived_history = DerivedPowerHistory(
-                samples=tuple(self._derived_power_store.value or []),
+                samples=tuple(derived_store.value or []),
             )
             after = backfill_from_derived_history(
                 derived_history=derived_history,
@@ -1422,77 +1105,17 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 new_buckets = _rotate_yesterday_buckets(buckets, today_str, today_nordpool, today_solar)
                 await self._yesterday_store.save(new_buckets)
 
-            current_generation: GenerationReading | None = primary.get(GenerationReading)
-            if current_generation is not None and self._generation_store is not None:
-                cutoff = now - timedelta(days=GENERATION_HISTORY_RETENTION_DAYS)
-                await self._generation_store.append_and_trim(
-                    current_generation, cutoff, lambda s: s.timestamp,
+            # Rolling sample histories — append each cycle's reading to its
+            # store (trimming to the spec's retention) and inject the window
+            # as the spec's *History primary. See history_stores.py.
+            for spec in SAMPLE_HISTORY_SPECS:
+                await append_and_inject(
+                    spec,
+                    self._history_stores.get(spec.storage_key),
+                    primary,
+                    primary.get(spec.reading_type),
+                    now,
                 )
-            primary[GenerationHistory] = GenerationHistory(
-                samples=tuple((self._generation_store.value or []) if self._generation_store else []),
-            )
-
-            current_pv_power: PvPowerReading | None = primary.get(PvPowerReading)
-            if current_pv_power is not None and self._pv_power_store is not None:
-                cutoff = now - timedelta(days=PV_POWER_HISTORY_RETENTION_DAYS)
-                await self._pv_power_store.append_and_trim(
-                    current_pv_power, cutoff, lambda s: s.timestamp,
-                )
-            primary[PvPowerHistory] = PvPowerHistory(
-                samples=tuple((self._pv_power_store.value or []) if self._pv_power_store else []),
-            )
-
-            current_import_power: GridImportPowerReading | None = primary.get(GridImportPowerReading)
-            if current_import_power is not None and self._grid_import_power_store is not None:
-                cutoff = now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
-                await self._grid_import_power_store.append_and_trim(
-                    current_import_power, cutoff, lambda s: s.timestamp,
-                )
-            primary[GridImportPowerHistory] = GridImportPowerHistory(
-                samples=tuple(
-                    (self._grid_import_power_store.value or [])
-                    if self._grid_import_power_store else []
-                ),
-            )
-
-            current_export_power: GridExportPowerReading | None = primary.get(GridExportPowerReading)
-            if current_export_power is not None and self._grid_export_power_store is not None:
-                cutoff = now - timedelta(days=GRID_POWER_HISTORY_RETENTION_DAYS)
-                await self._grid_export_power_store.append_and_trim(
-                    current_export_power, cutoff, lambda s: s.timestamp,
-                )
-            primary[GridExportPowerHistory] = GridExportPowerHistory(
-                samples=tuple(
-                    (self._grid_export_power_store.value or [])
-                    if self._grid_export_power_store else []
-                ),
-            )
-
-            current_grid_import_total: GridImportTodayReading | None = primary.get(GridImportTodayReading)
-            if current_grid_import_total is not None and self._grid_import_total_store is not None:
-                cutoff = now - timedelta(days=GRID_IMPORT_TOTAL_HISTORY_RETENTION_DAYS)
-                await self._grid_import_total_store.append_and_trim(
-                    current_grid_import_total, cutoff, lambda s: s.timestamp,
-                )
-            primary[GridImportTodayHistory] = GridImportTodayHistory(
-                samples=tuple(
-                    (self._grid_import_total_store.value or [])
-                    if self._grid_import_total_store else []
-                ),
-            )
-
-            current_grid_export_total: GridExportTodayReading | None = primary.get(GridExportTodayReading)
-            if current_grid_export_total is not None and self._grid_export_total_store is not None:
-                cutoff = now - timedelta(days=GRID_EXPORT_TOTAL_HISTORY_RETENTION_DAYS)
-                await self._grid_export_total_store.append_and_trim(
-                    current_grid_export_total, cutoff, lambda s: s.timestamp,
-                )
-            primary[GridExportTodayHistory] = GridExportTodayHistory(
-                samples=tuple(
-                    (self._grid_export_total_store.value or [])
-                    if self._grid_export_total_store else []
-                ),
-            )
 
             # Derived-power cross-stream sample: composes AC port + backup +
             # battery (carries battery_power + grid_net_signed) + PV into one
@@ -1500,26 +1123,19 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             # consumption + losses observers can power-average per slot. The
             # composer returns None when any source is unavailable this cycle —
             # partial samples would bias the per-slot mean asymmetrically.
-            current_ac_port: AcPortPowerReading | None = primary.get(AcPortPowerReading)
-            current_backup: BackupPowerReading | None = primary.get(BackupPowerReading)
-            current_battery: BatteryReading | None = primary.get(BatteryReading)
             derived_sample = build_derived_power_sample(
                 now=now,
-                ac_port=current_ac_port,
-                backup=current_backup,
-                battery=current_battery,
-                pv=current_pv_power,
+                ac_port=primary.get(AcPortPowerReading),
+                backup=primary.get(BackupPowerReading),
+                battery=primary.get(BatteryReading),
+                pv=primary.get(PvPowerReading),
             )
-            if derived_sample is not None and self._derived_power_store is not None:
-                cutoff = now - timedelta(days=DERIVED_POWER_HISTORY_RETENTION_DAYS)
-                await self._derived_power_store.append_and_trim(
-                    derived_sample, cutoff, lambda s: s.timestamp,
-                )
-            primary[DerivedPowerHistory] = DerivedPowerHistory(
-                samples=tuple(
-                    (self._derived_power_store.value or [])
-                    if self._derived_power_store else []
-                ),
+            await append_and_inject(
+                DERIVED_POWER_SPEC,
+                self._history_stores.get(STORAGE_KEY_DERIVED_POWER),
+                primary,
+                derived_sample,
+                now,
             )
 
             # Inverter clock skew tracker — drives the snapshot window shift
@@ -1545,9 +1161,9 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 updated_snapshots = maybe_capture_snapshots(
                     snapshot_history=current_snapshots,
                     sources=[
-                        (GENERATION_SIDE_ID, current_generation),
-                        (GRID_IMPORT_SIDE_ID, current_grid_import_total),
-                        (GRID_EXPORT_SIDE_ID, current_grid_export_total),
+                        (GENERATION_SIDE_ID, primary.get(GenerationReading)),
+                        (GRID_IMPORT_SIDE_ID, primary.get(GridImportTodayReading)),
+                        (GRID_EXPORT_SIDE_ID, primary.get(GridExportTodayReading)),
                     ],
                     now=now,
                     local_tz=self._sun_sale_config.local_tz,
@@ -1583,9 +1199,10 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             # only trimming runs, so calling every cycle is fine. The primary
             # is populated from the (possibly just-updated) store value so the
             # BaseLoadProfile node sees the latest rolling window.
+            derived_store = self._history_stores.get(STORAGE_KEY_DERIVED_POWER)
             if (
                 self._consumption_daily_store is not None
-                and self._derived_power_store is not None
+                and derived_store is not None
                 and self._sun_sale_config is not None
             ):
                 existing_buckets = (
@@ -1595,7 +1212,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 derived_for_finalise = primary.get(DerivedPowerHistory)
                 if derived_for_finalise is None:
                     derived_for_finalise = DerivedPowerHistory(
-                        samples=tuple(self._derived_power_store.value or []),
+                        samples=tuple(derived_store.value or []),
                     )
                 updated_buckets = try_finalise_yesterday_consumption(
                     derived_history=derived_for_finalise,
