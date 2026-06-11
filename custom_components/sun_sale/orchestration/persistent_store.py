@@ -7,6 +7,8 @@ from typing import Any, Callable, Generic, TypeVar
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
+from ..contract.const import STORE_SAVE_DELAY_SECONDS
+
 T = TypeVar("T")
 JSONDict = dict[str, Any]
 
@@ -24,6 +26,12 @@ class PersistentStore(Generic[T]):
         serialize: Convert T to a JSON-serialisable dict.
         deserialize: Reconstruct T from the stored dict; may return None to
             signal that the stored data should be treated as missing.
+        save_delay: Debounce window (seconds) applied to :meth:`save`. When
+            positive (the default), writes go through HA's
+            ``Store.async_delay_save`` so the per-tick fan-out and off-cycle
+            bursts coalesce into one background write per store. Pass ``0`` to
+            force an immediate, awaited write for any store that needs
+            synchronous durability.
     """
 
     def __init__(
@@ -33,11 +41,13 @@ class PersistentStore(Generic[T]):
         key: str,
         serialize: Callable[[T], JSONDict],
         deserialize: Callable[[JSONDict], T | None],
+        save_delay: float = STORE_SAVE_DELAY_SECONDS,
     ) -> None:
         """Initialise store with serialisation callbacks; does not perform I/O."""
         self._store: Store = Store(hass, version, key)
         self._serialize = serialize
         self._deserialize = deserialize
+        self._save_delay = save_delay
         self._value: T | None = None
 
     @property
@@ -58,13 +68,25 @@ class PersistentStore(Generic[T]):
         return self._value
 
     async def save(self, value: T) -> None:
-        """Serialise value, write to disk, and update the in-memory cache.
+        """Update the in-memory cache and persist the value.
+
+        The cache is updated synchronously so callers (and the DAG, which reads
+        :attr:`value`) always see the latest value immediately. The disk write
+        is debounced via ``Store.async_delay_save`` when ``save_delay`` is
+        positive — coalescing the many saves a single coordinator tick and its
+        off-cycle refresh bursts trigger into one background write — or issued
+        immediately when ``save_delay`` is ``0``. Serialisation is deferred to
+        write time so a value superseded within the debounce window is never
+        serialised.
 
         Args:
             value: Value to persist.
         """
         self._value = value
-        await self._store.async_save(self._serialize(value))
+        if self._save_delay > 0:
+            self._store.async_delay_save(lambda: self._serialize(value), self._save_delay)
+        else:
+            await self._store.async_save(self._serialize(value))
 
     async def append_and_trim(
         self,

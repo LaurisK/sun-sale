@@ -99,6 +99,20 @@ STORAGE_KEY_MONTHLY_BILL = f"{DOMAIN}_monthly_bill"
 STORAGE_KEY_MODE_HISTORY = f"{DOMAIN}_mode_history"
 STORAGE_VERSION = 1
 
+# Debounce window (seconds) for PersistentStore writes. A single coordinator
+# tick fans out ~10–14 logical saves (the rolling sample histories plus the
+# forecast-quality / monthly-bill / price-history stores), and off-cycle
+# refreshes (mode-override presses, force_recalculate, startup) burst these
+# further — each previously a full-JSON Store.async_save rewrite, ~3–4k
+# writes/day. Routing them through Store.async_delay_save coalesces the
+# per-tick fan-out and any burst into one debounced background write per store,
+# off the synchronous update path — meaningful flash wear relief on SD-card
+# installs. Kept below UPDATE_INTERVAL_MINUTES so steady-cadence writes still
+# land each cycle; HA flushes pending writes on clean shutdown via its
+# final-write listener, so only an unclean crash within the window can drop the
+# most recent (reconstructible) sample.
+STORE_SAVE_DELAY_SECONDS = 30
+
 # Rolling generation-sample retention (days). Anything older than this is
 # trimmed before persistence each cycle.
 GENERATION_HISTORY_RETENTION_DAYS = 2
