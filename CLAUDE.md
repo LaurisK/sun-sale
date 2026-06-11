@@ -195,17 +195,31 @@ the scheduled callback would have.
 
 ## Integration check coverage
 
-Every pipeline module that consumes or produces data must have a corresponding deep-check in `tools/integration_check.py`. The check must validate:
+Every pipeline module that consumes or produces data must have a corresponding deep-check in the `tools/checks/` package. The check must validate:
 
 - All data the module **consumes** — cross-checked against its upstream source (raw HA entity state, `snap.inputs`, or an upstream `snap.pipeline` key).
 - All data the module **exposes** — every declared field in the debug API serialization, including aggregate totals (sums, counts) verified against per-slot values.
 
 **Servicing modules** — those that only route or actuate without producing pipeline data (e.g. `event_router`, `InverterController`) — are exempt.
 
+The harness was split out of the former ~5k-line `tools/integration_check.py`
+monolith into the `tools/checks/` package — one module per domain
+(`forecast.py`, `pricing.py`, `observed.py`, …), each owning its result
+dataclass(es), `check_*` function(s), and `<Module>CheckWidget`(s). The shared
+infrastructure lives in `client.py` / `snapshot.py` / `registry.py` /
+`validators.py`; the TUI shell is `app.py`; reporting is `report.py`; the
+`main()` entry point is `cli.py`. `tools/integration_check.py` remains as a thin
+shim that re-exports the package's public API (so `python tools/integration_check.py`
+and `from tools.integration_check import …` both keep working).
+
 When adding a new pipeline module:
 1. Expose its output in `debug_view.py` under `pipeline` (or `outputs` for final deliverables).
-2. Add a `check_<module>()` function and result dataclass.
-3. Add a `<Module>CheckWidget` and wire it into `_DEEP_CATS`, `IntegrationCheckApp`, and `compose()`.
+2. Add a `check_<module>()` function and result dataclass plus a `<Module>CheckWidget`
+   in the matching `tools/checks/<domain>.py` (a new module file, or an existing
+   same-domain one), and re-export them from `tools/checks/__init__.py`.
+3. Wire the widget into `tools/checks/app.py` — `_DEEP_CATS`, the `IntegrationCheckApp`
+   constructor, `compose()`, and the `CSS` block — and call `check_<module>()` in
+   the results assembly inside `tools/checks/cli.py:main`.
 
 ## Observed-series bake-in
 
