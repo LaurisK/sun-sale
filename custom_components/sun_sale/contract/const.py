@@ -180,6 +180,16 @@ UPDATE_INTERVAL_MINUTES = 5
 # Capacity estimator: discard observations with SoC delta below this threshold
 CAPACITY_OBS_MIN_SOC_DELTA = 0.05
 
+# Capacity estimator: reject observations whose inter-reading interval falls
+# outside this band around the nominal update interval. Refreshes are not always
+# UPDATE_INTERVAL_MINUTES apart — mode-override changes, force_recalculate, and
+# startup all fire an off-cycle async_request_refresh that can land seconds after
+# the previous cycle, while a stalled coordinator can skip cycles entirely. Either
+# breaks the two-endpoint average-power energy estimate, so only accept intervals
+# close to nominal.
+CAPACITY_OBS_MIN_INTERVAL_S = UPDATE_INTERVAL_MINUTES * 60 * 0.5
+CAPACITY_OBS_MAX_INTERVAL_S = UPDATE_INTERVAL_MINUTES * 60 * 2.0
+
 # Defaults
 DEFAULT_NORDPOOL_RESOLUTION = "15min"
 

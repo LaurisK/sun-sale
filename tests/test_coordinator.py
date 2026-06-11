@@ -150,18 +150,28 @@ def test_build_capacity_observation_none_on_first_call():
 def test_build_capacity_observation_none_when_small_soc_delta():
     coord, _ = _make_coordinator()
     coord._last_battery_reading = _reading(0.50, 2.0)
+    coord._last_battery_reading_at = BASE - timedelta(minutes=5)
     assert coord._build_capacity_observation(_reading(0.52, 2.0), BASE) is None
 
 
 def test_build_capacity_observation_at_threshold_boundary():
     coord, _ = _make_coordinator()
     coord._last_battery_reading = _reading(0.50, 2.0)
+    coord._last_battery_reading_at = BASE - timedelta(minutes=5)
     assert coord._build_capacity_observation(_reading(0.549, 2.0), BASE) is None
+
+
+def test_build_capacity_observation_none_without_prior_timestamp():
+    coord, _ = _make_coordinator()
+    coord._last_battery_reading = _reading(0.20, 3.0)
+    coord._last_battery_reading_at = None
+    assert coord._build_capacity_observation(_reading(0.80, 3.0), BASE) is None
 
 
 def test_build_capacity_observation_charge_direction():
     coord, _ = _make_coordinator()
     coord._last_battery_reading = _reading(0.20, 3.0)
+    coord._last_battery_reading_at = BASE - timedelta(minutes=5)
     obs = coord._build_capacity_observation(_reading(0.80, 3.0), BASE)
     assert obs is not None
     assert obs.direction == "charge"
@@ -172,6 +182,7 @@ def test_build_capacity_observation_charge_direction():
 def test_build_capacity_observation_discharge_direction():
     coord, _ = _make_coordinator()
     coord._last_battery_reading = _reading(0.80, 3.0)
+    coord._last_battery_reading_at = BASE - timedelta(minutes=5)
     obs = coord._build_capacity_observation(_reading(0.20, 3.0), BASE)
     assert obs is not None
     assert obs.direction == "discharge"
@@ -180,11 +191,40 @@ def test_build_capacity_observation_discharge_direction():
 def test_build_capacity_observation_energy_computed():
     coord, _ = _make_coordinator()
     coord._last_battery_reading = _reading(0.20, 4.0)
+    coord._last_battery_reading_at = BASE - timedelta(minutes=5)
     obs = coord._build_capacity_observation(_reading(0.80, 4.0), BASE)
     assert obs is not None
     from custom_components.sun_sale.contract.const import UPDATE_INTERVAL_MINUTES
     expected_energy = 4.0 * (UPDATE_INTERVAL_MINUTES / 60.0)
     assert abs(obs.energy_kwh - expected_energy) < 1e-6
+
+
+def test_build_capacity_observation_energy_uses_real_interval():
+    # A 4-minute interval (in-band) must integrate over 240 s, not the nominal 300 s.
+    coord, _ = _make_coordinator()
+    coord._last_battery_reading = _reading(0.20, 6.0)
+    coord._last_battery_reading_at = BASE - timedelta(minutes=4)
+    obs = coord._build_capacity_observation(_reading(0.80, 6.0), BASE)
+    assert obs is not None
+    assert abs(obs.energy_kwh - 6.0 * (240.0 / 3600.0)) < 1e-6
+
+
+def test_build_capacity_observation_none_when_interval_too_short():
+    # An off-cycle refresh (mode-override change, force_recalculate, startup) lands
+    # seconds after the prior cycle; the observation must be rejected, not 10x'd.
+    coord, _ = _make_coordinator()
+    coord._last_battery_reading = _reading(0.20, 4.0)
+    coord._last_battery_reading_at = BASE - timedelta(seconds=30)
+    assert coord._build_capacity_observation(_reading(0.80, 4.0), BASE) is None
+
+
+def test_build_capacity_observation_none_when_interval_too_long():
+    # A stalled coordinator leaves a multi-cycle gap; the two-endpoint average is
+    # no longer representative, so the observation is rejected.
+    coord, _ = _make_coordinator()
+    coord._last_battery_reading = _reading(0.20, 4.0)
+    coord._last_battery_reading_at = BASE - timedelta(minutes=30)
+    assert coord._build_capacity_observation(_reading(0.80, 4.0), BASE) is None
 
 
 # ---------------------------------------------------------------------------

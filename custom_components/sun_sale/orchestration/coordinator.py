@@ -70,6 +70,8 @@ from ..contract.const import (
     CONF_TARIFF_SELL_TAX_RATE,
     CONF_TARIFF_TAX_RATE,
     BAKED_OBSERVED_HISTORY_RETENTION_DAYS,
+    CAPACITY_OBS_MAX_INTERVAL_S,
+    CAPACITY_OBS_MIN_INTERVAL_S,
     CAPACITY_OBS_MIN_SOC_DELTA,
     CONSUMPTION_DAILY_WINDOW_DAYS,
     COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS,
@@ -864,6 +866,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._translators: list = []
         self._control_module: InverterControlModule | None = None
         self._last_battery_reading: BatteryReading | None = None
+        self._last_battery_reading_at: datetime | None = None
         self._yesterday_store: PersistentStore[_YesterdayBuckets] | None = None
         self._generation_store: PersistentStore[list[GenerationReading]] | None = None
         self._pv_power_store: PersistentStore[list[PvPowerReading]] | None = None
@@ -1623,6 +1626,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     if self._capacity_store is not None:
                         await self._capacity_store.save(self._capacity_estimator)
                 self._last_battery_reading = current_reading
+                self._last_battery_reading_at = now
 
             primary[EstimatedCapacity] = EstimatedCapacity(
                 value_kwh=self._capacity_estimator.estimated_capacity_kwh
@@ -1938,21 +1942,33 @@ class SunSaleCoordinator(DataUpdateCoordinator):
     ) -> CapacityObservation | None:
         """Build a CapacityObservation from consecutive battery readings if SoC delta is significant.
 
+        Energy is integrated over the *real* elapsed time between the two readings,
+        not the nominal update interval: off-cycle refreshes (mode-override changes,
+        force_recalculate, startup) can land seconds apart, which would otherwise
+        overstate energy by the ratio of nominal-to-actual interval.
+
         Args:
             current: Most recent battery reading.
-            now: Cycle timestamp used as the observation timestamp.
+            now: Cycle timestamp used as the observation timestamp and the interval
+                endpoint.
 
         Returns:
-            CapacityObservation when |soc_delta| >= CAPACITY_OBS_MIN_SOC_DELTA,
-            or None on the first cycle or when the delta is too small.
+            CapacityObservation when |soc_delta| >= CAPACITY_OBS_MIN_SOC_DELTA and the
+            elapsed interval lies within
+            [CAPACITY_OBS_MIN_INTERVAL_S, CAPACITY_OBS_MAX_INTERVAL_S]; None on the
+            first cycle, when the delta is too small, or when the interval is
+            implausibly short (off-cycle refresh) or long (stalled coordinator).
         """
-        if self._last_battery_reading is None:
+        if self._last_battery_reading is None or self._last_battery_reading_at is None:
             return None
         soc_delta = abs(current.soc - self._last_battery_reading.soc)
         if soc_delta < CAPACITY_OBS_MIN_SOC_DELTA:
             return None
+        interval_s = (now - self._last_battery_reading_at).total_seconds()
+        if not CAPACITY_OBS_MIN_INTERVAL_S <= interval_s <= CAPACITY_OBS_MAX_INTERVAL_S:
+            return None
         avg_power = (abs(self._last_battery_reading.power_kw) + abs(current.power_kw)) / 2.0
-        energy_kwh = avg_power * (UPDATE_INTERVAL_MINUTES / 60.0)
+        energy_kwh = avg_power * (interval_s / 3600.0)
         direction = "charge" if current.soc > self._last_battery_reading.soc else "discharge"
         return CapacityObservation(
             timestamp=now,
