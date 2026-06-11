@@ -159,12 +159,23 @@ class DagNode(ABC):
 
         Returns:
             List of ControlEvents emitted by this node (may be empty).
+
+        Raises:
+            Exception: Anything raised by _compute propagates so the engine can
+                isolate the failure; the satisfied-dependency set is cleared
+                first via the finally block so a failed node leaves no stale
+                flags for the next cycle.
         """
-        result, events = await self._compute(ctx)
+        try:
+            result, events = await self._compute(ctx)
+        finally:
+            # Clear even when _compute raises: a leftover satisfied flag would
+            # make all_secondary_deps_satisfied() lie next cycle, marking the
+            # node ready before its (now isolated) upstream has re-deposited.
+            self._satisfied.clear()
         if result is not None and self.output_type is not None:
             ctx.secondary[self.output_type] = result
         self._notify_observers()
-        self._satisfied.clear()
         return events
 
     @abstractmethod
@@ -240,7 +251,10 @@ class DagEngine:
             now: Cycle timestamp.
 
         Returns:
-            Tuple of (secondary_outputs_dict, all_control_events).
+            Tuple of (secondary_outputs_dict, all_control_events). A node that
+            raises is isolated: its output is omitted and downstream consumers
+            that depend on it simply never become ready, degrading the same way
+            they would for a missing primary input.
         """
         ctx = NodeContext(primary=primary, secondary={}, config=config, now=now)
         all_events: list[ControlEvent] = []
@@ -252,9 +266,23 @@ class DagEngine:
             ]
             if not ready:
                 continue
-            results = await asyncio.gather(*[n.run(ctx) for n in ready])
-            for events in results:
-                all_events.extend(events)
+            # return_exceptions so one flaky node can't abort the whole tier
+            # (and with it the cycle). A failed node deposits nothing and
+            # notifies no observers, so its consumers stay unsatisfied and skip.
+            results = await asyncio.gather(
+                *[n.run(ctx) for n in ready], return_exceptions=True
+            )
+            for node, result in zip(ready, results):
+                if isinstance(result, BaseException):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    _LOGGER.warning(
+                        "DAG node %s (tier %d) failed; output omitted, "
+                        "downstream consumers degrade this cycle: %s",
+                        type(node).__name__, node.tier, result,
+                    )
+                    continue
+                all_events.extend(result)
 
         return ctx.secondary, all_events
 
@@ -268,7 +296,11 @@ async def run_translators(
 ) -> dict[type, Any]:
     """Run all translators concurrently and collect their outputs into a primary dict.
 
-    Translators that return None (optional / unavailable sources) are silently skipped.
+    Translators that return None (optional / unavailable sources) are silently
+    skipped. A translator that *raises* is isolated: the failure is logged and
+    its output is omitted from the primary dict, so one flaky source can't abort
+    the whole cycle. The DAG degrades gracefully for the missing input, and the
+    control-module dispatch downstream still runs.
 
     Args:
         translators: List of translator objects exposing output_type and translate().
@@ -278,13 +310,29 @@ async def run_translators(
         now: Cycle timestamp.
 
     Returns:
-        Dict mapping each translator's output_type to its result.
+        Dict mapping each surviving translator's output_type to its result.
+
+    Raises:
+        asyncio.CancelledError: Re-raised if a translator task was cancelled
+            (genuine cancellation must not be swallowed as a per-source failure).
     """
-    results = await asyncio.gather(*[
-        t.translate(hass, config, raw_config, now) for t in translators
-    ])
-    return {
-        t.output_type: result
-        for t, result in zip(translators, results)
-        if result is not None
-    }
+    results = await asyncio.gather(
+        *[t.translate(hass, config, raw_config, now) for t in translators],
+        return_exceptions=True,
+    )
+    primary: dict[type, Any] = {}
+    for t, result in zip(translators, results):
+        if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            _LOGGER.warning(
+                "Translator %s failed; omitting %s from primary inputs this "
+                "cycle: %s",
+                type(t).__name__,
+                getattr(t.output_type, "__name__", t.output_type),
+                result,
+            )
+            continue
+        if result is not None:
+            primary[t.output_type] = result
+    return primary
