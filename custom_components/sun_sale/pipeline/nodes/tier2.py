@@ -40,7 +40,6 @@ _LOGGER = logging.getLogger(__name__)
 class GenerationNode(DagNode):
     """Normalise SolarData into GenerationSeries aligned to PriceSeries resolution."""
 
-    tier = 2
     output_type = GenerationSeries
     consumes = [SolarData, PriceSeries]
 
@@ -65,7 +64,6 @@ class ObservedGenerationNode(DagNode):
     rollover. Tier 2 because it depends on ``PriceSeries`` (T1 secondary).
     """
 
-    tier = 2
     output_type = ObservedGenerationSeries
     consumes = [PvPowerHistory, PriceSeries, BakedObservedHistory]
 
@@ -87,7 +85,6 @@ class ObservedGenerationNode(DagNode):
 class DegradationNode(DagNode):
     """Compute battery degradation cost per kWh from BatteryState + BatteryConfig."""
 
-    tier = 2
     output_type = DegradationCost
     consumes = [BatteryState]
 
@@ -108,7 +105,6 @@ class BatteryRuntimeNode(DagNode):
     See docs/base_load_missing.md.
     """
 
-    tier = 2
     output_type = BatteryRuntimeEstimate
     consumes = [BatteryStatus, BaseLoadProfile]
 
@@ -138,7 +134,6 @@ class ObservedGridNode(DagNode):
     ``PriceSeries`` (T1 secondary).
     """
 
-    tier = 2
     output_type = ObservedGridSeries
     consumes = [
         GridImportPowerHistory,
@@ -174,7 +169,6 @@ class ObservedConsumptionNode(DagNode):
     because it depends on ``PriceSeries`` (T1 secondary).
     """
 
-    tier = 2
     output_type = ObservedConsumptionSeries
     consumes = [DerivedPowerHistory, PriceSeries, BakedObservedHistory]
 
@@ -201,7 +195,6 @@ class ObservedLossesNode(DagNode):
     stay that way. Tier 2 for symmetry with the other observed nodes.
     """
 
-    tier = 2
     output_type = ObservedLossesSeries
     consumes = [DerivedPowerHistory, PriceSeries, BakedObservedHistory]
 
@@ -223,7 +216,6 @@ class ObservedLossesNode(DagNode):
 class ProfitabilityNode(DagNode):
     """Score today's peak against rolling daily-peak history → ProfitabilityScore."""
 
-    tier = 2
     output_type = ProfitabilityScore
     consumes = [PriceSeries, PriceHistory]
 

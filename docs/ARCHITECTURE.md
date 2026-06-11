@@ -1,11 +1,11 @@
 # sunSale Architecture
 
-End-to-end description of the tiered observer DAG that drives every sunSale update cycle.
+End-to-end description of the tiered DAG that drives every sunSale update cycle.
 
 | | |
 |---|---|
 | **Status** | Implemented |
-| **Pattern** | Translation layer + inbound normalisers + tiered observer DAG + post-DAG inverter control module |
+| **Pattern** | Translation layer + inbound normalisers + tiered DAG + post-DAG inverter control module |
 | **HA boundary** | HA imports confined to root entry points (`__init__.py`, `config_flow.py`, `sensor.py`, `switch.py`), `orchestration/`, and `outbound/inverter.py`. Inbound translators (`inbound/*.py`) do not import HA — each accepts a duck-typed `hass` at runtime to read `hass.states`. All other modules are pure Python. |
 
 ## Contents
@@ -180,20 +180,26 @@ These live in `inbound/` because they normalise translator output into the shape
 
 ### DagNode contract
 
-Every node declares three class attributes:
+Every node declares two class attributes:
 
 ```python
 class SomeNode(DagNode):
-    tier: int              # 1–5; controls execution order and observer wiring
     output_type: type      # the type this node deposits into NodeContext.secondary
     consumes: list[type]   # primary or secondary types this node needs
 ```
 
-The engine calls `_wire()` once at construction. For each `(consumer, dependency_type)` pair where the dependency is produced by another node, it calls `producer.add_observer(consumer)`. `add_observer` raises `TierViolationError` if `consumer.tier <= producer.tier`, enforcing the DAG's acyclicity at startup time.
+Tiers are **not** declared. At construction the engine derives each node's tier by
+longest-path layering over the consumes/output_type graph (`_assign_tiers`): a
+node's tier is one more than the deepest tier among the nodes producing the
+secondary types it consumes, or `0` when it consumes only primary inputs. A node
+therefore always lands strictly above every node whose output it consumes, and
+adding a node is a non-decision — its tier falls out of what it consumes. If the
+graph contains a cycle (a node transitively consuming its own output) no finite
+layering exists, so construction raises `DependencyCycleError`.
 
-### Observer notification
+### Readiness
 
-After `_compute()` returns, `run()` deposits the result in `ctx.secondary[output_type]` and calls `_notify_observers()`, which records the satisfied dependency on each observer. A node is "ready" for a tier when every type in `consumes` is either already in `ctx.primary` or has been marked satisfied via observer notification.
+After `_compute()` returns, `run()` deposits the result in `ctx.secondary[output_type]`. A node is "ready" for a tier when every type in `consumes` is either already in `ctx.primary` or present in `ctx.secondary` (`all_secondary_deps_satisfied`). Because each tier runs to completion before the next begins, every lower-tier output a node depends on is present by the time its tier is evaluated. There is no cross-node notification or per-node "satisfied" state, so a node skipped or failed in one cycle carries nothing into the next.
 
 ### Tier execution
 
@@ -269,6 +275,9 @@ The coordinator contains no domain computation — it owns the schedule, the per
 
 ## 7. Node reference
 
+The Tier column is illustrative — tiers are derived from the consumes/output_type
+graph at construction (§6), not declared on the node.
+
 | Node | Tier | Consumes | Produces |
 |---|---|---|---|
 | `PricingNode` | 1 | `NordpoolData`, `YesterdayPrices` | `PriceSeries` (72h) |
@@ -337,7 +346,7 @@ All types are dataclasses in `contract/models.py`. Frozen unless they're mutated
 
 **Inbound owns the 72h pricing assembly.** The Nordpool translator emits today + tomorrow only; the coordinator supplies yesterday from a persistent store as `YesterdayPrices`; `inbound/pricing.build_price_series_72h` combines them and applies the tariff. Downstream consumers can rely on `PriceSeries` covering yesterday→today→tomorrow when yesterday data is available.
 
-**Tier constraint enforced at wire-time.** `add_observer()` raises `TierViolationError` if `observer.tier <= subject.tier`. This catches dependency graph mistakes during integration startup, not at runtime.
+**Tiers derived at construction, cycles caught there.** Tiers are computed by topological longest-path layering over the consumes/output_type graph (`DagEngine._assign_tiers`), not hand-assigned. A dependency cycle has no finite layering, so it raises `DependencyCycleError` during integration startup — catching graph mistakes there, not at runtime.
 
 **Events vs. return values (legacy contract).** `DagNode._compute` still returns `(result, list[ControlEvent])` so the type signature accommodates side-effect emission. In the current code every node returns an empty event list — actuation moved into the post-DAG `InverterControlModule`, which reads the `Schedule`'s per-slot `StorageMode` directly. The event-tuple shape is kept for forward use without forcing a contract change if a future node needs to emit something orthogonal to the schedule.
 

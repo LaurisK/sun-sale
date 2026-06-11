@@ -17,6 +17,7 @@ from custom_components.sun_sale.contract.models import SunSaleConfig
 from custom_components.sun_sale.pipeline.dag_engine import (
     DagEngine,
     DagNode,
+    DependencyCycleError,
     NodeContext,
     run_translators,
 )
@@ -48,9 +49,8 @@ class _COut:
 
 
 class _ProducerA(DagNode):
-    """Tier-0 node that always succeeds."""
+    """Source node that always succeeds (derived tier 0)."""
 
-    tier = 0
     output_type = _AOut
     consumes: list = []
 
@@ -60,9 +60,8 @@ class _ProducerA(DagNode):
 
 
 class _FailingProducer(DagNode):
-    """Tier-0 node whose compute always raises."""
+    """Source node whose compute always raises (derived tier 0)."""
 
-    tier = 0
     output_type = _BOut
     consumes: list = []
 
@@ -72,9 +71,8 @@ class _FailingProducer(DagNode):
 
 
 class _ConsumerOfB(DagNode):
-    """Tier-1 node that consumes the failing node's output."""
+    """Node that consumes the failing node's output (derived tier 1)."""
 
-    tier = 1
     output_type = _COut
     consumes = [_BOut]
 
@@ -130,16 +128,100 @@ async def test_failing_node_does_not_leave_stale_satisfied_flag():
     assert c.ran is False
 
 
+# --- Derived tier ordering + cycle detection -------------------------------
+
+class _DOut:
+    """Output of a node that consumes _COut (forces a third tier)."""
+
+
+class _ConsumerOfC(DagNode):
+    """Node consuming _COut → derived tier 2 (one above _ConsumerOfB)."""
+
+    output_type = _DOut
+    consumes = [_COut]
+
+    async def _compute(self, ctx):
+        """Require _COut and produce _DOut."""
+        ctx.require(_COut)
+        return _DOut(), []
+
+
+class _ConsumerOfA(DagNode):
+    """Node consuming _AOut → derived tier 1."""
+
+    output_type = _COut
+    consumes = [_AOut]
+
+    async def _compute(self, ctx):
+        """Require _AOut and produce _COut."""
+        ctx.require(_AOut)
+        return _COut(), []
+
+
+@pytest.mark.asyncio
+async def test_tiers_derived_independent_of_node_list_order():
+    """A chain runs in dependency order even when listed leaf-first.
+
+    Tiers are derived from consumes/output_type, not from list position, so
+    passing the deepest consumer first must not change execution order: every
+    output still lands because each node runs strictly after its producer.
+    """
+    deep = _ConsumerOfC()    # tier 2, consumes _COut
+    mid = _ConsumerOfA()     # tier 1, consumes _AOut → _COut
+    src = _ProducerA()       # tier 0, produces _AOut
+    engine = DagEngine([deep, mid, src])
+
+    secondary, _ = await engine.run({}, _config(), NOW)
+
+    assert _AOut in secondary
+    assert _COut in secondary
+    assert _DOut in secondary          # deepest node ran last, with its dep present
+
+
+class _CycleOne(DagNode):
+    """Produces _AOut but consumes _BOut — half of a 2-node cycle."""
+
+    output_type = _AOut
+    consumes = [_BOut]
+
+    async def _compute(self, ctx):
+        """Never reached: construction raises before any run."""
+        return _AOut(), []
+
+
+class _CycleTwo(DagNode):
+    """Produces _BOut but consumes _AOut — the other half of the cycle."""
+
+    output_type = _BOut
+    consumes = [_AOut]
+
+    async def _compute(self, ctx):
+        """Never reached: construction raises before any run."""
+        return _BOut(), []
+
+
+def test_dependency_cycle_raises_at_construction():
+    """A consumes/output_type cycle is rejected when the engine is built.
+
+    Without a finite tier layering the engine could deadlock at runtime, so the
+    cycle must surface immediately at construction, naming the nodes involved.
+    """
+    with pytest.raises(DependencyCycleError) as exc:
+        DagEngine([_CycleOne(), _CycleTwo()])
+
+    assert "_CycleOne" in str(exc.value)
+    assert "_CycleTwo" in str(exc.value)
+
+
 # --- Cross-cycle readiness leak (the bug this guards against) --------------
 
 class _ToggleProducer(DagNode):
-    """Tier-0 producer that deposits its output only while `active` is True.
+    """Source producer that deposits its output only while `active` is True.
 
     When inactive it raises, so the engine isolates it and deposits nothing —
     mirroring a source that is simply absent that cycle.
     """
 
-    tier = 0
     consumes: list = []
 
     def __init__(self, output_type: type, active: bool) -> None:
@@ -156,9 +238,8 @@ class _ToggleProducer(DagNode):
 
 
 class _TwoDepConsumer(DagNode):
-    """Tier-1 node that requires both _AOut and _BOut to be present."""
+    """Node that requires both _AOut and _BOut to be present (derived tier 1)."""
 
-    tier = 1
     output_type = _COut
     consumes = [_AOut, _BOut]
 

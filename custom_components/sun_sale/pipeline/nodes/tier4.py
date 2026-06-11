@@ -30,7 +30,6 @@ class ScheduleNode(DagNode):
     battery-discharge-for-load and AC deficit/surplus).
     """
 
-    tier = 4
     output_type = Schedule
     consumes = [
         PriceSeries,

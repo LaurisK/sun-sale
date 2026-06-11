@@ -1,10 +1,14 @@
-"""DAG Task Engine — tiered observer-pattern directed acyclic graph executor.
+"""DAG Task Engine — tiered directed acyclic graph executor.
 
 Architecture:
-  - Each DagNode declares its tier, output_type, and consumed types.
-  - DagEngine._wire() validates the tier constraint: a node may only consume
-    outputs produced by strictly-lower-tier nodes (this prevents cycles and
-    deadlocks). Same- or higher-tier dependencies are rejected.
+  - Each DagNode declares only its output_type and the types it consumes.
+    Execution tiers are *derived*, not hand-assigned: DagEngine computes each
+    node's tier by longest-path layering over the consumes/output_type graph,
+    so a node always lands strictly above every node whose output it consumes.
+    Adding a node is a non-decision — its tier falls out of what it consumes.
+  - Constructing the engine raises DependencyCycleError if the graph contains a
+    cycle (a node that transitively consumes its own output); an acyclic graph
+    always yields a finite layering.
   - On each run cycle the engine executes tiers in ascending order; within a tier
     all eligible nodes run in parallel (asyncio.gather). Each tier runs to
     completion before the next begins, so every lower-tier output is present in
@@ -33,8 +37,12 @@ _LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
-class TierViolationError(Exception):
-    """Raised when a node consumes the output of a same- or higher-tier node."""
+class DependencyCycleError(Exception):
+    """Raised when the consumes/output_type graph contains a dependency cycle.
+
+    A cycle means a node transitively consumes its own output, so no finite
+    tier layering exists. Detected once, at engine construction.
+    """
 
 
 class MissingDependencyError(KeyError):
@@ -97,13 +105,15 @@ class DagNode(ABC):
     """Abstract base for all DAG computation nodes.
 
     Subclass contract (class-level attributes):
-      tier:        int        — execution tier; node may only observe lower-tier nodes.
       output_type: type|None — type deposited into ctx.secondary (None = sink node).
       consumes:    list[type] — all types this node reads from NodeContext
                                (both primary and secondary types).
+
+    A node's execution tier is not declared — DagEngine derives it from the
+    consumes/output_type graph so a node always runs strictly after every node
+    whose output it consumes.
     """
 
-    tier: int
     output_type: type | None
     consumes: list[type]
 
@@ -166,10 +176,11 @@ class DagNode(ABC):
 
 
 class DagEngine:
-    """Tiered observer DAG executor.
+    """Tiered DAG executor with tiers derived from the dependency graph.
 
     Construction:
-      DagEngine(nodes) — nodes are auto-wired via _wire() and grouped by tier.
+      DagEngine(nodes) — each node's tier is derived from its consumes/output_type
+      relationships and the nodes are grouped by tier.
 
     Execution:
       await engine.run(primary, config, now) → (secondary, events)
@@ -178,42 +189,66 @@ class DagEngine:
     """
 
     def __init__(self, nodes: list[DagNode]) -> None:
-        """Initialise engine, group nodes by tier, and auto-wire dependencies.
+        """Derive each node's execution tier and group the nodes by tier.
 
         Args:
-            nodes: All DAG nodes; tiers and output_types must be set correctly.
-        """
-        self._nodes_by_tier: dict[int, list[DagNode]] = {}
-        for node in nodes:
-            self._nodes_by_tier.setdefault(node.tier, []).append(node)
-        self._wire(nodes)
-
-    def _wire(self, nodes: list[DagNode]) -> None:
-        """Validate the tier constraint for every producer→consumer dependency.
-
-        For each consumed secondary type, finds the node that produces it and
-        enforces that the consumer sits at a strictly higher tier. This is the
-        invariant that lets readiness be read straight from ctx.secondary
-        (see DagNode.all_secondary_deps_satisfied) and prevents cycles/deadlocks.
-
-        Args:
-            nodes: All nodes to validate; each node's consumes list is inspected.
+            nodes: All DAG nodes; each must set output_type (or None) and consumes.
 
         Raises:
-            TierViolationError: When a consumer's tier <= the tier of a node it consumes.
+            DependencyCycleError: When the consumes/output_type graph has a cycle.
+        """
+        tier_of = self._assign_tiers(nodes)
+        self._nodes_by_tier: dict[int, list[DagNode]] = {}
+        for node in nodes:
+            self._nodes_by_tier.setdefault(tier_of[node], []).append(node)
+
+    @staticmethod
+    def _assign_tiers(nodes: list[DagNode]) -> dict[DagNode, int]:
+        """Derive each node's execution tier by longest-path layering over the graph.
+
+        A node's tier is one more than the deepest tier among the nodes that
+        produce the secondary types it consumes (0 when it consumes only primary
+        inputs). Because every producer→consumer edge raises the tier by at least
+        one, same-tier nodes are guaranteed independent and every dependency is
+        resolved before its consumer's tier runs — the invariant that lets
+        readiness be read straight from ctx.secondary (see
+        DagNode.all_secondary_deps_satisfied).
+
+        Args:
+            nodes: All nodes; each node's output_type and consumes are inspected.
+
+        Returns:
+            Mapping of node → derived tier (0-based).
+
+        Raises:
+            DependencyCycleError: When a node transitively consumes its own output,
+                so no finite layering exists.
         """
         producer: dict[type, DagNode] = {
             n.output_type: n for n in nodes if n.output_type is not None
         }
-        for node in nodes:
-            for dep_type in node.consumes:
-                p = producer.get(dep_type)
-                if p is not None and node.tier <= p.tier:
-                    raise TierViolationError(
-                        f"{type(node).__name__} (T{node.tier}) cannot consume "
-                        f"{type(p).__name__} (T{p.tier}): consumer tier must be "
-                        f"strictly higher"
-                    )
+        tier: dict[DagNode, int] = {}
+        resolving: set[DagNode] = set()
+
+        def resolve(node: DagNode, trail: tuple[DagNode, ...]) -> int:
+            """Return node's tier, recursing into its producers; trail detects cycles."""
+            if node in tier:
+                return tier[node]
+            if node in resolving:
+                chain = " → ".join(type(n).__name__ for n in (*trail, node))
+                raise DependencyCycleError(f"Dependency cycle: {chain}")
+            resolving.add(node)
+            dep_producers = [producer[t] for t in node.consumes if t in producer]
+            node_tier = 1 + max(
+                (resolve(p, (*trail, node)) for p in dep_producers), default=-1
+            )
+            resolving.discard(node)
+            tier[node] = node_tier
+            return node_tier
+
+        for n in nodes:
+            resolve(n, ())
+        return tier
 
     async def run(
         self,
@@ -245,8 +280,8 @@ class DagEngine:
             if not ready:
                 continue
             # return_exceptions so one flaky node can't abort the whole tier
-            # (and with it the cycle). A failed node deposits nothing and
-            # notifies no observers, so its consumers stay unsatisfied and skip.
+            # (and with it the cycle). A failed node deposits nothing, so its
+            # consumers find the dependency absent in ctx.secondary and skip.
             results = await asyncio.gather(
                 *[n.run(ctx) for n in ready], return_exceptions=True
             )
@@ -257,7 +292,7 @@ class DagEngine:
                     _LOGGER.warning(
                         "DAG node %s (tier %d) failed; output omitted, "
                         "downstream consumers degrade this cycle: %s",
-                        type(node).__name__, node.tier, result,
+                        type(node).__name__, tier_num, result,
                     )
                     continue
                 all_events.extend(result)

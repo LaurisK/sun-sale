@@ -1,15 +1,14 @@
 """DAG nodes — the computation tier of the sunSale pipeline.
 
 Pure Python — no Home Assistant imports.
-Each node declares its tier, output_type, and consumed types.
-Observer wiring is auto-built by DagEngine._wire() based on these declarations.
+Each node declares only its output_type and consumed types. Execution tiers are
+derived by DagEngine from the consumes/output_type graph (longest-path layering),
+so nodes never hand-assign a tier — adding a node is a non-decision.
 
-Tier map:
-  T1: PricingNode, BatteryStateNode, BatteryStatusNode, BaseLoadProfileNode
-  T2: GenerationNode, ObservedGenerationNode, ObservedGridNode, DegradationNode,
-      BatteryRuntimeNode, ProfitabilityNode
-  T3: ForecastAccuracyNode, LockoutNode, MonthlyBillNode
-  T4: ScheduleNode
+The ``tierN.py`` filenames are an editing convenience that happens to mirror the
+derived layering today (T1 consumes only primary data, T2 consumes T1 outputs,
+and so on); they carry no semantic weight, and a node placed in the "wrong" file
+would still run at its correct derived tier.
 """
 from .tier1 import (
     BaseLoadProfileNode,

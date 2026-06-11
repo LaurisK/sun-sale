@@ -26,7 +26,6 @@ _LOGGER = logging.getLogger(__name__)
 class PricingNode(DagNode):
     """Assemble 72h yesterday→today→tomorrow PriceSeries with tariff applied."""
 
-    tier = 1
     output_type = PriceSeries
     consumes = [NordpoolData, YesterdayPrices]
 
@@ -43,7 +42,6 @@ class PricingNode(DagNode):
 class BatteryStateNode(DagNode):
     """Combine inverter reading + learned capacity → BatteryState."""
 
-    tier = 1
     output_type = BatteryState
     consumes = [BatteryReading, EstimatedCapacity]
 
@@ -57,7 +55,6 @@ class BatteryStateNode(DagNode):
 class BatteryStatusNode(DagNode):
     """Snapshot configured limits + live SoC into BatteryStatus."""
 
-    tier = 1
     output_type = BatteryStatus
     consumes = [BatteryReading]
 
@@ -71,7 +68,6 @@ class BatteryStatusNode(DagNode):
 class BaseLoadProfileNode(DagNode):
     """24h hour-of-day P15 baseload profile from per-day consumption rollups."""
 
-    tier = 1
     output_type = BaseLoadProfile
     consumes = [ConsumptionDailyBuckets]
 

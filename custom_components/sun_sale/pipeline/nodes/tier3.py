@@ -34,7 +34,6 @@ class ForecastAccuracyNode(DagNode):
     are NOT listed in consumes to avoid self-referential DAG wiring.
     """
 
-    tier = 3
     output_type = ForecastAccuracyResult
     consumes = [GenerationSeries, ObservedGenerationSeries]
 
@@ -64,7 +63,6 @@ class MonthlyBillNode(DagNode):
     Tier 3 because it depends on ObservedGridSeries (T2).
     """
 
-    tier = 3
     output_type = MonthlyBillResult
     consumes = [PriceSeries, ObservedGridSeries]
 
@@ -85,7 +83,6 @@ class MonthlyBillNode(DagNode):
 class LockoutNode(DagNode):
     """Detect feed-in lockout windows and per-slot flags → CalculationResult."""
 
-    tier = 3
     output_type = CalculationResult
     consumes = [PriceSeries, GenerationSeries, BatteryState]
 
