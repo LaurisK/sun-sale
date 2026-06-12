@@ -7,7 +7,6 @@ from .. import base_load as base_load_module
 from ...inbound import battery as battery_inbound
 from ...inbound import pricing as pricing_module
 from ..dag_engine import DagNode, NodeContext
-from ...contract.events import ControlEvent
 from ...contract.models import (
     BaseLoadProfile,
     BatteryReading,
@@ -29,14 +28,14 @@ class PricingNode(DagNode):
     output_type = PriceSeries
     consumes = [NordpoolData, YesterdayPrices]
 
-    async def _compute(self, ctx: NodeContext) -> tuple[PriceSeries, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> PriceSeries:
         """Assemble PriceSeries from NordpoolData + YesterdayPrices with tariff applied."""
         nordpool = ctx.require(NordpoolData)
         yesterday = ctx.require(YesterdayPrices)
         series = pricing_module.build_price_series_72h(
             nordpool, yesterday, ctx.config.tariff, now=ctx.now
         )
-        return series, []
+        return series
 
 
 class BatteryStateNode(DagNode):
@@ -45,11 +44,11 @@ class BatteryStateNode(DagNode):
     output_type = BatteryState
     consumes = [BatteryReading, EstimatedCapacity]
 
-    async def _compute(self, ctx: NodeContext) -> tuple[BatteryState, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> BatteryState:
         """Combine live SoC reading with learned capacity into BatteryState."""
         reading = ctx.require(BatteryReading)
         cap = ctx.require(EstimatedCapacity)
-        return BatteryState(soc=reading.soc, estimated_capacity_kwh=cap.value_kwh), []
+        return BatteryState(soc=reading.soc, estimated_capacity_kwh=cap.value_kwh)
 
 
 class BatteryStatusNode(DagNode):
@@ -58,11 +57,11 @@ class BatteryStatusNode(DagNode):
     output_type = BatteryStatus
     consumes = [BatteryReading]
 
-    async def _compute(self, ctx: NodeContext) -> tuple[BatteryStatus, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> BatteryStatus:
         """Combine live inverter telemetry with configured limits into BatteryStatus."""
         reading = ctx.require(BatteryReading)
         status = battery_inbound.build_battery_status(reading, ctx.config.battery)
-        return status, []
+        return status
 
 
 class BaseLoadProfileNode(DagNode):
@@ -71,12 +70,10 @@ class BaseLoadProfileNode(DagNode):
     output_type = BaseLoadProfile
     consumes = [ConsumptionDailyBuckets]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[BaseLoadProfile, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> BaseLoadProfile:
         """Build 24-bucket P15 profile from the rolling daily-bucket history."""
         buckets = ctx.require(ConsumptionDailyBuckets)
         profile = base_load_module.build_base_load_profile(
             buckets, ctx.config.local_tz, now=ctx.now,
         )
-        return profile, []
+        return profile

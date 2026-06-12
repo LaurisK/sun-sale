@@ -55,8 +55,8 @@ class _ProducerA(DagNode):
     consumes: list = []
 
     async def _compute(self, ctx):
-        """Return a fresh _AOut and no events."""
-        return _AOut(), []
+        """Return a fresh _AOut."""
+        return _AOut()
 
 
 class _FailingProducer(DagNode):
@@ -85,7 +85,7 @@ class _ConsumerOfB(DagNode):
         """Require _BOut (absent when upstream failed) and produce _COut."""
         self.ran = True
         ctx.require(_BOut)
-        return _COut(), []
+        return _COut()
 
 
 # --- DagEngine.run node isolation ------------------------------------------
@@ -97,13 +97,12 @@ async def test_failing_node_isolated_sibling_survives(caplog):
     engine = DagEngine([a, b, c])
 
     with caplog.at_level(logging.WARNING):
-        secondary, events = await engine.run({}, _config(), NOW)
+        secondary = await engine.run({}, _config(), NOW)
 
     assert _AOut in secondary          # healthy sibling survived
     assert _BOut not in secondary      # failed node produced nothing
     assert _COut not in secondary      # downstream degraded gracefully
     assert c.ran is False              # consumer never became ready
-    assert events == []
     assert "_FailingProducer" in caplog.text
 
 
@@ -123,9 +122,29 @@ async def test_failing_node_does_not_leave_stale_satisfied_flag():
 
     # Second cycle: B still fails, so C must again be skipped (not run on a
     # leftover flag) and must not raise MissingDependencyError.
-    secondary, _ = await engine.run({}, _config(), NOW)
+    secondary = await engine.run({}, _config(), NOW)
     assert _COut not in secondary
     assert c.ran is False
+
+
+@pytest.mark.asyncio
+async def test_skipped_nodes_logged_with_missing_deps(caplog):
+    """A node skipped for a missing dependency is named in a per-cycle DEBUG line.
+
+    Diagnosability contract: an empty downstream sensor should trace back to its
+    unsatisfied upstream from the log alone, without the debug endpoint. Here
+    _FailingProducer never deposits _BOut, so _ConsumerOfB is skipped and the
+    cycle's debug line must name both the node and the missing type.
+    """
+    a, b, c = _ProducerA(), _FailingProducer(), _ConsumerOfB()
+    engine = DagEngine([a, b, c])
+
+    with caplog.at_level(logging.DEBUG):
+        await engine.run({}, _config(), NOW)
+
+    assert "skipped" in caplog.text.lower()
+    assert "_ConsumerOfB" in caplog.text
+    assert "_BOut" in caplog.text
 
 
 # --- Derived tier ordering + cycle detection -------------------------------
@@ -143,7 +162,7 @@ class _ConsumerOfC(DagNode):
     async def _compute(self, ctx):
         """Require _COut and produce _DOut."""
         ctx.require(_COut)
-        return _DOut(), []
+        return _DOut()
 
 
 class _ConsumerOfA(DagNode):
@@ -155,7 +174,7 @@ class _ConsumerOfA(DagNode):
     async def _compute(self, ctx):
         """Require _AOut and produce _COut."""
         ctx.require(_AOut)
-        return _COut(), []
+        return _COut()
 
 
 @pytest.mark.asyncio
@@ -171,7 +190,7 @@ async def test_tiers_derived_independent_of_node_list_order():
     src = _ProducerA()       # tier 0, produces _AOut
     engine = DagEngine([deep, mid, src])
 
-    secondary, _ = await engine.run({}, _config(), NOW)
+    secondary = await engine.run({}, _config(), NOW)
 
     assert _AOut in secondary
     assert _COut in secondary
@@ -186,7 +205,7 @@ class _CycleOne(DagNode):
 
     async def _compute(self, ctx):
         """Never reached: construction raises before any run."""
-        return _AOut(), []
+        return _AOut()
 
 
 class _CycleTwo(DagNode):
@@ -197,7 +216,7 @@ class _CycleTwo(DagNode):
 
     async def _compute(self, ctx):
         """Never reached: construction raises before any run."""
-        return _BOut(), []
+        return _BOut()
 
 
 def test_dependency_cycle_raises_at_construction():
@@ -234,7 +253,7 @@ class _ToggleProducer(DagNode):
         """Deposit a fresh output when active; otherwise raise to deposit nothing."""
         if not self.active:
             raise RuntimeError("inactive this cycle")
-        return self.output_type(), []
+        return self.output_type()
 
 
 class _TwoDepConsumer(DagNode):
@@ -253,7 +272,7 @@ class _TwoDepConsumer(DagNode):
         self.run_count += 1
         ctx.require(_AOut)
         ctx.require(_BOut)
-        return _COut(), []
+        return _COut()
 
 
 @pytest.mark.asyncio
@@ -271,7 +290,7 @@ async def test_partial_deps_do_not_leak_into_next_cycle():
     c = _TwoDepConsumer()
     engine = DagEngine([a, b, c])
 
-    sec1, _ = await engine.run({}, _config(), NOW)
+    sec1 = await engine.run({}, _config(), NOW)
     assert _AOut in sec1
     assert _BOut not in sec1
     assert _COut not in sec1
@@ -280,7 +299,7 @@ async def test_partial_deps_do_not_leak_into_next_cycle():
     # Flip which producer is live: _BOut now arrives, _AOut no longer does.
     a.active = False
     b.active = True
-    sec2, _ = await engine.run({}, _config(), NOW)
+    sec2 = await engine.run({}, _config(), NOW)
     assert _BOut in sec2
     assert _AOut not in sec2
     assert _COut not in sec2           # still missing a dep → must not produce

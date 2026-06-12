@@ -1,10 +1,10 @@
 """sunSale DataUpdateCoordinator — thin orchestrator for the DAG pipeline.
 
 Responsibilities:
-  1. Build translators, DAG nodes, engine, and event router from config.
+  1. Build translators, DAG nodes, and engine from config.
   2. Manage CapacityEstimator state across cycles (pre-DAG update + persistence).
   3. Run translators (parallel) → deposit EstimatedCapacity → run engine.
-  4. Route emitted ControlEvents to output adapters when automation is enabled.
+  4. Drive the inverter control module's dispatch tick from the DAG's Schedule.
   5. Map typed DAG outputs to the string-keyed coordinator.data dict for sensors.
 """
 from __future__ import annotations
@@ -1310,7 +1310,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 ),
             )
 
-            secondary, events = await self._engine.run(primary, self._sun_sale_config, now)
+            secondary = await self._engine.run(primary, self._sun_sale_config, now)
 
             # Bake-in: idempotent per (date, side). Runs once the post-DAG
             # PriceSeries is available; updates take effect downstream on the
@@ -1396,13 +1396,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     cutoff_day = today_utc - timedelta(days=PRICE_HISTORY_RETENTION_DAYS)
                     peaks = [p for p in peaks if p.day >= cutoff_day]
                     await self._price_history_store.save(peaks)
-
-            # Drain the event channel — chunk 2 removed the only emitter, but
-            # the DAG still threads the list through nodes that subclass
-            # ControlEvent. Iterate so a future emitter doesn't get silently
-            # dropped.
-            for _ in events:
-                pass
 
             reading: InverterModeReading | None = primary.get(InverterModeReading)
             if (

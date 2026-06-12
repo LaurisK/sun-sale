@@ -33,6 +33,7 @@ from statistics import median
 
 from .slot_physics import SlotOutcome, simulate_slot
 from ..contract.models import (
+    DISPATCHABLE_MODES,
     BaseLoadProfile,
     BatteryConfig,
     BatteryState,
@@ -46,17 +47,12 @@ from ..contract.models import (
 )
 
 
-# Action set the DP may pick. AUTO is omitted: it is physics-identical to SelfUse
-# under simulate_slot, and SelfUse is the explicit, planner-driven choice. The
-# inverter control module dispatches whichever mode the DP picks.
-_ACTIONS: tuple[StorageMode, ...] = (
-    StorageMode.SelfUse,
-    StorageMode.NoExport,
-    StorageMode.StandBy,
-    StorageMode.GridCharge,
-    StorageMode.Discharge,
-    StorageMode.FeedIn,
-)
+# Action set the DP may pick — the canonical dispatchable-mode tuple shared
+# with the operator override (see contract.models.DISPATCHABLE_MODES). AUTO is
+# omitted there because it is physics-identical to SelfUse under simulate_slot,
+# and SelfUse is the explicit, planner-driven choice. The inverter control
+# module dispatches whichever mode the DP picks.
+_ACTIONS: tuple[StorageMode, ...] = DISPATCHABLE_MODES
 
 # SoC discretization. 51 buckets across [min_soc, max_soc] gives ~1.7% steps
 # on the default 0.10..0.95 envelope — about 170 Wh per bucket on a 10 kWh

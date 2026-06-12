@@ -5,7 +5,6 @@ import logging
 
 from .. import schedule as schedule_module
 from ..dag_engine import DagNode, NodeContext
-from ...contract.events import ControlEvent
 from ...contract.models import (
     BaseLoadProfile,
     BatteryState,
@@ -41,9 +40,7 @@ class ScheduleNode(DagNode):
         SchedulePolicy,
     ]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[Schedule, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> Schedule:
         """Run the DP scheduler and produce a StorageMode-tagged Schedule."""
         price_series = ctx.require(PriceSeries)
         calc = ctx.require(CalculationResult)
@@ -79,4 +76,4 @@ class ScheduleNode(DagNode):
             max_discharge_to_grid_kw=policy.max_discharge_to_grid_kw,
         )
 
-        return schedule, []
+        return schedule

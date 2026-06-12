@@ -29,7 +29,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypeVar
 
-from ..contract.events import ControlEvent
 from ..contract.models import SunSaleConfig
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,14 +139,11 @@ class DagNode(ABC):
 
     # ── Execution ────────────────────────────────────────────────────────────
 
-    async def run(self, ctx: NodeContext) -> list[ControlEvent]:
+    async def run(self, ctx: NodeContext) -> None:
         """Execute this node: compute and deposit the result into ctx.secondary.
 
         Args:
             ctx: Shared run context; result is deposited into ctx.secondary.
-
-        Returns:
-            List of ControlEvents emitted by this node (may be empty).
 
         Raises:
             Exception: Anything raised by _compute propagates so the engine can
@@ -155,23 +151,20 @@ class DagNode(ABC):
                 downstream consumers stay unready (absent from ctx.secondary)
                 and degrade gracefully — there is no cross-cycle state to reset.
         """
-        result, events = await self._compute(ctx)
+        result = await self._compute(ctx)
         if result is not None and self.output_type is not None:
             ctx.secondary[self.output_type] = result
-        return events
 
     @abstractmethod
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[Any | None, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> Any | None:
         """Implement node-specific computation logic.
 
         Args:
             ctx: Shared run context with all upstream outputs available.
 
         Returns:
-            Tuple of (result, events); result is deposited as output_type in
-            ctx.secondary (ignored when output_type is None).
+            The node's result, deposited as output_type in ctx.secondary
+            (ignored when output_type is None).
         """
 
 
@@ -183,7 +176,7 @@ class DagEngine:
       relationships and the nodes are grouped by tier.
 
     Execution:
-      await engine.run(primary, config, now) → (secondary, events)
+      await engine.run(primary, config, now) → secondary
 
     Tiers execute in ascending order; within a tier all ready nodes run in parallel.
     """
@@ -255,7 +248,7 @@ class DagEngine:
         primary: dict[type, Any],
         config: SunSaleConfig,
         now: datetime,
-    ) -> tuple[dict[type, Any], list[ControlEvent]]:
+    ) -> dict[type, Any]:
         """Execute all tiers in ascending order; within each tier run ready nodes in parallel.
 
         Args:
@@ -264,19 +257,21 @@ class DagEngine:
             now: Cycle timestamp.
 
         Returns:
-            Tuple of (secondary_outputs_dict, all_control_events). A node that
-            raises is isolated: its output is omitted and downstream consumers
-            that depend on it simply never become ready, degrading the same way
-            they would for a missing primary input.
+            The secondary-outputs dict (one entry per node that produced a
+            result). A node that raises is isolated: its output is omitted and
+            downstream consumers that depend on it simply never become ready,
+            degrading the same way they would for a missing primary input.
         """
         ctx = NodeContext(primary=primary, secondary={}, config=config, now=now)
-        all_events: list[ControlEvent] = []
+        skipped: list[tuple[DagNode, list[type]]] = []
 
         for tier_num in sorted(self._nodes_by_tier):
-            ready = [
-                n for n in self._nodes_by_tier[tier_num]
-                if n.all_secondary_deps_satisfied(ctx)
-            ]
+            ready: list[DagNode] = []
+            for node in self._nodes_by_tier[tier_num]:
+                if node.all_secondary_deps_satisfied(ctx):
+                    ready.append(node)
+                else:
+                    skipped.append((node, self._missing_deps(node, ctx)))
             if not ready:
                 continue
             # return_exceptions so one flaky node can't abort the whole tier
@@ -294,10 +289,41 @@ class DagEngine:
                         "downstream consumers degrade this cycle: %s",
                         type(node).__name__, tier_num, result,
                     )
-                    continue
-                all_events.extend(result)
 
-        return ctx.secondary, all_events
+        if skipped and _LOGGER.isEnabledFor(logging.DEBUG):
+            # One line per cycle naming every node that never ran and the
+            # consumed types it was waiting on — so an empty sensor traces back
+            # to its missing upstream from the log alone, without the debug
+            # endpoint. A skip is routine (an optional source absent this
+            # cycle), hence DEBUG not WARNING.
+            detail = "; ".join(
+                f"{type(node).__name__}(missing "
+                f"{', '.join(getattr(t, '__name__', str(t)) for t in missing)})"
+                for node, missing in skipped
+            )
+            _LOGGER.debug("DAG skipped %d node(s) this cycle: %s", len(skipped), detail)
+
+        return ctx.secondary
+
+    @staticmethod
+    def _missing_deps(node: DagNode, ctx: NodeContext) -> list[type]:
+        """Return the consumed types absent from both primary and secondary context.
+
+        These are exactly the dependencies that kept ``node`` from running this
+        cycle — a missing primary input (translator returned None) or an
+        upstream secondary output that was itself skipped or failed.
+
+        Args:
+            node: The skipped node.
+            ctx: Current run context.
+
+        Returns:
+            The unsatisfied consumed types, in the node's declared order.
+        """
+        return [
+            t for t in node.consumes
+            if t not in ctx.primary and t not in ctx.secondary
+        ]
 
 
 async def run_translators(

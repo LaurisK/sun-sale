@@ -1074,6 +1074,29 @@ class StorageMode(Enum):
     UNKNOWN    = "unknown"      # observed bitmask does not map to any named mode
 
 
+# The canonical set of modes the system actively dispatches, in a fixed order.
+# This is the single source of truth shared by the DP planner's action set
+# (``pipeline/schedule.py``) and the operator override options
+# (``select.py``) — keeping them in lockstep so a new mode can't be added to
+# one surface while the other silently diverges.
+#
+# Excluded from the set, by design:
+#   - UNKNOWN : observed-only label, never a target.
+#   - TRACK   : needs per-cycle setpoint plumbing not yet exposed.
+#   - AUTO    : physics-identical to SelfUse under simulate_slot and the
+#               inverter's own hardware default; a poor explicit choice. The
+#               planner picks SelfUse instead, and operators release control
+#               via the "sunSale" override sentinel rather than selecting AUTO.
+DISPATCHABLE_MODES: tuple["StorageMode", ...] = (
+    StorageMode.SelfUse,
+    StorageMode.NoExport,
+    StorageMode.StandBy,
+    StorageMode.GridCharge,
+    StorageMode.Discharge,
+    StorageMode.FeedIn,
+)
+
+
 @dataclass(frozen=True)
 class StorageModeSpec:
     """Concrete register targets for one StorageMode.

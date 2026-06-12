@@ -141,6 +141,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry and remove its coordinator from hass.data.
 
+    Shared, integration-wide registrations (the sidebar panel and the two
+    services) are torn down only when the *last* entry unloads — they are
+    registered once and fanned out across every entry, so removing them while
+    another entry is live would break that entry. The HTTP debug view and the
+    www/ static path are intentionally left registered: Home Assistant exposes
+    no public API to remove an aiohttp route once added, and their
+    ``_DEBUG_VIEW_KEY`` / ``_STATIC_REGISTERED_KEY`` guards keep a later
+    re-setup from double-registering the surviving routes.
+
     Args:
         hass: Home Assistant instance.
         entry: Config entry being unloaded.
@@ -151,7 +160,31 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
+        if not hass.data[DOMAIN]:
+            _async_teardown_shared(hass)
     return unload_ok
+
+
+def _async_teardown_shared(hass: HomeAssistant) -> None:
+    """Remove the shared panel and services once no sunSale entries remain.
+
+    Clearing ``_PANEL_KEY`` resets the cached panel-registration hash so a
+    later setup re-registers the panel cleanly (the static path that serves
+    its JS survives, so the fresh registration still resolves).
+
+    Args:
+        hass: Home Assistant instance.
+    """
+    if hass.data.get(_PANEL_KEY) is not None:
+        try:
+            async_remove_panel(hass, _PANEL_URL)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+        hass.data.pop(_PANEL_KEY, None)
+
+    for service in (SERVICE_FORCE_RECALCULATE, SERVICE_FORCE_VERIFY_INVERTER_MODE):
+        if hass.services.has_service(DOMAIN, service):
+            hass.services.async_remove(DOMAIN, service)
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

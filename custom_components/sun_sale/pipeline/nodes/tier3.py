@@ -7,7 +7,6 @@ from .. import calculation
 from .. import forecast_accuracy
 from .. import monthly_bill as monthly_bill_module
 from ..dag_engine import DagNode, NodeContext
-from ...contract.events import ControlEvent
 from ...contract.models import (
     BatteryState,
     CalculationResult,
@@ -37,9 +36,7 @@ class ForecastAccuracyNode(DagNode):
     output_type = ForecastAccuracyResult
     consumes = [GenerationSeries, ObservedGenerationSeries]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[ForecastAccuracyResult, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> ForecastAccuracyResult:
         """Build error series and update EMA quality buckets in one pass."""
         result = forecast_accuracy.build_forecast_accuracy_result(
             forecast=ctx.require(GenerationSeries),
@@ -49,7 +46,7 @@ class ForecastAccuracyNode(DagNode):
             local_tz=ctx.config.local_tz,
             now=ctx.now,
         )
-        return result, []
+        return result
 
 
 class MonthlyBillNode(DagNode):
@@ -66,9 +63,7 @@ class MonthlyBillNode(DagNode):
     output_type = MonthlyBillResult
     consumes = [PriceSeries, ObservedGridSeries]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[MonthlyBillResult, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> MonthlyBillResult:
         """Compute monthly electricity bill: carry + per-slot yday-to-now costs."""
         result = monthly_bill_module.build_monthly_bill_result(
             grid_series=ctx.require(ObservedGridSeries),
@@ -77,7 +72,7 @@ class MonthlyBillNode(DagNode):
             local_tz=ctx.config.local_tz,
             now=ctx.now,
         )
-        return result, []
+        return result
 
 
 class LockoutNode(DagNode):
@@ -86,9 +81,7 @@ class LockoutNode(DagNode):
     output_type = CalculationResult
     consumes = [PriceSeries, GenerationSeries, BatteryState]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[CalculationResult, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> CalculationResult:
         """Detect feed-in lockout windows and per-slot solar attribution."""
         price_series = ctx.require(PriceSeries)
         generation = ctx.require(GenerationSeries)
@@ -100,4 +93,4 @@ class LockoutNode(DagNode):
             battery_state=battery_state,
             now=ctx.now,
         )
-        return result, []
+        return result

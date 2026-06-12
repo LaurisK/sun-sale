@@ -11,7 +11,6 @@ from ...inbound.observer import generation as generation_module
 from ...inbound.observer import grid as grid_module
 from ...inbound.observer import derived as derived_module
 from ..dag_engine import DagNode, NodeContext
-from ...contract.events import ControlEvent
 from ...contract.models import (
     BakedObservedHistory,
     BaseLoadProfile,
@@ -43,16 +42,14 @@ class GenerationNode(DagNode):
     output_type = GenerationSeries
     consumes = [SolarData, PriceSeries]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[GenerationSeries, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> GenerationSeries:
         """Resample SolarData onto the PriceSeries grid to produce GenerationSeries."""
         solar = ctx.require(SolarData)
         price_series = ctx.require(PriceSeries)
         gen = forecast_module.build_generation_series(
             solar, price_series.slots, now=ctx.now, local_tz=ctx.config.local_tz
         )
-        return gen, []
+        return gen
 
 
 class ObservedGenerationNode(DagNode):
@@ -67,9 +64,7 @@ class ObservedGenerationNode(DagNode):
     output_type = ObservedGenerationSeries
     consumes = [PvPowerHistory, PriceSeries, BakedObservedHistory]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[ObservedGenerationSeries, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> ObservedGenerationSeries:
         """Build per-slot ObservedGenerationSeries from PV power + baked history."""
         pv_power_history = ctx.require(PvPowerHistory)
         price_series = ctx.require(PriceSeries)
@@ -79,7 +74,7 @@ class ObservedGenerationNode(DagNode):
             now=ctx.now, local_tz=ctx.config.local_tz,
             baked_history=baked_history,
         )
-        return series, []
+        return series
 
 
 class DegradationNode(DagNode):
@@ -88,13 +83,11 @@ class DegradationNode(DagNode):
     output_type = DegradationCost
     consumes = [BatteryState]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[DegradationCost, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> DegradationCost:
         """Compute wear cost per kWh from BatteryState + BatteryConfig."""
         state = ctx.require(BatteryState)
         cost = battery_module.degradation_cost_per_kwh(ctx.config.battery, state)
-        return DegradationCost(value_kwh=cost), []
+        return DegradationCost(value_kwh=cost)
 
 
 class BatteryRuntimeNode(DagNode):
@@ -108,9 +101,7 @@ class BatteryRuntimeNode(DagNode):
     output_type = BatteryRuntimeEstimate
     consumes = [BatteryStatus, BaseLoadProfile]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[BatteryRuntimeEstimate, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> BatteryRuntimeEstimate:
         """Forward-simulate pure baseload drain to estimate battery depletion time."""
         estimate = base_load_module.estimate_battery_runtime(
             battery_status=ctx.require(BatteryStatus),
@@ -119,7 +110,7 @@ class BatteryRuntimeNode(DagNode):
             local_tz=ctx.config.local_tz,
             now=ctx.now,
         )
-        return estimate, []
+        return estimate
 
 
 class ObservedGridNode(DagNode):
@@ -142,9 +133,7 @@ class ObservedGridNode(DagNode):
         BakedObservedHistory,
     ]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[ObservedGridSeries, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> ObservedGridSeries:
         """Build per-slot ObservedGridSeries from per-direction histories."""
         price_series = ctx.require(PriceSeries)
         baked_history = ctx.require(BakedObservedHistory)
@@ -156,8 +145,7 @@ class ObservedGridNode(DagNode):
             local_tz=ctx.config.local_tz,
             baked_history=baked_history,
         )
-        return series, []
-
+        return series
 
 
 class ObservedConsumptionNode(DagNode):
@@ -172,9 +160,7 @@ class ObservedConsumptionNode(DagNode):
     output_type = ObservedConsumptionSeries
     consumes = [DerivedPowerHistory, PriceSeries, BakedObservedHistory]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[ObservedConsumptionSeries, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> ObservedConsumptionSeries:
         """Build per-slot ObservedConsumptionSeries from derived-power samples."""
         derived_history = ctx.require(DerivedPowerHistory)
         price_series = ctx.require(PriceSeries)
@@ -184,7 +170,7 @@ class ObservedConsumptionNode(DagNode):
             now=ctx.now, local_tz=ctx.config.local_tz,
             baked_history=baked_history,
         )
-        return series, []
+        return series
 
 
 class ObservedLossesNode(DagNode):
@@ -198,9 +184,7 @@ class ObservedLossesNode(DagNode):
     output_type = ObservedLossesSeries
     consumes = [DerivedPowerHistory, PriceSeries, BakedObservedHistory]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[ObservedLossesSeries, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> ObservedLossesSeries:
         """Build per-slot ObservedLossesSeries from derived-power samples."""
         derived_history = ctx.require(DerivedPowerHistory)
         price_series = ctx.require(PriceSeries)
@@ -210,7 +194,7 @@ class ObservedLossesNode(DagNode):
             now=ctx.now, local_tz=ctx.config.local_tz,
             baked_history=baked_history,
         )
-        return series, []
+        return series
 
 
 class ProfitabilityNode(DagNode):
@@ -219,9 +203,7 @@ class ProfitabilityNode(DagNode):
     output_type = ProfitabilityScore
     consumes = [PriceSeries, PriceHistory]
 
-    async def _compute(
-        self, ctx: NodeContext
-    ) -> tuple[ProfitabilityScore, list[ControlEvent]]:
+    async def _compute(self, ctx: NodeContext) -> ProfitabilityScore:
         """Compute profitability score using today's peak from PriceSeries and rolling history."""
         price_series = ctx.require(PriceSeries)
         history = ctx.require(PriceHistory)
@@ -230,4 +212,4 @@ class ProfitabilityNode(DagNode):
             history=history,
             now=ctx.now,
         )
-        return score, []
+        return score

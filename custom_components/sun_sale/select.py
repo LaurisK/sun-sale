@@ -22,7 +22,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .contract.const import DOMAIN
-from .contract.models import StorageMode
+from .contract.models import DISPATCHABLE_MODES, StorageMode
 from .orchestration.coordinator import SunSaleCoordinator
 
 
@@ -35,24 +35,11 @@ MODE_OVERRIDE_SUNSALE = "sunsale"
 # come back as no-override after the upgrade.
 _LEGACY_AUTO_OPTION = "auto"
 
-# Modes the dispatcher can apply.
-#  - UNKNOWN  : observed-only label, never dispatched.
-#  - TRACK    : requires per-cycle setpoint plumbing the control module
-#               doesn't expose yet.
-#  - AUTO     : the inverter's hardware-default mode; semantically a poor
-#               manual choice (the user wants a concrete mode, not the
-#               inverter's own default). Use the sunsale sentinel to release
-#               control to the scheduler instead.
-_DISPATCHABLE_MODES: tuple[StorageMode, ...] = (
-    StorageMode.SelfUse,
-    StorageMode.NoExport,
-    StorageMode.StandBy,
-    StorageMode.GridCharge,
-    StorageMode.Discharge,
-    StorageMode.FeedIn,
-)
-
-_OVERRIDE_OPTIONS: list[str] = [MODE_OVERRIDE_SUNSALE] + [m.value for m in _DISPATCHABLE_MODES]
+# Override options: the canonical dispatchable modes (see contract.models.
+# DISPATCHABLE_MODES — shared with the DP planner so the two surfaces can't
+# diverge) plus the leading "sunSale" sentinel that releases control to the
+# scheduler.
+_OVERRIDE_OPTIONS: list[str] = [MODE_OVERRIDE_SUNSALE] + [m.value for m in DISPATCHABLE_MODES]
 
 
 async def async_setup_entry(
