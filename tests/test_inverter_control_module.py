@@ -14,6 +14,7 @@ from custom_components.sun_sale.contract.models import (
     ScheduleSlot,
     StorageMode,
 )
+from custom_components.sun_sale.outbound.inverter import RC_ADJUSTMENT_AC_PORT_VALUE
 from custom_components.sun_sale.outbound.inverter_control_module import (
     _DRIFT_RECONCILE_CYCLES,
     InverterControlModule,
@@ -36,6 +37,8 @@ def _mock_inverter() -> MagicMock:
     inv.get_discharge_current_a = MagicMock(return_value=None)
     inv.get_backflow_power_w = MagicMock(return_value=None)
     inv.get_rc_setpoint_w = MagicMock(return_value=None)
+    inv.get_rc_adjustment_value = MagicMock(return_value=None)
+    inv.refresh_rc = AsyncMock()
     return inv
 
 
@@ -53,6 +56,9 @@ def _wire_inverter_to_spec(
     inv.get_discharge_current_a = MagicMock(return_value=spec.discharge_a)
     inv.get_backflow_power_w = MagicMock(return_value=spec.export_limit_w)
     inv.get_rc_setpoint_w = MagicMock(return_value=spec.rc_setpoint_w)
+    inv.get_rc_adjustment_value = MagicMock(
+        return_value=RC_ADJUSTMENT_AC_PORT_VALUE if spec.rc_setpoint_w != 0 else 0,
+    )
 
 
 def _module(inverter=None) -> InverterControlModule:
@@ -824,3 +830,70 @@ async def test_first_tick_does_not_spuriously_reassert(call_later):
     )
     assert mod.last_dispatch_outcome == "ok"
     assert inv.apply_mode.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# RC deadman keep-alive (registers 43132 / 43282 / 43128)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_holding_engaged_rc_mode_refreshes_deadman(call_later):
+    """Every ok-holding tick re-asserts the RC registers of the held mode."""
+    inv = _mock_inverter()
+    mod = _module_with_hass(inv)
+    await _engage_ok(mod, inv, call_later)  # Discharge — RC-backed
+    assert inv.refresh_rc.await_count == 0  # the initial apply wrote a full window
+    await _hold_tick(mod, StorageMode.Discharge, minutes=5)
+    assert mod.last_dispatch_outcome == "holding"
+    assert inv.refresh_rc.await_count == 1
+    assert inv.refresh_rc.await_args.args[0] is mod._specs[StorageMode.Discharge]
+    await _hold_tick(mod, StorageMode.Discharge, minutes=10)
+    assert inv.refresh_rc.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_no_rc_refresh_while_verify_pending_or_mismatch(call_later):
+    """The keep-alive runs only from the steady engaged state."""
+    inv = _mock_inverter()
+    inv.get_storage_control_word = MagicMock(return_value=0xDEAD)  # never matches
+    mod = _module_with_hass(inv)
+    await mod.tick(
+        now=NOW, schedule=_schedule_with(StorageMode.Discharge),
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()), automation_enabled=True,
+    )
+    assert mod.verify_state == "pending"
+    await _hold_tick(mod, StorageMode.Discharge, minutes=5)
+    assert inv.refresh_rc.await_count == 0
+    # Drive to terminal mismatch — still no keep-alive (not re-spammed).
+    await call_later.last_callback(NOW + timedelta(seconds=31))
+    await call_later.last_callback(NOW + timedelta(seconds=62))
+    assert mod.verify_state == "mismatch"
+    await _hold_tick(mod, StorageMode.Discharge, minutes=10)
+    assert inv.refresh_rc.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_register_status_rc_enable_row_only_for_rc_modes(call_later):
+    """RC-backed modes expose the 43132 selector row; passive modes don't."""
+    inv = _mock_inverter()
+    mod = _module_with_hass(inv)
+    await _engage_ok(mod, inv, call_later, mode=StorageMode.Discharge)
+    rows = {r["name"]: r for r in mod.register_status}
+    assert "rc_enable" in rows
+    assert rows["rc_enable"]["match"] is True
+    await _engage_ok(mod, inv, call_later, mode=StorageMode.SelfUse, now=NOW + timedelta(minutes=15))
+    assert "rc_enable" not in {r["name"] for r in mod.register_status}
+
+
+@pytest.mark.asyncio
+async def test_register_status_rc_enable_flags_dropped_selector(call_later):
+    """A selector that reads OFF shows as a mismatching row."""
+    inv = _mock_inverter()
+    mod = _module_with_hass(inv)
+    await _engage_ok(mod, inv, call_later, mode=StorageMode.Discharge)
+    inv.get_rc_adjustment_value = MagicMock(return_value=0)  # dropped to OFF
+    await _hold_tick(mod, StorageMode.Discharge, minutes=5)
+    rows = {r["name"]: r for r in mod.register_status}
+    assert rows["rc_enable"]["match"] is False

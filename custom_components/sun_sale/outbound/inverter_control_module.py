@@ -69,7 +69,11 @@ from ..contract.models import (
     StorageModeSpec,
 )
 from ..pipeline.storage_mode_specs import build_specs
-from .inverter import _NUMBER_WRITE_EPSILON, InverterController
+from .inverter import (
+    _NUMBER_WRITE_EPSILON,
+    RC_ADJUSTMENT_AC_PORT_VALUE,
+    InverterController,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -511,6 +515,7 @@ class InverterControlModule:
                     "inverter_control: %s re-converged after mismatch — "
                     "verify_state back to ok", target.value,
                 )
+                await self._maybe_refresh_rc(spec)
                 return ("holding", target)
             reason = self._reconcile_reason(drifted)
             if reason is None:
@@ -519,6 +524,7 @@ class InverterControlModule:
                     "change — observe + verify only)",
                     target.value, source,
                 )
+                await self._maybe_refresh_rc(spec)
                 return ("holding", target)
             _LOGGER.warning(
                 "inverter_control: reconciling %s (source=%s, %s) — "
@@ -574,6 +580,24 @@ class InverterControlModule:
             return None
         self._consecutive_drift_cycles = 0
         return None
+
+    async def _maybe_refresh_rc(self, spec: StorageModeSpec) -> None:
+        """Refresh the RC deadman registers while holding an engaged RC-backed mode.
+
+        The inverter expires the RC function at most 30 min after the last RC
+        write (register 43282), so a held GridCharge / Discharge must be
+        re-asserted every tick — the write-once rule deliberately does not
+        apply to the RAM-only RC registers. Runs only from the steady engaged
+        state: ``pending`` is owned by the verify loop (the initial apply just
+        wrote a full window), and a terminal ``mismatch`` is not re-spammed.
+
+        Args:
+            spec: Spec of the held mode; ``refresh_rc`` no-ops unless it
+                carries a non-zero RC setpoint.
+        """
+        if self._verify_state != "ok":
+            return
+        await self._inverter.refresh_rc(spec)
 
     def _registers_drifted(self) -> bool:
         """Return whether the last-commanded mode's registers have drifted.
@@ -649,7 +673,9 @@ class InverterControlModule:
         target with the current readback. ``reg_43110`` and ``rc_setpoint_w`` are
         always written by ``apply_mode``; the battery currents and export limit
         are written only when the spec carries a non-``None`` value, so they only
-        appear here when they participate.
+        appear here when they participate. RC-backed modes (non-zero setpoint)
+        additionally get an ``rc_enable`` row for the RC function selector
+        (register 43132), without which the setpoint does not act.
 
         Returns:
             One row per participating register (``name``, ``label``,
@@ -684,6 +710,16 @@ class InverterControlModule:
             rows.append(self._register_row(
                 "export_limit_w", "Export limit (W)",
                 spec.export_limit_w, self._inverter.get_backflow_power_w(),
+            ))
+        # RC-backed modes also write the RC function selector (43132); the
+        # setpoint is inert while it reads anything but the engaged value,
+        # so the row makes a silently-dropped RC function visible.
+        if spec.rc_setpoint_w != 0:
+            rows.append(self._register_row(
+                "rc_enable", "RC enable (43132)",
+                RC_ADJUSTMENT_AC_PORT_VALUE,
+                self._inverter.get_rc_adjustment_value(),
+                exact=True,
             ))
         rows.append(self._register_row(
             "rc_setpoint_w", "RC setpoint (W)",

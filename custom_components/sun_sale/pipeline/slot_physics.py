@@ -114,7 +114,8 @@ def simulate_slot(
     # Per-mode export caps mirror storage_mode_specs.build_specs():
     #   AUTO / SelfUse / FeedIn          → caller-supplied cap (inf when not set)
     #   NoExport / StandBy / GridCharge  → 0 (export disabled by the spec)
-    #   Discharge                        → uncapped
+    #   Discharge                        → sim caps only via max_discharge_to_grid_kw;
+    #                                      the spec writes the deployment export cap
     if mode == StorageMode.StandBy:
         flows = _simulate_standby(
             solar_kwh, baseload_kwh, export_cap_kwh=0.0,

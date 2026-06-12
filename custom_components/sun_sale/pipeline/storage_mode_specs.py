@@ -81,19 +81,25 @@ def build_specs(
             reg_43110_value=1,
             export_limit_w=export_max_w,
             charge_a=i_charge_max_a,
-            discharge_a=0.0,
+            # Self-use covers baseload from the battery (see
+            # slot_physics._simulate_self_use) — 0 A here would physically
+            # block the discharge the planner priced in.
+            discharge_a=i_discharge_max_a,
             rc_setpoint_w=0,
         ),
         StorageMode.NoExport: StorageModeSpec(
             reg_43110_value=1,
             export_limit_w=0,
             charge_a=i_charge_max_a,
-            discharge_a=0.0,
+            discharge_a=i_discharge_max_a,
             rc_setpoint_w=0,
         ),
         StorageMode.Discharge: StorageModeSpec(
+            # Written explicitly rather than inherited (None): a preceding
+            # NoExport/GridCharge/StandBy slot leaves the backflow cap at 0,
+            # which would clamp the dump to zero export.
             reg_43110_value=64,
-            export_limit_w=None,    # uncapped while Discharging
+            export_limit_w=export_max_w,
             charge_a=0.0,
             discharge_a=i_discharge_max_a,
             rc_setpoint_w=+inverter_max_power_w,

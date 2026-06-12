@@ -18,6 +18,8 @@ from custom_components.sun_sale.contract.const import (
     CONF_INVERTER_ENTITY_PV_POWER,
     CONF_INVERTER_PLATFORM,
     CONF_SOLIS_CONFIG_ENTRY_ID,
+    DEFAULT_SOLIS_RC_GRID_ADJUSTMENT_SELECT,
+    DEFAULT_SOLIS_RC_TIMEOUT,
     DEFAULT_SOLIS_SELF_USE_SWITCH,
 )
 
@@ -77,6 +79,8 @@ def test_solis_manual_fallback_when_no_config_entry():
     ids = resolved.inverter_entity_ids
     # Manual fallback carries the solis switch/number defaults.
     assert ids["self_use_switch"] == DEFAULT_SOLIS_SELF_USE_SWITCH
+    assert ids["rc_grid_adjustment_select"] == DEFAULT_SOLIS_RC_GRID_ADJUSTMENT_SELECT
+    assert ids["rc_timeout"] == DEFAULT_SOLIS_RC_TIMEOUT
     assert "charge_control" not in ids
 
 

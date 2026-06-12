@@ -68,6 +68,14 @@ Three rules govern dispatch in
   the verify window has closed is recovered by the slow reconciliation path
   (further below) — not by blind re-asserts every cycle. This is the fix for
   the inverter mode being "constantly set".
+  *One deliberate exception:* RC-backed modes (non-zero `rc_setpoint_w`,
+  i.e. GridCharge / Discharge) refresh the RAM-only RC registers on every
+  ok-holding tick (`_maybe_refresh_rc` → `InverterController.refresh_rc`),
+  because the inverter expires the RC function at most 30 min after the
+  last RC write (register 43282). The flash-wear rationale doesn't apply
+  to the RC group, and the rolling timeout doubles as a deadman — if
+  sunSale stops dispatching, the inverter falls back to its base 43110
+  mode within 30 min. The 43110 bitmask itself is still write-once.
 - **Override bypasses `automation_enabled`.** When `coordinator.mode_override`
   is set, the dispatcher resolves the override as the target regardless of
   the automation switch. Operator intent always reaches the inverter (once,
@@ -121,9 +129,11 @@ from this stored value:
    elapsed wall-clock (`_VERIFY_WINDOW_S`). Each poll re-reads **every
    register the commanded mode writes** — the 43110 bitmask plus whichever
    of `charge_a` / `discharge_a` / `export_limit_w` / `rc_setpoint_w` the
-   spec carries — and compares each to its target (`_build_register_status`,
-   exact match for the bitmask, `_NUMBER_WRITE_EPSILON` slack for the
-   numbers, mirroring `apply_mode`'s write tolerance).
+   spec carries, plus the `rc_enable` row (RC function selector, register
+   43132) for RC-backed modes — and compares each to its target
+   (`_build_register_status`, exact match for the bitmask and the selector,
+   `_NUMBER_WRITE_EPSILON` slack for the numbers, mirroring `apply_mode`'s
+   write tolerance).
 3. **All** registers match → `verify_state = "ok"` and the loop stops.
    Any mismatch within the window → keep polling. Mismatch past the window
    (first time) → log warning, force-rewrite, reset the window, resume

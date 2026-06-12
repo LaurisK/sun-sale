@@ -72,8 +72,11 @@ _SENSOR_SUFFIXES: dict[str, tuple[str, str]] = {
     # Battery max charge / discharge currents (per-slot; configured via numbers).
     "battery_max_charge_current":    ("solis_modbus_inverter_battery_max_charge_current", "battery_max_charge_current"),
     "battery_max_discharge_current": ("solis_modbus_inverter_battery_max_discharge_current", "battery_max_discharge_current"),
-    # Remote-Control AC active-power setpoint (register 43141).
+    # Remote-Control AC active-power setpoint (register 43128, S16 signed W).
     "rc_setpoint":                 ("solis_modbus_inverter_rc_inverter_ac_grid_active_power", "rc_inverter_ac_grid_active_power"),
+    # RC deadman timeout in minutes (register 43282, 1..30). Refreshed every
+    # tick while an RC-backed mode is held — see InverterController.refresh_rc.
+    "rc_timeout":                  ("solis_modbus_inverter_rc_timeout", "rc_timeout"),
     # Export-side numbers (regs 43073/43074 area).
     "backflow_power":              ("solis_modbus_inverter_backflow_power", "backflow_power"),
     "peak_max_usable_grid_power":  ("solis_modbus_inverter_peak_max_usable_grid_power", "peak_max_usable_grid_power"),
@@ -88,6 +91,16 @@ _BIT_SWITCHES: dict[str, int] = {
     "allow_grid_charge_switch": 5,
     "feed_in_priority_switch": 6,
 }
+
+# RC Grid Adjustment selector (register 43132) — the enable gate for the RC
+# active-power setpoint. Select entities carry a register-based unique_id
+# (``solis_modbus_{serial}_43132_select``), unlike the slug-keyed sensors and
+# numbers above, so it gets its own match in the resolution loop. The
+# entity_id tail is a fallback; the domain guard (``select.``) keeps the
+# hidden 43132 readback *sensor* (same slug) from stealing the role.
+_RC_ADJUSTMENT_SELECT_ROLE = "rc_grid_adjustment_select"
+_RC_ADJUSTMENT_SELECT_UID_TAIL = "_43132_select"
+_RC_ADJUSTMENT_SELECT_ENTITY_TAIL = "rc_grid_adjustment"
 
 # Switches that participate in dispatch but are not bits of 43110.
 # ``(suffix, entity_id_tail)`` — same shape as ``_SENSOR_SUFFIXES``.
@@ -110,6 +123,7 @@ _WRITABLE_ROLES: frozenset[str] = frozenset({
     "battery_max_charge_current",
     "battery_max_discharge_current",
     "rc_setpoint",
+    "rc_timeout",
     "backflow_power",
 })
 
@@ -137,6 +151,11 @@ _OPTIONAL_ROLES: frozenset[str] = frozenset({
     # losses observed series; the rest of the pipeline still runs.
     "ac_port_power",
     "backup_power",
+    # RC function entities only exist on solis_modbus v4+. Without them the
+    # RC-backed modes (GridCharge / Discharge) cannot engage — apply_mode
+    # logs a WARNING at dispatch time, which is the actionable signal.
+    "rc_timeout",
+    _RC_ADJUSTMENT_SELECT_ROLE,
 })
 
 
@@ -215,6 +234,17 @@ def resolve_solis_entities(hass: HomeAssistant, config_entry_id: str) -> dict[st
                 continue
             if uid.endswith(f"_{_REG_43110}_{bit}"):
                 result[role] = entity_id
+        if (
+            _RC_ADJUSTMENT_SELECT_ROLE not in result
+            and entity_id.startswith("select.")
+            and (
+                uid.endswith(_RC_ADJUSTMENT_SELECT_UID_TAIL)
+                or entity_id.endswith(f"_{_RC_ADJUSTMENT_SELECT_ENTITY_TAIL}")
+                or entity_id.endswith(f"_{_RC_ADJUSTMENT_SELECT_ENTITY_TAIL}_2")
+                or entity_id == f"select.{_RC_ADJUSTMENT_SELECT_ENTITY_TAIL}"
+            )
+        ):
+            result[_RC_ADJUSTMENT_SELECT_ROLE] = entity_id
 
     # Second pass: for writable roles the first pass may have resolved a
     # sensor.* readback entity (both domains share the same entity_id tail).
@@ -237,6 +267,7 @@ def resolve_solis_entities(hass: HomeAssistant, config_entry_id: str) -> dict[st
 
     all_roles = (
         set(_SENSOR_SUFFIXES) | set(_SWITCH_SUFFIXES) | set(_BIT_SWITCHES)
+        | {_RC_ADJUSTMENT_SELECT_ROLE}
     )
     missing = sorted(all_roles - result.keys())
     missing_required = [r for r in missing if r not in _OPTIONAL_ROLES]

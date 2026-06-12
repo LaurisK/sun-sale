@@ -70,6 +70,27 @@ _REG_43110_BIT_ROLES: dict[int, str] = {
     6: "feed_in_priority_switch",
 }
 
+# Remote-control (RC) function — registers 43128 (setpoint) / 43132
+# (function selector) / 43282 (deadman timeout). The setpoint only acts
+# while the selector is engaged, and the inverter reverts the whole RC
+# function when no RC write arrives within the timeout (1..30 min) — see
+# docs/solis_control.md §3 caveats and Pho3niX90/solis_modbus#352.
+_RC_ADJUSTMENT_OFF = "OFF"
+_RC_ADJUSTMENT_AC_PORT = "Inverter AC Grid Port"
+_RC_ADJUSTMENT_VALUES: dict[str, int] = {
+    "OFF": 0,
+    "System Grid Connection Point": 1,
+    "Inverter AC Grid Port": 2,
+}
+# Register value of the engaged selector option — exported for the control
+# module's register_status row.
+RC_ADJUSTMENT_AC_PORT_VALUE = _RC_ADJUSTMENT_VALUES[_RC_ADJUSTMENT_AC_PORT]
+# Deadman window written to 43282 (the entity max). The control module
+# refreshes it every coordinator tick while an RC-backed mode is held, so
+# the inverter only falls back to its base 43110 mode if sunSale stops
+# dispatching for a full window.
+RC_TIMEOUT_MINUTES = 30.0
+
 
 def normalize_power_to_kw(value: float, unit: str) -> float:
     """Rescale a power value to kW based on its ``unit_of_measurement``.
@@ -110,8 +131,12 @@ class InverterController:
       Number entities:
         ``battery_max_charge_current``     (charge amps)
         ``battery_max_discharge_current``  (discharge amps)
-        ``rc_setpoint``                    (RC active-power setpoint, W)
+        ``rc_setpoint``                    (RC active-power setpoint, W — reg 43128)
+        ``rc_timeout``                     (RC deadman timeout, min — reg 43282)
         ``backflow_power``                 (export cap, W)
+
+      Select entities:
+        ``rc_grid_adjustment_select``      (RC function selector — reg 43132)
 
       Other switches:
         ``grid_feed_in_power_limit_switch``     (export-limit enable)
@@ -206,6 +231,27 @@ class InverterController:
         raw = self._read_optional_float("backflow_power")
         return int(raw) if raw is not None else None
 
+    def get_rc_adjustment_value(self) -> int | None:
+        """Return the RC Grid Adjustment selector (register 43132) as its register value.
+
+        Reads the select entity's state and maps the option label to the
+        register value (0=OFF, 1=System Grid Connection Point, 2=Inverter AC
+        Grid Port). The select holds its option optimistically on write, so
+        this readback tracks sunSale's own writes without waiting for the
+        next solis_modbus poll.
+
+        Returns:
+            Register value, or ``None`` when the select is unmapped,
+            unavailable, or in an unrecognised state.
+        """
+        entity_id = self._entity_ids.get("rc_grid_adjustment_select", "")
+        if not entity_id:
+            return None
+        state = self._hass.states.get(entity_id)
+        if state is None:
+            return None
+        return _RC_ADJUSTMENT_VALUES.get(state.state)
+
     # ------------------------------------------------------------------ #
     # Write side — apply_mode(StorageMode)                                 #
     # ------------------------------------------------------------------ #
@@ -276,12 +322,79 @@ class InverterController:
                 tolerance_a=_NUMBER_WRITE_EPSILON,
                 force=force,
             )
-        # RC setpoint always written — 0 W is the explicit "no override" value.
+        # RC function (43132 selector / 43282 timeout / 43128 setpoint).
+        # Write order matters on RC-backed modes: the inverter ignores the
+        # setpoint while the selector is OFF, and the timeout only latches
+        # when written *after* the function is enabled — otherwise it falls
+        # back to a ~5-min default (Pho3niX90/solis_modbus#352).
+        if spec.rc_setpoint_w != 0:
+            if not self._entity_ids.get("rc_grid_adjustment_select"):
+                _LOGGER.warning(
+                    "apply_mode(%s): RC-backed mode but no rc_grid_adjustment "
+                    "select is mapped — the RC setpoint will not engage",
+                    mode.value,
+                )
+            await self._set_select(
+                "rc_grid_adjustment_select", _RC_ADJUSTMENT_AC_PORT, force=force,
+            )
+            await self._set_number(
+                "rc_timeout",
+                RC_TIMEOUT_MINUTES,
+                tolerance_a=_NUMBER_WRITE_EPSILON,
+                force=force,
+            )
+            await self._set_number(
+                "rc_setpoint",
+                float(spec.rc_setpoint_w),
+                tolerance_a=_NUMBER_WRITE_EPSILON,
+                force=force,
+            )
+        else:
+            # Zero the setpoint while the function is still engaged, then
+            # release the selector so a stale setpoint can never act again.
+            await self._set_number(
+                "rc_setpoint",
+                0.0,
+                tolerance_a=_NUMBER_WRITE_EPSILON,
+                force=force,
+            )
+            await self._set_select(
+                "rc_grid_adjustment_select", _RC_ADJUSTMENT_OFF, force=force,
+            )
+
+    async def refresh_rc(self, spec: StorageModeSpec) -> None:
+        """Re-assert the RC deadman registers while an RC-backed mode is held.
+
+        The inverter reverts the RC function when no RC write arrives within
+        the RC timeout (register 43282, max 30 min), so a held GridCharge /
+        Discharge must be refreshed every coordinator tick. The RC registers
+        are RAM-only — the per-tick rewrite causes no flash wear. The selector
+        (43132) is only re-engaged when its readback shows it dropped, because
+        the underlying select entity writes to the wire unconditionally.
+
+        Args:
+            spec: Spec of the currently held mode; no-op unless it carries a
+                non-zero RC setpoint.
+        """
+        if self._platform != InverterPlatform.SOLIS:
+            return
+        if spec.rc_setpoint_w == 0:
+            return
+        if self.get_rc_adjustment_value() != RC_ADJUSTMENT_AC_PORT_VALUE:
+            await self._set_select(
+                "rc_grid_adjustment_select", _RC_ADJUSTMENT_AC_PORT, force=True,
+            )
+        await self._set_number(
+            "rc_timeout",
+            RC_TIMEOUT_MINUTES,
+            tolerance_a=_NUMBER_WRITE_EPSILON,
+            force=True,
+        )
         await self._set_number(
             "rc_setpoint",
             float(spec.rc_setpoint_w),
             tolerance_a=_NUMBER_WRITE_EPSILON,
-            force=force,
+            force=True,
         )
 
     # ------------------------------------------------------------------ #
@@ -377,6 +490,45 @@ class InverterController:
         await self._hass.services.async_call(
             "number", "set_value",
             {"entity_id": entity_id, "value": target_value},
+            blocking=True,
+        )
+
+    async def _set_select(
+        self,
+        role: str,
+        option: str,
+        force: bool = False,
+    ) -> None:
+        """Select an option on a select entity only when its state differs.
+
+        Args:
+            role: Entity-ID map key (e.g. ``rc_grid_adjustment_select``).
+            option: Target option label.
+            force: When ``True``, skip the current-state comparison and always
+                issue the underlying ``select.select_option`` service call.
+        """
+        entity_id = self._entity_ids.get(role, "")
+        if not entity_id:
+            _LOGGER.debug(
+                "inverter: select(%s) skip — no entity mapped (target=%s force=%s)",
+                role, option, force,
+            )
+            return
+        state = self._hass.states.get(entity_id)
+        current = state.state if state is not None else None
+        if not force and current == option:
+            _LOGGER.debug(
+                "inverter: select(%s) skip — current=%s entity=%s",
+                role, current, entity_id,
+            )
+            return
+        _LOGGER.debug(
+            "inverter: select(%s) write — current=%s target=%s entity=%s force=%s",
+            role, current, option, entity_id, force,
+        )
+        await self._hass.services.async_call(
+            "select", "select_option",
+            {"entity_id": entity_id, "option": option},
             blocking=True,
         )
 

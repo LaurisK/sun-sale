@@ -30,6 +30,8 @@ SOLIS_ENTITY_IDS = {
     "battery_max_charge_current":    "number.solis_battery_max_charge_current",
     "battery_max_discharge_current": "number.solis_battery_max_discharge_current",
     "rc_setpoint":                "number.solis_rc_active_power",
+    "rc_timeout":                 "number.solis_rc_timeout",
+    "rc_grid_adjustment_select":  "select.solis_rc_grid_adjustment",
     "backflow_power":             "number.solis_backflow_power",
     "self_use_switch":            "switch.solis_self_use_mode",
     "tou_mode_switch":            "switch.solis_time_of_use_mode",
@@ -120,6 +122,15 @@ def _numbers_written(hass: _Hass) -> dict[str, float]:
     return result
 
 
+def _selects_written(hass: _Hass) -> dict[str, str]:
+    """Return ``{entity_id: option}`` for each select.select_option call."""
+    result: dict[str, str] = {}
+    for dom, svc, data in _calls(hass):
+        if dom == "select" and svc == "select_option":
+            result[data["entity_id"]] = data["option"]
+    return result
+
+
 # ---------------------------------------------------------------------------
 # apply_mode — Solis register-level state machine
 # ---------------------------------------------------------------------------
@@ -167,7 +178,8 @@ async def test_apply_mode_discharge_clears_self_use_and_sets_feed_in():
 
 @pytest.mark.asyncio
 async def test_apply_mode_idempotent_when_readback_matches_target():
-    # Inverter already in GridCharge state — all bits match and all numbers match target.
+    # Inverter already in GridCharge state — bits, numbers, and the RC
+    # selector / timeout all read back at their targets.
     spec = _specs()[StorageMode.GridCharge]
     state_map = {
         SOLIS_ENTITY_IDS["storage_control_readback"]: _State(str(spec.reg_43110_value)),
@@ -175,6 +187,8 @@ async def test_apply_mode_idempotent_when_readback_matches_target():
         SOLIS_ENTITY_IDS["battery_max_discharge_current"]: _State(str(spec.discharge_a)),
         SOLIS_ENTITY_IDS["backflow_power"]: _State(str(spec.export_limit_w)),
         SOLIS_ENTITY_IDS["rc_setpoint"]: _State(str(spec.rc_setpoint_w)),
+        SOLIS_ENTITY_IDS["rc_timeout"]: _State("30"),
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]: _State("Inverter AC Grid Port"),
     }
     controller, hass = make_controller(state_map=state_map)
     await controller.apply_mode(StorageMode.GridCharge, spec)
@@ -271,6 +285,140 @@ async def test_apply_mode_skips_role_with_empty_entity_id():
     await controller.apply_mode(StorageMode.GridCharge, _specs()[StorageMode.GridCharge])
     toggled = _switches_toggled(hass)
     assert "switch.solis_allow_grid_to_charge_the_battery" not in toggled
+
+
+# ---------------------------------------------------------------------------
+# RC function engagement (43132 selector / 43282 timeout / 43128 setpoint)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_rc_mode_engages_selector_then_timeout_then_setpoint():
+    # GridCharge from a cold RC state: the selector must be engaged before
+    # the timeout, and the timeout before the setpoint (solis_modbus#352 —
+    # a timeout written first does not latch).
+    spec = _specs()[StorageMode.GridCharge]
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State("33"),
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]: _State("OFF"),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.apply_mode(StorageMode.GridCharge, spec)
+
+    selects = _selects_written(hass)
+    writes = _numbers_written(hass)
+    assert selects[SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]] == "Inverter AC Grid Port"
+    assert writes[SOLIS_ENTITY_IDS["rc_timeout"]] == 30.0
+    assert writes[SOLIS_ENTITY_IDS["rc_setpoint"]] == float(spec.rc_setpoint_w)
+    ordered = [
+        data["entity_id"] for _, _, data in _calls(hass)
+        if data["entity_id"] in (
+            SOLIS_ENTITY_IDS["rc_grid_adjustment_select"],
+            SOLIS_ENTITY_IDS["rc_timeout"],
+            SOLIS_ENTITY_IDS["rc_setpoint"],
+        )
+    ]
+    assert ordered == [
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"],
+        SOLIS_ENTITY_IDS["rc_timeout"],
+        SOLIS_ENTITY_IDS["rc_setpoint"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_non_rc_mode_zeros_setpoint_then_releases_selector():
+    # Leaving an RC-backed mode: the setpoint is zeroed while the function is
+    # still engaged, then the selector is released to OFF.
+    spec = _specs()[StorageMode.SelfUse]
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State("1"),
+        SOLIS_ENTITY_IDS["battery_max_charge_current"]: _State(str(spec.charge_a)),
+        SOLIS_ENTITY_IDS["battery_max_discharge_current"]: _State(str(spec.discharge_a)),
+        SOLIS_ENTITY_IDS["backflow_power"]: _State(str(spec.export_limit_w)),
+        SOLIS_ENTITY_IDS["rc_setpoint"]: _State("-5000"),  # stale GridCharge setpoint
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]: _State("Inverter AC Grid Port"),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.apply_mode(StorageMode.SelfUse, spec)
+
+    writes = _numbers_written(hass)
+    selects = _selects_written(hass)
+    assert writes[SOLIS_ENTITY_IDS["rc_setpoint"]] == 0.0
+    assert selects[SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]] == "OFF"
+    ordered = [
+        data["entity_id"] for _, _, data in _calls(hass)
+        if data["entity_id"] in (
+            SOLIS_ENTITY_IDS["rc_grid_adjustment_select"],
+            SOLIS_ENTITY_IDS["rc_setpoint"],
+        )
+    ]
+    assert ordered == [
+        SOLIS_ENTITY_IDS["rc_setpoint"],
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_selector_skipped_when_already_engaged():
+    spec = _specs()[StorageMode.GridCharge]
+    state_map = {
+        SOLIS_ENTITY_IDS["storage_control_readback"]: _State("33"),
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]: _State("Inverter AC Grid Port"),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.apply_mode(StorageMode.GridCharge, spec)
+    assert SOLIS_ENTITY_IDS["rc_grid_adjustment_select"] not in _selects_written(hass)
+
+
+@pytest.mark.asyncio
+async def test_refresh_rc_rewrites_deadman_even_when_readback_matches():
+    # The keep-alive must hit the wire every tick — the rolling timeout is
+    # what stops the inverter from expiring the RC function.
+    spec = _specs()[StorageMode.Discharge]
+    state_map = {
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]: _State("Inverter AC Grid Port"),
+        SOLIS_ENTITY_IDS["rc_timeout"]: _State("30"),
+        SOLIS_ENTITY_IDS["rc_setpoint"]: _State(str(spec.rc_setpoint_w)),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.refresh_rc(spec)
+    writes = _numbers_written(hass)
+    assert writes[SOLIS_ENTITY_IDS["rc_timeout"]] == 30.0
+    assert writes[SOLIS_ENTITY_IDS["rc_setpoint"]] == float(spec.rc_setpoint_w)
+    # The selector reads engaged — not re-written (its entity writes the wire
+    # unconditionally, so the skip avoids a pointless Modbus transaction).
+    assert SOLIS_ENTITY_IDS["rc_grid_adjustment_select"] not in _selects_written(hass)
+
+
+@pytest.mark.asyncio
+async def test_refresh_rc_reengages_dropped_selector():
+    spec = _specs()[StorageMode.GridCharge]
+    state_map = {
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]: _State("OFF"),  # expired
+    }
+    controller, hass = make_controller(state_map=state_map)
+    await controller.refresh_rc(spec)
+    selects = _selects_written(hass)
+    assert selects[SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]] == "Inverter AC Grid Port"
+
+
+@pytest.mark.asyncio
+async def test_refresh_rc_no_op_for_non_rc_modes():
+    controller, hass = make_controller()
+    await controller.refresh_rc(_specs()[StorageMode.SelfUse])
+    assert _calls(hass) == []
+
+
+def test_get_rc_adjustment_value_maps_option_labels():
+    state_map = {
+        SOLIS_ENTITY_IDS["rc_grid_adjustment_select"]: _State("Inverter AC Grid Port"),
+    }
+    controller, hass = make_controller(state_map=state_map)
+    assert controller.get_rc_adjustment_value() == 2
+    hass.set_state(SOLIS_ENTITY_IDS["rc_grid_adjustment_select"], "OFF")
+    assert controller.get_rc_adjustment_value() == 0
+    hass.set_state(SOLIS_ENTITY_IDS["rc_grid_adjustment_select"], "unavailable")
+    assert controller.get_rc_adjustment_value() is None
 
 
 # ---------------------------------------------------------------------------

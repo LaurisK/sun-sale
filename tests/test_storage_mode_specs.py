@@ -59,10 +59,12 @@ def test_grid_charge_pushes_grid_charge_setpoint_negative():
     assert spec.charge_a is not None and spec.charge_a > 0
 
 
-def test_discharge_pushes_export_setpoint_positive_and_uncaps_export():
+def test_discharge_pushes_export_setpoint_positive_and_raises_export_cap():
+    # The cap is written explicitly (not inherited) so a preceding
+    # NoExport/GridCharge/StandBy slot's 0 W cap cannot clamp the dump.
     spec = _specs()[StorageMode.Discharge]
     assert spec.rc_setpoint_w == 10_000
-    assert spec.export_limit_w is None
+    assert spec.export_limit_w == 10_000
     assert spec.charge_a == 0.0
     assert spec.discharge_a is not None and spec.discharge_a > 0
 
@@ -70,6 +72,14 @@ def test_discharge_pushes_export_setpoint_positive_and_uncaps_export():
 def test_no_export_zeros_export_limit():
     spec = _specs()[StorageMode.NoExport]
     assert spec.export_limit_w == 0
+
+
+@pytest.mark.parametrize("mode", [StorageMode.SelfUse, StorageMode.NoExport])
+def test_self_use_family_allows_battery_discharge(mode):
+    # slot_physics._simulate_self_use covers baseload from the battery;
+    # the spec must not write a 0 A discharge limit that blocks it.
+    spec = _specs()[mode]
+    assert spec.discharge_a is not None and spec.discharge_a > 0
 
 
 def test_standby_zeros_both_currents_and_export():

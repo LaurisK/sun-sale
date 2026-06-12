@@ -1065,8 +1065,8 @@ class StorageMode(Enum):
     """
     FeedIn     = "feed_in"      # 43110=64 — surplus above export cap → charge
     SelfUse    = "self_use"     # 43110=1  — charge first, capped export of surplus
-    NoExport   = "no_export"    # 43110=1  (SelfUse) — charge only, export prohibited
-    Discharge  = "discharge"    # 43110=64 (FeedIn) — uncapped export + force discharge
+    NoExport   = "no_export"    # 43110=1  (SelfUse) — export prohibited
+    Discharge  = "discharge"    # 43110=64 (FeedIn) — force discharge, export at deployment cap
     GridCharge = "grid_charge"  # 43110=33 (SelfUse|GridCharge) — force grid charge
     StandBy    = "stand_by"     # 43110=1  (SelfUse) — no battery flow, no grid exchange
     AUTO       = "auto"         # 43110=1  (SelfUse) — hardware default, no sunSale override

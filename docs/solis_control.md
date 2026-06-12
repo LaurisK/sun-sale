@@ -38,7 +38,7 @@ state is a *composition* of writes across these — never one register alone.
 | **A. Storage Mode word** (bitmask) | **43110** | read: `sensor.namai_inv_storage_control_switch_value_2`<br>write via bit switches below | Operating philosophy |
 | **B. Backflow / export limit** | 43073 enable + 43074 limit; 43071 absolute cap | `number.namai_inv_backflow_power_2` (10000 W)<br>`number.namai_inv_peak_max_usable_grid_power_2` (3000 W)<br>`switch.grid_feed_in_power_limit_switch` | Caps export power |
 | **C. Battery current limits** | 43117/43118 (slot), max-current regs | `number.namai_inv_battery_max_charge_current_2` (290 A)<br>`number.namai_inv_battery_max_discharge_current_2` (290 A)<br>`number.namai_inv_max_charge_current_2` / `_discharge_current_2` (999 A) | Bounds the energy rate |
-| **D. Remote-Control AC active power setpoint** | **43141** (signed W) | `number.namai_inv_rc_inverter_ac_grid_active_power_2` | Real-time setpoint; RAM-only, no flash wear |
+| **D. Remote-Control AC active power setpoint** | **43128** (S16 signed, ×10 W) + 43132 function selector + 43282 timeout | `number.namai_inv_rc_inverter_ac_grid_active_power_2`<br>`select.rc_grid_adjustment`<br>`number.namai_inv_rc_timeout_2` | Real-time setpoint; RAM-only, no flash wear. *(43141 is Time-Charging Charge Current — an earlier revision of this doc mislabelled it as the RC setpoint.)* |
 | **E. Force charge/discharge** (alternative to D) | 43135 mode + 43136 rate | not currently exposed in this build | Discrete force mode |
 | **F. Inverter on/off (standby)** | 43006 / 43007 | not exposed; closest is self-use + RC=0 + currents=0 | Hard standby |
 
@@ -71,9 +71,9 @@ configured backflow limit.
 | Name | Intent | 43110 | Export limit (B) | Charge A | Discharge A | RC setpoint (D) |
 |---|---|---:|---|---|---|---|
 | **SELL** | Export-priority; surplus above export cap → charge battery | 64 (FeedIn) | switch ON, limit = `P_export_max_W` | `I_max` | 0 | 0 |
-| **STORE** | Charge battery to full first; surplus → capped export | 1 (SelfUse) | switch ON, limit = `P_export_max_W` | `I_max` | 0 | 0 |
-| **HOARD** | Charge only — export prohibited | 1 (SelfUse) | switch ON, limit = 0 (or `allow_export_*` = off) | `I_max` | 0 | 0 |
-| **DUMP** | Export at max + actively discharge battery | 64 (FeedIn) | switch OFF (uncapped) | 0 | `I_max` | `+P_inv_max_W` *(or 43135=2, 43136=P/10)* |
+| **STORE** | Self-use: battery balances solar vs load; surplus → capped export | 1 (SelfUse) | switch ON, limit = `P_export_max_W` | `I_max` | `I_max` | 0 |
+| **HOARD** | Self-use with export prohibited | 1 (SelfUse) | switch ON, limit = 0 (or `allow_export_*` = off) | `I_max` | `I_max` | 0 |
+| **DUMP** | Export at deployment cap + actively discharge battery | 64 (FeedIn) | switch ON, limit = `P_export_max_W` (written explicitly — `None` would inherit a 0 cap from a prior HOARD/GULP/STBY) | 0 | `I_max` | `+P_inv_max_W` *(or 43135=2, 43136=P/10)* |
 | **GULP** | Charge battery from grid at max (cheap-hour absorb) | 33 (SelfUse + GridCharge) | switch ON, limit = 0 | `I_max` | 0 | `-P_charge_max_W` *(or 43135=1, 43136=P/10)* |
 | **STBY** | Standby — no grid exchange, no battery flow | 1 (SelfUse) | switch ON, limit = 0 | 0 | 0 | 0 |
 | **AUTO** | Default behaviour, no sunSale override | 1 (SelfUse) | hardware default | hardware default | hardware default | 0 |
@@ -81,10 +81,20 @@ configured backflow limit.
 
 ### Caveats
 
-- **D (43141) may require an "Active Power Control" enable register** (often
-  ~43051) to take effect. Verify on this firmware.
-- **Never combine D (43141) and E (43135) simultaneously** — 43135 non-zero
-  overrides 43141.
+- **D (43128) only acts while the RC Grid Adjustment selector (43132) is
+  engaged** — `select.rc_grid_adjustment`: 0 = OFF, 1 = System Grid
+  Connection Point, 2 = Inverter AC Grid Port. sunSale engages option 2 for
+  RC-backed modes and releases to OFF otherwise.
+- **The RC function expires inverter-side** when no RC write arrives within
+  the RC timeout (43282, 1–30 min; firmware default ~5 min). The timeout
+  only latches when written *after* the function is enabled
+  (Pho3niX90/solis_modbus#352). sunSale writes selector → timeout (30 min) →
+  setpoint on engagement and refreshes timeout + setpoint every coordinator
+  tick while the mode holds — the timeout doubles as a deadman: if sunSale
+  stops dispatching, the inverter falls back to its base 43110 mode within
+  30 min.
+- **Never combine D (43128) and E (43135) simultaneously** — 43135 non-zero
+  overrides 43128.
 - **Drop the TOU `time.*_slot_*` writes entirely.** They become unused in this
   model. Keep the bit switches (`self_use_mode`, `allow_grid_to_charge_the_battery`,
   `feed_in_priority_mode`) since they collectively *are* the bits of 43110.
