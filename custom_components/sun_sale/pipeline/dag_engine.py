@@ -1,11 +1,19 @@
 """DAG Task Engine — tiered directed acyclic graph executor.
 
 Architecture:
-  - Each DagNode declares only its output_type and the types it consumes.
-    Execution tiers are *derived*, not hand-assigned: DagEngine computes each
-    node's tier by longest-path layering over the consumes/output_type graph,
-    so a node always lands strictly above every node whose output it consumes.
-    Adding a node is a non-decision — its tier falls out of what it consumes.
+  - Each DagNode declares its output_type, the types it consumes, and
+    (optionally) the types it consumes_optional. Execution tiers are *derived*,
+    not hand-assigned: DagEngine computes each node's tier by longest-path
+    layering over the consumes + consumes_optional / output_type graph, so a
+    node always lands strictly above every node whose output it consumes —
+    required or optional. Adding a node is a non-decision — its tier falls out
+    of what it consumes.
+  - consumes vs consumes_optional: both edges raise a consumer's tier above its
+    producer (so ordering is guaranteed either way), but only consumes gates
+    readiness. An optional dependency that is absent this cycle (its producer
+    failed or was skipped) does NOT stop the consumer from running — it reads
+    None and degrades. This lets a node order itself after an optional input it
+    reads via ctx.get without making that input mandatory.
   - Constructing the engine raises DependencyCycleError if the graph contains a
     cycle (a node that transitively consumes its own output); an acyclic graph
     always yields a finite layering.
@@ -104,17 +112,24 @@ class DagNode(ABC):
     """Abstract base for all DAG computation nodes.
 
     Subclass contract (class-level attributes):
-      output_type: type|None — type deposited into ctx.secondary (None = sink node).
-      consumes:    list[type] — all types this node reads from NodeContext
-                               (both primary and secondary types).
+      output_type:       type|None — type deposited into ctx.secondary
+                                     (None = sink node).
+      consumes:          list[type] — required types this node reads from
+                                     NodeContext (both primary and secondary).
+                                     Each gates readiness AND raises the tier.
+      consumes_optional: list[type] — types the node reads via ctx.get but can
+                                     run without. Each raises the tier (so the
+                                     node still orders after its producer) but
+                                     does NOT gate readiness. Defaults to [].
 
     A node's execution tier is not declared — DagEngine derives it from the
-    consumes/output_type graph so a node always runs strictly after every node
-    whose output it consumes.
+    consumes + consumes_optional / output_type graph so a node always runs
+    strictly after every node whose output it consumes, required or optional.
     """
 
     output_type: type | None
     consumes: list[type]
+    consumes_optional: list[type] = []
 
     def all_secondary_deps_satisfied(self, ctx: NodeContext) -> bool:
         """Return True when every secondary dependency declared in consumes is available.
@@ -200,22 +215,26 @@ class DagEngine:
         """Derive each node's execution tier by longest-path layering over the graph.
 
         A node's tier is one more than the deepest tier among the nodes that
-        produce the secondary types it consumes (0 when it consumes only primary
-        inputs). Because every producer→consumer edge raises the tier by at least
-        one, same-tier nodes are guaranteed independent and every dependency is
-        resolved before its consumer's tier runs — the invariant that lets
-        readiness be read straight from ctx.secondary (see
-        DagNode.all_secondary_deps_satisfied).
+        produce the secondary types it consumes — required (consumes) or
+        optional (consumes_optional) alike (0 when it consumes only primary
+        inputs). Optional edges raise the tier exactly like required ones, so a
+        node that reads an optional input via ctx.get still lands strictly above
+        its producer; the optional/required distinction only matters later, for
+        readiness (see DagNode.all_secondary_deps_satisfied). Because every
+        producer→consumer edge raises the tier by at least one, same-tier nodes
+        are guaranteed independent and every dependency is resolved before its
+        consumer's tier runs.
 
         Args:
-            nodes: All nodes; each node's output_type and consumes are inspected.
+            nodes: All nodes; each node's output_type, consumes, and
+                consumes_optional are inspected.
 
         Returns:
             Mapping of node → derived tier (0-based).
 
         Raises:
-            DependencyCycleError: When a node transitively consumes its own output,
-                so no finite layering exists.
+            DependencyCycleError: When a node transitively consumes its own output
+                (through a required or optional edge), so no finite layering exists.
         """
         producer: dict[type, DagNode] = {
             n.output_type: n for n in nodes if n.output_type is not None
@@ -231,7 +250,11 @@ class DagEngine:
                 chain = " → ".join(type(n).__name__ for n in (*trail, node))
                 raise DependencyCycleError(f"Dependency cycle: {chain}")
             resolving.add(node)
-            dep_producers = [producer[t] for t in node.consumes if t in producer]
+            dep_producers = [
+                producer[t]
+                for t in (*node.consumes, *node.consumes_optional)
+                if t in producer
+            ]
             node_tier = 1 + max(
                 (resolve(p, (*trail, node)) for p in dep_producers), default=-1
             )

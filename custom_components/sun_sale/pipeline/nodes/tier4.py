@@ -39,6 +39,15 @@ class ScheduleNode(DagNode):
         BaseLoadProfile,
         SchedulePolicy,
     ]
+    # ProfitabilityScore is read via ctx.get (the schedule still runs without
+    # it), but it is a *secondary* output of ProfitabilityNode, so it must be
+    # declared here to force ScheduleNode's derived tier above its producer.
+    # Listing it under consumes would make a failed ProfitabilityNode skip the
+    # whole schedule; consumes_optional raises the tier without gating
+    # readiness. InverterModeReading is not listed — it is a primary
+    # (translator) input with no producer node, so it carries no ordering
+    # concern (same pattern as ForecastAccuracyNode / MonthlyBillNode).
+    consumes_optional = [ProfitabilityScore]
 
     async def _compute(self, ctx: NodeContext) -> Schedule:
         """Run the DP scheduler and produce a StorageMode-tagged Schedule."""
@@ -49,7 +58,9 @@ class ScheduleNode(DagNode):
         base_load_profile = ctx.require(BaseLoadProfile)
         # GenerationSeries is consumed for tier-ordering only.
         ctx.get(GenerationSeries)
-        # Optional inputs — schedule still runs without them.
+        # Optional inputs — schedule still runs without them. ProfitabilityScore
+        # is tier-ordered via consumes_optional (above); InverterModeReading is
+        # a primary input.
         profit_score = ctx.get(ProfitabilityScore)
         mode_reading = ctx.get(InverterModeReading)
         current_mode = mode_reading.mode if mode_reading is not None else None

@@ -232,6 +232,128 @@ def test_dependency_cycle_raises_at_construction():
     assert "_CycleTwo" in str(exc.value)
 
 
+# --- Optional consume (tier-ordered, not readiness-gated) ------------------
+
+class _OptionalConsumer(DagNode):
+    """Consumer with one optional secondary dep — ordered by it, not gated by it.
+
+    Records whether it ran and what it observed for the optional type, so a test
+    can assert both the ordering (the value is present when the producer ran
+    first) and the non-gating (it still runs when the producer is absent). The
+    optional type is bound per-instance — set before super().__init__ so it is
+    visible to _assign_tiers at engine construction — mirroring _ToggleProducer.
+    """
+
+    consumes: list = []
+
+    def __init__(self, optional_type: type) -> None:
+        """Bind the optional secondary dep and reset observation state."""
+        super().__init__()
+        self.output_type = _COut
+        self.consumes_optional = [optional_type]
+        self._optional_type = optional_type
+        self.ran = False
+        self.saw_optional: object | None = None
+
+    async def _compute(self, ctx):
+        """Record the optional input (via ctx.get, may be None) and produce _COut."""
+        self.ran = True
+        self.saw_optional = ctx.get(self._optional_type)
+        return _COut()
+
+
+def test_optional_consume_raises_tier_above_producer():
+    """An optional secondary dep lifts the consumer's tier above its producer.
+
+    This is the core of the fix: with the optional edge invisible to tier
+    derivation, the consumer could share (or precede) its producer's tier and
+    read None forever. _assign_tiers must treat consumes_optional exactly like
+    consumes for ordering — only readiness distinguishes them.
+    """
+    a = _ProducerA()                    # produces _AOut, no deps → tier 0
+    c = _OptionalConsumer(_AOut)        # optional on _AOut
+    tiers = DagEngine._assign_tiers([c, a])  # leaf-first: order is derived
+
+    assert tiers[a] == 0
+    assert tiers[c] == tiers[a] + 1     # lifted strictly above its producer
+
+
+@pytest.mark.asyncio
+async def test_optional_consume_value_present_when_producer_succeeds():
+    """With the producer in an earlier tier, its output is available to the consumer.
+
+    End-to-end counterpart of the tier-derivation test: because the optional
+    edge lifts the consumer into a later tier, the producer's output is
+    deterministically in ctx.secondary by the time the consumer runs.
+    """
+    a = _ProducerA()
+    c = _OptionalConsumer(_AOut)
+    engine = DagEngine([c, a])          # leaf-first to prove order is derived
+
+    secondary = await engine.run({}, _config(), NOW)
+
+    assert c.ran is True
+    assert isinstance(c.saw_optional, _AOut)  # producer ran first → value present
+    assert _COut in secondary
+
+
+@pytest.mark.asyncio
+async def test_optional_consume_does_not_gate_readiness_when_absent():
+    """A failed optional producer does not skip the consumer — it reads None.
+
+    The whole point of consumes_optional vs consumes: _FailingProducer deposits
+    nothing, yet the consumer must still run (had this been a required consume,
+    it would be skipped) and simply observe None for the optional input.
+    """
+    b = _FailingProducer()              # produces _BOut, but raises → nothing deposited
+    c = _OptionalConsumer(_BOut)
+    engine = DagEngine([b, c])
+
+    secondary = await engine.run({}, _config(), NOW)
+
+    assert c.ran is True                # ran despite the optional dep being absent
+    assert c.saw_optional is None       # optional input simply None
+    assert _COut in secondary           # and still produced its output
+
+
+class _OptCycleOne(DagNode):
+    """Produces _AOut but optionally consumes _BOut — half of an optional cycle."""
+
+    output_type = _AOut
+    consumes: list = []
+    consumes_optional = [_BOut]
+
+    async def _compute(self, ctx):
+        """Never reached: construction raises before any run."""
+        return _AOut()
+
+
+class _OptCycleTwo(DagNode):
+    """Produces _BOut but optionally consumes _AOut — the other half of the cycle."""
+
+    output_type = _BOut
+    consumes: list = []
+    consumes_optional = [_AOut]
+
+    async def _compute(self, ctx):
+        """Never reached: construction raises before any run."""
+        return _BOut()
+
+
+def test_optional_dependency_cycle_raises_at_construction():
+    """An optional edge forms a real ordering edge, so a cycle through it is rejected.
+
+    consumes_optional raises the tier just like consumes, so a two-node cycle
+    built entirely from optional edges still has no finite layering and must
+    surface at construction.
+    """
+    with pytest.raises(DependencyCycleError) as exc:
+        DagEngine([_OptCycleOne(), _OptCycleTwo()])
+
+    assert "_OptCycleOne" in str(exc.value)
+    assert "_OptCycleTwo" in str(exc.value)
+
+
 # --- Cross-cycle readiness leak (the bug this guards against) --------------
 
 class _ToggleProducer(DagNode):
