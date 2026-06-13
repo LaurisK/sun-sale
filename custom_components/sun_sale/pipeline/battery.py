@@ -124,6 +124,69 @@ class CapacityEstimator:
 
         return weighted_sum / total_weight
 
+    def debug_observations(self) -> dict:
+        """Return per-observation diagnostics for auditing the capacity estimate.
+
+        Exposes every stored observation with its implied capacity
+        (``energy_kwh / |soc_delta|``), whether it currently passes the
+        plausibility filters, and the exponential weight it carries in the
+        weighted average. Lets the debug API show *why* the estimate sits where
+        it does — e.g. a run of low-implied discharge samples dragging it below
+        nominal. Diagnostic only; nothing in the pipeline consumes it.
+
+        Returns:
+            Dict with the live ``estimated_capacity_kwh``, ``nominal_capacity_kwh``,
+            total/accepted observation counts, and an ``observations`` list of
+            per-sample rows in storage order (newest last).
+        """
+        max_plausible = self._nominal * _CAPACITY_OBS_MAX_MULTIPLIER
+
+        def _implied(obs: CapacityObservation) -> float | None:
+            """Return implied capacity for one observation, or None when Δsoc is 0."""
+            d = abs(obs.soc_end - obs.soc_start)
+            return obs.energy_kwh / d if d > 0 else None
+
+        accepted = [
+            o for o in self._observations
+            if abs(o.soc_end - o.soc_start) >= CAPACITY_OBS_MIN_SOC_DELTA
+            and (_implied(o) or float("inf")) <= max_plausible
+        ]
+        n = len(accepted)
+
+        rows: list[dict] = []
+        acc_i = 0
+        for obs in self._observations:
+            implied = _implied(obs)
+            is_acc = (
+                abs(obs.soc_end - obs.soc_start) >= CAPACITY_OBS_MIN_SOC_DELTA
+                and implied is not None
+                and implied <= max_plausible
+            )
+            weight = self.DECAY ** (n - 1 - acc_i) if is_acc else 0.0
+            if is_acc:
+                acc_i += 1
+            rows.append({
+                "timestamp": obs.timestamp.isoformat(),
+                "direction": obs.direction,
+                "soc_start": round(obs.soc_start, 4),
+                "soc_end": round(obs.soc_end, 4),
+                "soc_delta": round(obs.soc_end - obs.soc_start, 4),
+                "energy_kwh": round(obs.energy_kwh, 4),
+                "implied_capacity_kwh": (
+                    round(implied, 3) if implied is not None else None
+                ),
+                "accepted": is_acc,
+                "weight": round(weight, 4),
+            })
+
+        return {
+            "estimated_capacity_kwh": round(self.estimated_capacity_kwh, 4),
+            "nominal_capacity_kwh": self._nominal,
+            "count": len(self._observations),
+            "accepted_count": n,
+            "observations": rows,
+        }
+
     def to_dict(self) -> dict:
         """Serialize for HA persistent storage."""
         return {

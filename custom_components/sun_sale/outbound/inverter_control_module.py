@@ -155,6 +155,13 @@ class InverterControlModule:
         self._last_dispatch_target: StorageMode | None = None
         self._last_dispatch_at: datetime | None = None
         self._last_automation_enabled: bool | None = None
+        # Diagnostic mirror of the automation flag at the most recent dispatch
+        # (tick *or* override). Distinct from ``_last_automation_enabled``,
+        # which is the tick-only transition bookkeeping driving
+        # ``_reassert_next``: the direct override path deliberately leaves that
+        # untouched, so a separate field is needed to keep this diagnostic fresh
+        # after a button press instead of reporting the previous tick's value.
+        self._automation_enabled_at_last_dispatch: bool | None = None
         # Phase 2: commanded-mode tracking + verify loop. ``last_commanded_*``
         # are our own truth (what we asked the inverter to do); the verify
         # loop reads back from solis_modbus a beat later to confirm.
@@ -323,9 +330,17 @@ class InverterControlModule:
         """
         async with self._dispatch_lock:
             self._last_dispatch_at = now
+            self._automation_enabled_at_last_dispatch = automation_enabled
             if not automation_enabled and mode_override is None:
                 self._last_dispatch_outcome = "automation_disabled"
-                self._last_dispatch_target = None
+                # Surface the would-have-been-dispatched target (the current
+                # slot's mode) even though the write is gated off, so the panel
+                # can show "would have dispatched X" alongside the
+                # automation_disabled outcome. ``mode_override`` is ``None`` on
+                # this branch by construction, so this resolves to the slot.
+                self._last_dispatch_target = self.current_target(
+                    now, schedule, mode_override
+                )
                 self._register_status = self._build_register_status()
                 return
 
@@ -383,8 +398,13 @@ class InverterControlModule:
 
     @property
     def automation_enabled_at_last_dispatch(self) -> bool | None:
-        """Return the ``automation_enabled`` value observed in the latest tick."""
-        return self._last_automation_enabled
+        """Return the ``automation_enabled`` value at the most recent dispatch.
+
+        Reflects the flag passed to the latest ``tick`` *or* ``dispatch_override``
+        call, so the diagnostic stays accurate after an instant override press
+        (which deliberately leaves the tick-transition bookkeeping untouched).
+        """
+        return self._automation_enabled_at_last_dispatch
 
     @property
     def last_commanded_mode(self) -> StorageMode | None:

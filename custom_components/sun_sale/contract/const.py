@@ -258,9 +258,18 @@ DEFAULT_SCHEDULE_ALLOW_DISCHARGE_TO_GRID = True
 DEFAULT_SCHEDULE_MODE_CHANGE_PENALTY_EUR_PER_KWH = 0.005
 DEFAULT_SCHEDULE_PROFITABILITY_TILT_ALPHA = 0.5
 DEFAULT_SCHEDULE_TERMINAL_VALUE_DISCOUNT = 0.5
-# None means "use hardware max from BatteryConfig"; set a lower value to
-# limit the DP's peak grid-export rate in Discharge-to-grid slots.
-DEFAULT_SCHEDULE_MAX_DISCHARGE_TO_GRID_KW: float | None = None
+# Default planner cap on Discharge-to-grid power. Pinned to the RC active-power
+# setpoint the dispatcher actually writes for Discharge
+# (DEFAULT_INVERTER_MAX_POWER_W) so the schedule's projected discharge rate
+# equals what the inverter is commanded to do, not the battery's higher raw
+# discharge limit (max_discharge_power_kw). The inverter's force-discharge has
+# been observed reverting to ~10 kW, so 10 kW is the safe default to plan
+# against even if the hardware setting resets again. Setting the
+# "Max Discharge to Grid" number entity to its maximum restores "use hardware
+# max" (None); any value below caps the DP's peak grid-export rate.
+DEFAULT_SCHEDULE_MAX_DISCHARGE_TO_GRID_KW: float | None = (
+    DEFAULT_INVERTER_MAX_POWER_W / 1000.0
+)
 
 # Bounds enforced by the Number entities and clamped by the coordinator before
 # the policy reaches the DP. Mode-change penalty is bounded above by 0.10

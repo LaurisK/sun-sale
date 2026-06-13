@@ -126,6 +126,10 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
                 "soc": battery_state.soc,
                 "power_kw": data.get("battery_power_kw"),
                 "estimated_capacity_kwh": data.get("estimated_capacity"),
+                # Per-observation breakdown of the capacity learner — implied
+                # capacity, accept/reject, and weight per stored sample — so the
+                # estimate can be audited against the nominal capacity.
+                "capacity_estimator": data.get("capacity_observations"),
             } if battery_state is not None else None,
             "grid_power_kw": data.get("grid_power_kw"),
             "grid_import_power_history": {

@@ -342,6 +342,42 @@ async def test_no_dispatch_when_automation_off_and_no_override():
 
 
 @pytest.mark.asyncio
+async def test_automation_disabled_surfaces_would_have_been_target():
+    """A gated-off dispatch still reports the slot's mode as the target.
+
+    Matches the ``last_dispatch_target`` contract — "set even when the dispatch
+    was blocked" — so the panel can show "would have dispatched X".
+    """
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.tick(
+        now=NOW, schedule=_schedule_with(StorageMode.GridCharge),
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()),
+        automation_enabled=False,
+        mode_override=None,
+    )
+    assert mod.last_dispatch_outcome == "automation_disabled"
+    assert mod.last_dispatch_target == StorageMode.GridCharge
+
+
+@pytest.mark.asyncio
+async def test_automation_disabled_target_none_without_slot():
+    """No covering schedule slot → no would-have-been target to surface."""
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.tick(
+        now=NOW, schedule=None,
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()),
+        automation_enabled=False,
+        mode_override=None,
+    )
+    assert mod.last_dispatch_outcome == "automation_disabled"
+    assert mod.last_dispatch_target is None
+
+
+@pytest.mark.asyncio
 async def test_current_target_returns_override_when_set():
     mod = _module()
     schedule = _schedule_with(StorageMode.SelfUse)
@@ -421,6 +457,27 @@ async def test_dispatch_override_does_not_touch_automation_tracking():
     )
     # tick's False→True re-assert bookkeeping is untouched by a direct dispatch.
     assert mod._reassert_next is False
+    assert mod._last_automation_enabled is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_override_records_automation_flag_for_diagnostics():
+    """The direct path still reports the live automation flag as a diagnostic.
+
+    ``dispatch_override`` skips the tick-transition bookkeeping
+    (``_last_automation_enabled`` stays ``None``), but the
+    ``automation_enabled_at_last_dispatch`` diagnostic must reflect the flag
+    passed to this very dispatch — not a stale value from a previous tick.
+    """
+    inv = _mock_inverter()
+    mod = _module(inv)
+    await mod.dispatch_override(
+        now=NOW, schedule=None,
+        mode_override=StorageMode.FeedIn,
+        automation_enabled=True,
+    )
+    assert mod.automation_enabled_at_last_dispatch is True
+    # The tick-transition field is deliberately left untouched.
     assert mod._last_automation_enabled is None
 
 

@@ -1597,6 +1597,7 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             "battery_status": secondary.get(BatteryStatus),
             "degradation_cost": deg.value_kwh if deg else 0.0,
             "estimated_capacity": self._capacity_estimator.estimated_capacity_kwh,
+            "capacity_observations": self._capacity_estimator.debug_observations(),
             "prices": nordpool.entries if nordpool else [],
             "grid_power_kw": grid_power_kw_signed,
             "battery_power_kw": reading.power_kw if reading else 0.0,
