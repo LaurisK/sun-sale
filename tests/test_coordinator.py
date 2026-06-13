@@ -315,3 +315,61 @@ async def test_dispatch_mode_override_forwards_to_control_module():
     coord.async_request_refresh.assert_not_awaited()
     # ...but must push fresh state to the panel.
     coord.async_update_listeners.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Accounting isolation — a bookkeeping failure must never abort the cycle or
+# block the inverter dispatch (_guarded + best-effort _persist_secondary_outputs)
+# ---------------------------------------------------------------------------
+
+def test_guarded_swallows_exception():
+    """A raising body inside _guarded does not propagate out of the with-block."""
+    coord, _ = _make_coordinator()
+    with coord._guarded("boom"):
+        raise ValueError("simulated corrupt record")
+    # Reaching this line means the exception was contained.
+
+
+def test_guarded_passes_through_success():
+    """_guarded does not interfere with a normally-completing body."""
+    coord, _ = _make_coordinator()
+    ran = []
+    with coord._guarded("ok"):
+        ran.append(1)
+    assert ran == [1]
+
+
+async def test_persist_secondary_outputs_isolates_block_failure():
+    """A failing persistence block is contained; later blocks still run."""
+    from unittest.mock import AsyncMock
+    from custom_components.sun_sale.contract.models import (
+        ForecastAccuracyResult,
+        MonthlyBillResult,
+    )
+
+    coord, _ = _make_coordinator()
+    # Forecast-quality save blows up (e.g. disk error); the monthly-bill save
+    # that follows must still be attempted — each block is guarded on its own.
+    fq_store = MagicMock()
+    fq_store.save = AsyncMock(side_effect=RuntimeError("disk full"))
+    bill_store = MagicMock()
+    bill_store.save = AsyncMock()
+    coord._forecast_quality_store = fq_store
+    coord._monthly_bill_store = bill_store
+
+    acc = MagicMock()
+    bill = MagicMock()
+    secondary = {ForecastAccuracyResult: acc, MonthlyBillResult: bill}
+
+    # Must not raise despite the forecast-quality save failing.
+    await coord._persist_secondary_outputs(primary={}, secondary=secondary, now=BASE)
+
+    fq_store.save.assert_awaited_once()
+    bill_store.save.assert_awaited_once()
+
+
+async def test_dispatch_inverter_mode_noop_without_control_module():
+    """Dispatch is a quiet no-op before the control module is built."""
+    coord, _ = _make_coordinator()
+    coord._control_module = None
+    await coord._dispatch_inverter_mode(primary={}, secondary={}, now=BASE)  # must not raise

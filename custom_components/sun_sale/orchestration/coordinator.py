@@ -10,6 +10,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
@@ -1087,6 +1088,30 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             if after is not existing:
                 await self._consumption_daily_store.save(after)
 
+    @contextmanager
+    def _guarded(self, label: str):
+        """Swallow and log any exception from a best-effort bookkeeping block.
+
+        Isolates a per-cycle accounting / persistence side-effect so a single
+        failure (a corrupt stored record, a try_bake_yesterday edge case) logs
+        and the cycle continues — keeping sensor data fresh and, critically,
+        never blocking the inverter dispatch. The ``with`` body may ``await``;
+        exceptions raised inside it propagate here and are contained.
+
+        Args:
+            label: Human-readable name of the guarded step, used in the log.
+
+        Yields:
+            None; control returns to the ``with`` body.
+        """
+        try:
+            yield
+        except Exception:    # best-effort isolation by design — never re-raised
+            _LOGGER.warning(
+                "sunSale bookkeeping step '%s' failed; continuing", label,
+                exc_info=True,
+            )
+
     async def _async_update_data(self) -> dict:
         """One DAG cycle: translate → capacity update → DAG → event routing."""
         now = datetime.now(timezone.utc)
@@ -1125,26 +1150,31 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 solar_data.entries = buckets.yesterday_solar + solar_data.entries
 
             # Persist today's slice; rotate yesterday at LOCAL date rollover.
-            if nordpool_data is not None and solar_data is not None and self._yesterday_store is not None:
-                _local = self._sun_sale_config.local_tz
-                today_nordpool = [e for e in nordpool_data.entries
-                                   if e.start.astimezone(_local).date().isoformat() == today_str]
-                today_solar = [e for e in solar_data.entries
-                                if e.start.astimezone(_local).date().isoformat() == today_str]
-                new_buckets = _rotate_yesterday_buckets(buckets, today_str, today_nordpool, today_solar)
-                await self._yesterday_store.save(new_buckets)
+            # Best-effort: the pricing/solar primaries above are already
+            # assembled, so a rotation or save failure must not abort the cycle.
+            with self._guarded("yesterday-bucket rotation"):
+                if nordpool_data is not None and solar_data is not None and self._yesterday_store is not None:
+                    _local = self._sun_sale_config.local_tz
+                    today_nordpool = [e for e in nordpool_data.entries
+                                       if e.start.astimezone(_local).date().isoformat() == today_str]
+                    today_solar = [e for e in solar_data.entries
+                                    if e.start.astimezone(_local).date().isoformat() == today_str]
+                    new_buckets = _rotate_yesterday_buckets(buckets, today_str, today_nordpool, today_solar)
+                    await self._yesterday_store.save(new_buckets)
 
             # Rolling sample histories — append each cycle's reading to its
             # store (trimming to the spec's retention) and inject the window
             # as the spec's *History primary. See history_stores.py.
             for spec in SAMPLE_HISTORY_SPECS:
-                await append_and_inject(
-                    spec,
-                    self._history_stores.get(spec.storage_key),
-                    primary,
-                    primary.get(spec.reading_type),
-                    now,
-                )
+                store = self._history_stores.get(spec.storage_key)
+                # Seed the primary with the un-appended window first so that if
+                # the append (a disk write) fails, the DAG still receives this
+                # key and the cycle — including the inverter dispatch — proceeds.
+                primary[spec.history_type] = spec.build_history(store)
+                with self._guarded(f"history append {spec.storage_key}"):
+                    await append_and_inject(
+                        spec, store, primary, primary.get(spec.reading_type), now,
+                    )
 
             # Derived-power cross-stream sample: composes AC port + backup +
             # battery (carries battery_power + grid_net_signed) + PV into one
@@ -1152,20 +1182,21 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             # consumption + losses observers can power-average per slot. The
             # composer returns None when any source is unavailable this cycle —
             # partial samples would bias the per-slot mean asymmetrically.
-            derived_sample = build_derived_power_sample(
-                now=now,
-                ac_port=primary.get(AcPortPowerReading),
-                backup=primary.get(BackupPowerReading),
-                battery=primary.get(BatteryReading),
-                pv=primary.get(PvPowerReading),
+            derived_store = self._history_stores.get(STORAGE_KEY_DERIVED_POWER)
+            primary[DERIVED_POWER_SPEC.history_type] = DERIVED_POWER_SPEC.build_history(
+                derived_store,
             )
-            await append_and_inject(
-                DERIVED_POWER_SPEC,
-                self._history_stores.get(STORAGE_KEY_DERIVED_POWER),
-                primary,
-                derived_sample,
-                now,
-            )
+            with self._guarded("derived-power append"):
+                derived_sample = build_derived_power_sample(
+                    now=now,
+                    ac_port=primary.get(AcPortPowerReading),
+                    backup=primary.get(BackupPowerReading),
+                    battery=primary.get(BatteryReading),
+                    pv=primary.get(PvPowerReading),
+                )
+                await append_and_inject(
+                    DERIVED_POWER_SPEC, derived_store, primary, derived_sample, now,
+                )
 
             # Inverter clock skew tracker — drives the snapshot window shift
             # below so the capture aligns with INVERTER-local midnight when
@@ -1174,33 +1205,36 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             current_inverter_time: InverterTimeReading | None = primary.get(
                 InverterTimeReading,
             )
-            self._inverter_time_history = update_inverter_time_history(
-                self._inverter_time_history, current_inverter_time,
-            )
-            clock_skew = current_skew_seconds(self._inverter_time_history)
+            clock_skew = None
+            with self._guarded("inverter-time tracking"):
+                self._inverter_time_history = update_inverter_time_history(
+                    self._inverter_time_history, current_inverter_time,
+                )
+                clock_skew = current_skew_seconds(self._inverter_time_history)
 
             # Pre-rollover snapshot: capture today_total per side within the
             # late-evening window so the next-day bake-in has an authoritative
             # value when no dedicated yesterday-total sensor is mapped.
-            if self._counter_snapshot_store is not None:
-                current_snapshots = (
-                    self._counter_snapshot_store.value
-                    or CounterSnapshotHistory(records=())
-                )
-                updated_snapshots = maybe_capture_snapshots(
-                    snapshot_history=current_snapshots,
-                    sources=[
-                        (GENERATION_SIDE_ID, primary.get(GenerationReading)),
-                        (GRID_IMPORT_SIDE_ID, primary.get(GridImportTodayReading)),
-                        (GRID_EXPORT_SIDE_ID, primary.get(GridExportTodayReading)),
-                    ],
-                    now=now,
-                    local_tz=self._sun_sale_config.local_tz,
-                    retention_days=COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS,
-                    clock_skew_seconds=clock_skew,
-                )
-                if updated_snapshots is not current_snapshots:
-                    await self._counter_snapshot_store.save(updated_snapshots)
+            with self._guarded("pre-rollover snapshot capture"):
+                if self._counter_snapshot_store is not None:
+                    current_snapshots = (
+                        self._counter_snapshot_store.value
+                        or CounterSnapshotHistory(records=())
+                    )
+                    updated_snapshots = maybe_capture_snapshots(
+                        snapshot_history=current_snapshots,
+                        sources=[
+                            (GENERATION_SIDE_ID, primary.get(GenerationReading)),
+                            (GRID_IMPORT_SIDE_ID, primary.get(GridImportTodayReading)),
+                            (GRID_EXPORT_SIDE_ID, primary.get(GridExportTodayReading)),
+                        ],
+                        now=now,
+                        local_tz=self._sun_sale_config.local_tz,
+                        retention_days=COUNTER_SNAPSHOT_HISTORY_RETENTION_DAYS,
+                        clock_skew_seconds=clock_skew,
+                    )
+                    if updated_snapshots is not current_snapshots:
+                        await self._counter_snapshot_store.save(updated_snapshots)
             # Default to an empty history when the store exists but holds no
             # value yet (fresh install / first cycle). The DAG node consumes
             # these via ``ctx.require`` so an explicit empty fallback is
@@ -1228,29 +1262,29 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             # only trimming runs, so calling every cycle is fine. The primary
             # is populated from the (possibly just-updated) store value so the
             # BaseLoadProfile node sees the latest rolling window.
-            derived_store = self._history_stores.get(STORAGE_KEY_DERIVED_POWER)
-            if (
-                self._consumption_daily_store is not None
-                and derived_store is not None
-                and self._sun_sale_config is not None
-            ):
-                existing_buckets = (
-                    self._consumption_daily_store.value
-                    or ConsumptionDailyBuckets(records=())
-                )
-                derived_for_finalise = primary.get(DerivedPowerHistory)
-                if derived_for_finalise is None:
-                    derived_for_finalise = DerivedPowerHistory(
-                        samples=tuple(derived_store.value or []),
+            with self._guarded("consumption-daily finalise"):
+                if (
+                    self._consumption_daily_store is not None
+                    and derived_store is not None
+                    and self._sun_sale_config is not None
+                ):
+                    existing_buckets = (
+                        self._consumption_daily_store.value
+                        or ConsumptionDailyBuckets(records=())
                     )
-                updated_buckets = try_finalise_yesterday_consumption(
-                    derived_history=derived_for_finalise,
-                    existing=existing_buckets,
-                    local_tz=self._sun_sale_config.local_tz,
-                    now=now,
-                )
-                if updated_buckets is not existing_buckets:
-                    await self._consumption_daily_store.save(updated_buckets)
+                    derived_for_finalise = primary.get(DerivedPowerHistory)
+                    if derived_for_finalise is None:
+                        derived_for_finalise = DerivedPowerHistory(
+                            samples=tuple(derived_store.value or []),
+                        )
+                    updated_buckets = try_finalise_yesterday_consumption(
+                        derived_history=derived_for_finalise,
+                        existing=existing_buckets,
+                        local_tz=self._sun_sale_config.local_tz,
+                        now=now,
+                    )
+                    if updated_buckets is not existing_buckets:
+                        await self._consumption_daily_store.save(updated_buckets)
             primary[ConsumptionDailyBuckets] = (
                 self._consumption_daily_store.value
                 if self._consumption_daily_store is not None
@@ -1266,14 +1300,15 @@ class SunSaleCoordinator(DataUpdateCoordinator):
             primary[SunTimes] = self._read_sun_times(now)
 
             current_reading: BatteryReading | None = primary.get(BatteryReading)
-            if current_reading is not None:
-                obs = self._build_capacity_observation(current_reading, now)
-                if obs is not None:
-                    self._capacity_estimator.add_observation(obs)
-                    if self._capacity_store is not None:
-                        await self._capacity_store.save(self._capacity_estimator)
-                self._last_battery_reading = current_reading
-                self._last_battery_reading_at = now
+            with self._guarded("capacity observation"):
+                if current_reading is not None:
+                    obs = self._build_capacity_observation(current_reading, now)
+                    if obs is not None:
+                        self._capacity_estimator.add_observation(obs)
+                        if self._capacity_store is not None:
+                            await self._capacity_store.save(self._capacity_estimator)
+                    self._last_battery_reading = current_reading
+                    self._last_battery_reading_at = now
 
             primary[EstimatedCapacity] = EstimatedCapacity(
                 value_kwh=self._capacity_estimator.estimated_capacity_kwh
@@ -1312,10 +1347,96 @@ class SunSaleCoordinator(DataUpdateCoordinator):
 
             secondary = await self._engine.run(primary, self._sun_sale_config, now)
 
-            # Bake-in: idempotent per (date, side). Runs once the post-DAG
-            # PriceSeries is available; updates take effect downstream on the
-            # next coordinator cycle. No-op when no source can be resolved
-            # before the hard cutoff.
+            # --- Inverter actuation, ahead of the persistence bookkeeping.
+            #     A dispatch failure is logged but never blanks the sensor set,
+            #     and the accounting below can never block the inverter write
+            #     (it ran already). The verify loop recovers a failed write. ---
+            try:
+                await self._dispatch_inverter_mode(primary, secondary, now)
+            except Exception:    # keep sensors available; verify loop recovers
+                _LOGGER.error("sunSale inverter dispatch failed", exc_info=True)
+
+            # --- Persistence bookkeeping: best-effort, never fatal to the cycle
+            #     nor to the dispatch above. ---
+            await self._persist_secondary_outputs(primary, secondary, now)
+
+            return self._build_sensor_dict(primary, secondary)
+
+        except Exception as exc:
+            raise UpdateFailed(f"Error updating sunSale data: {exc}") from exc
+
+    async def _dispatch_inverter_mode(
+        self, primary: dict, secondary: dict, now: datetime,
+    ) -> None:
+        """Run the control-module tick and surface its dispatch/verify state.
+
+        Pulled out of ``_async_update_data`` and run *before* the persistence
+        bookkeeping so an accounting failure can never block the inverter
+        write. The caller guards this call, so a dispatch failure is logged
+        without blanking the sensor set. Mutates ``primary[InverterModeHistory]``
+        in place with the updated history.
+
+        Args:
+            primary: The cycle's primary-input dict; supplies the current
+                ``InverterModeReading`` and receives the updated mode history.
+            secondary: DAG outputs; supplies the current ``Schedule``.
+            now: Current cycle timestamp.
+        """
+        reading: InverterModeReading | None = primary.get(InverterModeReading)
+        if (
+            self._control_module is None
+            or reading is None
+            or self._mode_history_store is None
+        ):
+            return
+
+        schedule: Schedule | None = secondary.get(Schedule)
+        history_before = (
+            self._mode_history_store.value or InverterModeHistory(samples=())
+        )
+        updated_history = await self._control_module.tick(
+            now=now,
+            schedule=schedule,
+            reading=reading,
+            history=history_before,
+            automation_enabled=self.automation_enabled,
+            mode_override=self.mode_override,
+        )
+        if updated_history.samples != history_before.samples:
+            await self._mode_history_store.save(updated_history)
+        target = self._control_module.current_target(
+            now, schedule, mode_override=self.mode_override,
+        )
+        # Surface module-level dispatch + verify state for the diagnostic
+        # sensor — set every cycle regardless of write success so a stale
+        # value never masks the current state.
+        self._mirror_control_module_state()
+        if self.automation_enabled and target is not None:
+            self.last_dispatched_action = target.value
+            self.last_dispatched_at = now
+        primary[InverterModeHistory] = updated_history
+
+    async def _persist_secondary_outputs(
+        self, primary: dict, secondary: dict, now: datetime,
+    ) -> None:
+        """Persist DAG-derived bookkeeping: bake-ins and forecast/bill/price history.
+
+        Best-effort and order-independent. Each block is guarded on its own so
+        a single failure (a corrupt record, a ``try_bake_yesterday`` edge case)
+        logs and is swallowed rather than aborting the cycle. Runs *after* the
+        inverter dispatch, so a failure here can never block the inverter write.
+
+        Args:
+            primary: The cycle's primary-input dict (observed power histories,
+                snapshot/baked stores).
+            secondary: DAG outputs (``PriceSeries``, accuracy/bill results).
+            now: Current cycle timestamp.
+        """
+        # Bake-in: idempotent per (date, side). Runs once the post-DAG
+        # PriceSeries is available; updates take effect downstream on the
+        # next coordinator cycle. No-op when no source can be resolved
+        # before the hard cutoff.
+        with self._guarded("observed bake-in"):
             pricing_for_bake: PriceSeries | None = secondary.get(PriceSeries)
             if (
                 pricing_for_bake is not None
@@ -1370,14 +1491,17 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                 if baked_after is not baked_before:
                     await self._baked_observed_store.save(baked_after)
 
+        with self._guarded("forecast-quality save"):
             acc_result: ForecastAccuracyResult | None = secondary.get(ForecastAccuracyResult)
             if acc_result is not None and self._forecast_quality_store is not None:
                 await self._forecast_quality_store.save(acc_result.quality)
 
+        with self._guarded("monthly-bill save"):
             bill_result: MonthlyBillResult | None = secondary.get(MonthlyBillResult)
             if bill_result is not None and self._monthly_bill_store is not None:
                 await self._monthly_bill_store.save(bill_result.updated_state)
 
+        with self._guarded("price-history save"):
             pricing_result: PriceSeries | None = secondary.get(PriceSeries)
             if pricing_result is not None and self._price_history_store is not None:
                 today_utc = now.date()
@@ -1396,43 +1520,6 @@ class SunSaleCoordinator(DataUpdateCoordinator):
                     cutoff_day = today_utc - timedelta(days=PRICE_HISTORY_RETENTION_DAYS)
                     peaks = [p for p in peaks if p.day >= cutoff_day]
                     await self._price_history_store.save(peaks)
-
-            reading: InverterModeReading | None = primary.get(InverterModeReading)
-            if (
-                self._control_module is not None
-                and reading is not None
-                and self._mode_history_store is not None
-            ):
-                schedule: Schedule | None = secondary.get(Schedule)
-                history_before = (
-                    self._mode_history_store.value or InverterModeHistory(samples=())
-                )
-                updated_history = await self._control_module.tick(
-                    now=now,
-                    schedule=schedule,
-                    reading=reading,
-                    history=history_before,
-                    automation_enabled=self.automation_enabled,
-                    mode_override=self.mode_override,
-                )
-                if updated_history.samples != history_before.samples:
-                    await self._mode_history_store.save(updated_history)
-                target = self._control_module.current_target(
-                    now, schedule, mode_override=self.mode_override,
-                )
-                # Surface module-level dispatch + verify state for the
-                # diagnostic sensor — set every cycle regardless of write
-                # success so a stale value never masks the current state.
-                self._mirror_control_module_state()
-                if self.automation_enabled and target is not None:
-                    self.last_dispatched_action = target.value
-                    self.last_dispatched_at = now
-                primary[InverterModeHistory] = updated_history
-
-            return self._build_sensor_dict(primary, secondary)
-
-        except Exception as exc:
-            raise UpdateFailed(f"Error updating sunSale data: {exc}") from exc
 
     def _resolve_local_tz(self):
         """Return the HA-configured local timezone, falling back to UTC.
