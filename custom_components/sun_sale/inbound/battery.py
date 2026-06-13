@@ -93,8 +93,16 @@ class BatteryTranslator:
 
     async def translate(
         self, hass: Any, config: SunSaleConfig, raw_config: dict, now: datetime
-    ) -> BatteryReading:
+    ) -> BatteryReading | None:
         """Read inverter telemetry and household load; produce a BatteryReading.
+
+        Returns ``None`` when SoC is genuinely unavailable (a solis_modbus
+        outage, an unmapped sensor). SoC is the one telemetry with no safe
+        fabricated default — guessing it would let the scheduler plan, and the
+        dispatcher act, against a fictional battery. Dropping the whole reading
+        instead omits ``BatteryReading`` from the primary inputs, so the
+        ``BatteryState`` / ``BatteryStatus`` nodes skip and the pipeline
+        degrades to ``no_target`` rather than dispatching on invented state.
 
         Args:
             hass: Home Assistant instance.
@@ -103,9 +111,12 @@ class BatteryTranslator:
             now: Cycle timestamp (unused here).
 
         Returns:
-            BatteryReading with current SoC, power flows, and household load.
+            BatteryReading with current SoC, power flows, and household load,
+            or ``None`` when the SoC sensor is unavailable.
         """
         soc = self._inverter.get_battery_soc()
+        if soc is None:
+            return None
         power_kw = self._inverter.get_battery_power()
         grid_kw = self._inverter.get_grid_power()
         load_kw = _read_household_load(hass, self._load_entity)

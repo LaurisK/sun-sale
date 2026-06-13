@@ -95,3 +95,61 @@ def test_battery_status_node_produces_status_from_primary():
     assert status.remaining_capacity_kwh == 4.2
     assert status.max_charge_power_kw == 5.0
     assert status.max_discharge_power_kw == 5.0
+
+
+# ---------------------------------------------------------------------------
+# BatteryTranslator: degrade to None when SoC is unavailable
+# ---------------------------------------------------------------------------
+
+class _StubInverter:
+    """Minimal InverterController stand-in returning canned telemetry."""
+
+    def __init__(self, soc):
+        self._soc = soc
+
+    def get_battery_soc(self):
+        return self._soc
+
+    def get_battery_power(self):
+        return 1.5
+
+    def get_grid_power(self):
+        return -0.3
+
+
+class _StubHass:
+    """Hass stub whose states.get always reports the load sensor missing."""
+
+    class _States:
+        def get(self, _entity_id):
+            return None
+
+    def __init__(self):
+        self.states = self._States()
+
+
+def test_translator_returns_none_when_soc_unavailable():
+    import asyncio
+    from datetime import datetime, timezone
+
+    from custom_components.sun_sale.inbound.battery import BatteryTranslator
+
+    translator = BatteryTranslator(_StubInverter(soc=None), household_load_entity="")
+    now = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+    result = asyncio.run(translator.translate(_StubHass(), None, {}, now))
+    assert result is None
+
+
+def test_translator_produces_reading_when_soc_present():
+    import asyncio
+    from datetime import datetime, timezone
+
+    from custom_components.sun_sale.inbound.battery import BatteryTranslator
+
+    translator = BatteryTranslator(_StubInverter(soc=0.42), household_load_entity="")
+    now = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+    result = asyncio.run(translator.translate(_StubHass(), None, {}, now))
+    assert isinstance(result, BatteryReading)
+    assert result.soc == 0.42
+    assert result.power_kw == 1.5
+    assert result.grid_power_kw == -0.3

@@ -170,9 +170,21 @@ class InverterController:
     # State reads — telemetry (any platform)                              #
     # ------------------------------------------------------------------ #
 
-    def get_battery_soc(self) -> float:
-        """Return battery SoC as 0.0–1.0. Falls back to 0.5 when unavailable."""
-        return self._read_float("battery_soc", fallback=0.5, normalize_pct=True)
+    def get_battery_soc(self) -> float | None:
+        """Return battery SoC as 0.0–1.0, or ``None`` when the sensor is unavailable.
+
+        Unlike battery / grid power — where 0.0 is a benign degraded reading —
+        SoC has no safe fabricated default: a guessed value would feed the
+        scheduler a fictional battery state and, with automation on, dispatch
+        against it. Returning ``None`` lets ``BatteryTranslator`` drop the whole
+        ``BatteryReading`` so the pipeline degrades to ``no_target`` rather than
+        planning on invented telemetry.
+
+        Returns:
+            SoC as a 0.0–1.0 fraction, or ``None`` when the SoC sensor is
+            absent, unavailable, or unparseable.
+        """
+        return self._read_optional_float("battery_soc", normalize_pct=True)
 
     def get_battery_power(self) -> float:
         """Return battery power in kW (positive = charging). 0.0 when unavailable."""
@@ -532,22 +544,6 @@ class InverterController:
             blocking=True,
         )
 
-    def _read_float(
-        self, key: str, fallback: float, normalize_pct: bool = False
-    ) -> float:
-        """Read a numeric HA sensor state; return fallback on any failure.
-
-        Args:
-            key: Entity-ID map key (e.g. "battery_soc").
-            fallback: Value returned when the entity is absent or unparseable.
-            normalize_pct: When True, divide values > 1.0 by 100 (% → fraction).
-
-        Returns:
-            Float sensor value, or fallback.
-        """
-        value = self._read_optional_float(key, normalize_pct=normalize_pct)
-        return value if value is not None else fallback
-
     def _read_optional_float(
         self, key: str, normalize_pct: bool = False
     ) -> float | None:
@@ -555,7 +551,10 @@ class InverterController:
 
         Args:
             key: Entity-ID map key.
-            normalize_pct: When True, divide values > 1.0 by 100.
+            normalize_pct: When True, coerce a percentage reading to a 0.0–1.0
+                fraction. A sensor carrying a ``%`` unit is divided by 100
+                unconditionally; a unit-less sensor falls back to the magnitude
+                heuristic (divide only when the value exceeds 1.0).
 
         Returns:
             Parsed float, or ``None``.
@@ -570,8 +569,16 @@ class InverterController:
             value = float(state.state)
         except (TypeError, ValueError):
             return None
-        if normalize_pct and value > 1.0:
-            return value / 100.0
+        if normalize_pct:
+            # A "%" sensor is always 0–100, so divide unconditionally: this is
+            # the only way to read an exact 1 % correctly — the magnitude
+            # heuristic below would mistake it for the fraction 1.0 = 100 %.
+            # Unit-less SoC sensors keep the heuristic: a value above 1.0 must
+            # be a percentage, anything ≤ 1.0 is taken as an already-normalised
+            # fraction (genuinely ambiguous at exactly 1.0 without a unit).
+            unit = str(state.attributes.get("unit_of_measurement") or "").strip()
+            if unit == "%" or value > 1.0:
+                return value / 100.0
         return value
 
     def _read_power_kw(self, key: str, fallback: float) -> float:

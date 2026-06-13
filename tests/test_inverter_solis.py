@@ -475,9 +475,31 @@ def test_get_battery_soc_passes_through_fraction():
     assert controller.get_battery_soc() == pytest.approx(0.62)
 
 
-def test_get_battery_soc_fallback_when_unavailable():
+def test_get_battery_soc_percent_unit_divides_exact_one_percent():
+    # A "%" sensor reading exactly 1 is 1 %, not the fraction 1.0 = 100 %.
+    # The unit pins it down where the magnitude heuristic alone could not.
+    state_map = {SOLIS_ENTITY_IDS["battery_soc"]: _State("1", "%")}
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_battery_soc() == pytest.approx(0.01)
+
+
+def test_get_battery_soc_percent_unit_divides_full_charge():
+    state_map = {SOLIS_ENTITY_IDS["battery_soc"]: _State("100", "%")}
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_battery_soc() == pytest.approx(1.0)
+
+
+def test_get_battery_soc_none_when_unavailable():
+    # No fabricated 0.5 fallback: SoC has no safe default, so an absent sensor
+    # yields None (which drops the whole BatteryReading downstream).
     controller, _ = make_controller()
-    assert controller.get_battery_soc() == 0.5
+    assert controller.get_battery_soc() is None
+
+
+def test_get_battery_soc_none_when_state_unavailable():
+    state_map = {SOLIS_ENTITY_IDS["battery_soc"]: _State("unavailable")}
+    controller, _ = make_controller(state_map=state_map)
+    assert controller.get_battery_soc() is None
 
 
 # ---------------------------------------------------------------------------
