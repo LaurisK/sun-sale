@@ -2,12 +2,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 from textual.app import ComposeResult
 from textual.widgets import Collapsible, Static
 
 from .snapshot import Snapshot
+
+
+def _resolve_local_tz(tz_name: str | None) -> tzinfo:
+    """Return the tzinfo for an IANA name, falling back to UTC.
+
+    Args:
+        tz_name: IANA timezone name from the debug payload's config block
+            (e.g. "Europe/Riga"); may be empty/None on older payloads.
+
+    Returns:
+        tzinfo for the name, or UTC when unset or unparseable.
+    """
+    if not tz_name:
+        return timezone.utc
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:    # ZoneInfoNotFoundError + anything unexpected
+        return timezone.utc
 
 
 @dataclass
@@ -54,18 +73,20 @@ def check_profitability(snap: Snapshot) -> ProfitabilityCheckResult:
         result.mismatches.append("score_out_of_range")
         result.overall_ok = False
 
-    # Cross-check: today's peak should equal max spot across today's pricing slots.
+    # Cross-check: today's peak should equal max spot across today's pricing
+    # slots, bucketed by *local* date to match the coordinator/profitability
+    # scorer (both key on local midnight, not UTC).
     pricing = snap.pipeline.get("pricing")
     if pricing and result.today_peak_eur_kwh > 0:
-        now_utc = datetime.now(timezone.utc)
-        today_utc = now_utc.date()
+        local_tz = _resolve_local_tz(snap.config.get("time_zone"))
+        today_local = datetime.now(timezone.utc).astimezone(local_tz).date()
         today_spots = []
         for s in pricing.get("slots") or []:
             try:
-                slot_date = datetime.fromisoformat(s["start"]).astimezone(timezone.utc).date()
+                slot_date = datetime.fromisoformat(s["start"]).astimezone(local_tz).date()
             except (KeyError, ValueError):
                 continue
-            if slot_date == today_utc:
+            if slot_date == today_local:
                 today_spots.append(s.get("spot", 0.0))
         if today_spots:
             expected_peak = max(today_spots)

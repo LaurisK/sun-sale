@@ -99,6 +99,10 @@ def _coordinator_to_dict(entry_id: str, coordinator: Any) -> dict:
             else None
         ),
         "config": {
+            # Local timezone (IANA name) used for all day-bucketing. Lets the
+            # integration check mirror the coordinator's local-date logic for
+            # the profitability peak cross-check.
+            "time_zone": str(getattr(coordinator._sun_sale_config, "local_tz", timezone.utc)),  # noqa: SLF001
             "nordpool_entity": cfg.get(CONF_NORDPOOL_ENTITY, ""),
             "solar_forecast_entity": cfg.get(CONF_SOLAR_FORECAST_ENTITY, ""),
             "solar_forecast_entity_2": cfg.get(CONF_SOLAR_FORECAST_ENTITY_2, ""),

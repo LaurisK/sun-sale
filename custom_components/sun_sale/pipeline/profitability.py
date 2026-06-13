@@ -16,7 +16,7 @@ depending on it.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 from statistics import median
 from typing import Callable, Iterable
 
@@ -53,6 +53,10 @@ def classify_day(
     """
     if d.weekday() >= 5:                       # 5 = Sat, 6 = Sun
         return DayClass.WEEKEND
+    # `is_holiday` is an intentional, currently-unwired plug point: no caller
+    # supplies a predicate today, so the HOLIDAY class is never produced in
+    # production. Wire the `holidays` package here (and at the ProfitabilityNode
+    # / coordinator call sites) to activate it without touching this module.
     if is_holiday is not None and is_holiday(d):
         return DayClass.HOLIDAY
     return DayClass.WEEKDAY
@@ -138,20 +142,29 @@ def percentile_rank(value: float, distribution: list[float]) -> float:
 def today_peak_from_price_series(
     price_series: PriceSeries,
     today: date,
+    local_tz: tzinfo = timezone.utc,
 ) -> float | None:
-    """Extract the highest Nordpool spot price for the given date.
+    """Extract the highest Nordpool spot price for the given local date.
 
     Uses spot (not buy/sell) because the market signal is what we score —
     user-specific tariff fees shouldn't influence the relative ranking.
 
     Args:
-        price_series: PriceSeries containing today's slots.
+        price_series: PriceSeries containing today's slots. Slot starts are
+            stored in UTC, so they are projected into `local_tz` before the
+            date comparison.
         today: Local date to filter by.
+        local_tz: Timezone used to map each slot's UTC start to a local date,
+            so the day boundary is the operator's local midnight rather than
+            UTC midnight. Defaults to UTC.
 
     Returns:
         Maximum spot_eur_kwh for the date, or None if no slots fall on it.
     """
-    today_slots = [s for s in price_series.slots if s.start.date() == today]
+    today_slots = [
+        s for s in price_series.slots
+        if s.start.astimezone(local_tz).date() == today
+    ]
     if not today_slots:
         return None
     return max(s.spot_eur_kwh for s in today_slots)
@@ -163,6 +176,7 @@ def compute_profitability_score(
     now: datetime | None = None,
     is_holiday: Callable[[date], bool] | None = None,
     rank_window_days: int = DEFAULT_RANK_WINDOW_DAYS,
+    local_tz: tzinfo = timezone.utc,
 ) -> ProfitabilityScore:
     """Score today's day-class-normalised peak against the rolling history window.
 
@@ -172,6 +186,9 @@ def compute_profitability_score(
         now: Cycle timestamp; defaults to UTC now.
         is_holiday: Optional predicate for holiday classification.
         rank_window_days: How many recent history days to rank against.
+        local_tz: Timezone used to resolve "today" and to bucket price slots
+            by local date, matching how DailyPeak history is keyed. Defaults
+            to UTC.
 
     Returns:
         ProfitabilityScore with a 0–1 percentile score (None when history is sparse).
@@ -179,9 +196,12 @@ def compute_profitability_score(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    today = now.date()
+    # "Today" is the operator's local date — history peaks are keyed the same
+    # way, so day-class and window-exclusion stay consistent. Using now.date()
+    # (UTC) would misclassify the first UTC-offset hours of each local day.
+    today = now.astimezone(local_tz).date()
     today_class = classify_day(today, is_holiday)
-    today_peak = today_peak_from_price_series(price_series, today) or 0.0
+    today_peak = today_peak_from_price_series(price_series, today, local_tz) or 0.0
 
     medians = compute_class_medians(history.peaks)
     raw_values = [p.peak_eur_kwh for p in history.peaks]
@@ -222,6 +242,7 @@ def daily_peak_from_entries(
     day: date,
     entries: Iterable,
     is_holiday: Callable[[date], bool] | None = None,
+    local_tz: tzinfo = timezone.utc,
 ) -> DailyPeak | None:
     """Build a DailyPeak snapshot for a given day from PriceEntry-like objects.
 
@@ -229,14 +250,20 @@ def daily_peak_from_entries(
     Each entry must expose `.start` (datetime) and `.price_eur_kwh` attributes.
 
     Args:
-        day: The date to summarise.
-        entries: Iterable of price entries (PriceEntry or compatible).
+        day: The local date to summarise.
+        entries: Iterable of price entries (PriceEntry or compatible). Starts
+            are stored in UTC and projected into `local_tz` before matching.
         is_holiday: Optional holiday predicate for day classification.
+        local_tz: Timezone used to map each entry's UTC start to a local date.
+            Defaults to UTC.
 
     Returns:
         DailyPeak with the maximum spot price, or None if no entries fall on day.
     """
-    matching = [e.price_eur_kwh for e in entries if e.start.date() == day]
+    matching = [
+        e.price_eur_kwh for e in entries
+        if e.start.astimezone(local_tz).date() == day
+    ]
     if not matching:
         return None
     return DailyPeak(

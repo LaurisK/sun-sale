@@ -207,9 +207,13 @@ class ProfitabilityNode(DagNode):
         """Compute profitability score using today's peak from PriceSeries and rolling history."""
         price_series = ctx.require(PriceSeries)
         history = ctx.require(PriceHistory)
+        # `is_holiday` is intentionally left unwired (see classify_day) — pass
+        # local_tz so "today" and the slot day-buckets use local midnight,
+        # matching how the coordinator keys DailyPeak history.
         score = profitability_module.compute_profitability_score(
             price_series=price_series,
             history=history,
             now=ctx.now,
+            local_tz=ctx.config.local_tz,
         )
         return score

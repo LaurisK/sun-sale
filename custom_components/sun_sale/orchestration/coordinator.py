@@ -1516,20 +1516,26 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         with self._guarded("price-history save"):
             pricing_result: PriceSeries | None = secondary.get(PriceSeries)
             if pricing_result is not None and self._price_history_store is not None:
-                today_utc = now.date()
+                # Key by local date, not now.date() (UTC). The profitability
+                # scorer resolves "today" in local time, so the history it
+                # ranks against must be keyed the same way — otherwise the
+                # first UTC-offset hours of each local day land in the wrong
+                # bucket and skew day-class classification.
+                local_tz = self._sun_sale_config.local_tz
+                today_local = now.astimezone(local_tz).date()
                 today_peak_val = profitability_module.today_peak_from_price_series(
-                    pricing_result, today_utc
+                    pricing_result, today_local, local_tz
                 )
                 if today_peak_val is not None:
                     new_peak = DailyPeak(
-                        day=today_utc,
+                        day=today_local,
                         peak_eur_kwh=today_peak_val,
-                        day_class=profitability_module.classify_day(today_utc),
+                        day_class=profitability_module.classify_day(today_local),
                     )
-                    peaks = [p for p in (self._price_history_store.value or []) if p.day != today_utc]
+                    peaks = [p for p in (self._price_history_store.value or []) if p.day != today_local]
                     peaks.append(new_peak)
                     peaks.sort(key=lambda p: p.day)
-                    cutoff_day = today_utc - timedelta(days=PRICE_HISTORY_RETENTION_DAYS)
+                    cutoff_day = today_local - timedelta(days=PRICE_HISTORY_RETENTION_DAYS)
                     peaks = [p for p in peaks if p.day >= cutoff_day]
                     await self._price_history_store.save(peaks)
 

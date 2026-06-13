@@ -1,5 +1,6 @@
 """Tests for pipeline/profitability.py — pure Python, no HA mocking needed."""
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -141,6 +142,33 @@ def test_today_peak_returns_none_when_no_slots_today():
     other = date(2024, 1, 20)
     series = _price_series_for_day(other, peak_at_hour=18, peak_value=0.35)
     assert today_peak_from_price_series(series, today) is None
+
+
+def test_today_peak_buckets_slots_by_local_date():
+    """A peak in the local early-morning (UTC previous day) counts as today.
+
+    Slot starts are stored in UTC. Europe/Riga is UTC+2 in January, so the
+    local-Saturday window 00:00–23:59 spans UTC Fri 22:00 → Sat 21:59. A peak
+    at local 01:00 Sat (UTC Fri 23:00) must be picked up when filtering for
+    the local Saturday — UTC bucketing would drop it into Friday.
+    """
+    riga = ZoneInfo("Europe/Riga")
+    saturday = date(2024, 1, 13)
+    # UTC start of local Saturday 00:00 in Riga (UTC+2) is Fri 22:00.
+    base_utc = datetime(2024, 1, 12, 22, 0, tzinfo=timezone.utc)
+    entries = [
+        PriceEntry(
+            start=base_utc + timedelta(hours=h),
+            end=base_utc + timedelta(hours=h + 1),
+            price_eur_kwh=0.50 if h == 1 else 0.05,   # peak at local 01:00 Sat
+        )
+        for h in range(24)
+    ]
+    series = build_price_series(entries, default_tariff_config())
+    assert today_peak_from_price_series(series, saturday, riga) == pytest.approx(0.50)
+    # Default UTC bucketing assigns the peak slot to Friday → excluded, so the
+    # UTC-Saturday max is only the 0.05 baseline. Demonstrates the old bug path.
+    assert today_peak_from_price_series(series, saturday) == pytest.approx(0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +328,25 @@ def test_score_rank_window_limits_to_recent_days():
     result = compute_profitability_score(series, history, now=now, rank_window_days=30)
     # Today equals recent baseline → 0.5; if old days leaked in, score → 1.0.
     assert result.score == 0.5
+
+
+def test_score_resolves_today_in_local_time():
+    """'Today' is the operator's local date, not the UTC date of `now`.
+
+    At 01:00 local Saturday (Riga, UTC+2) the UTC instant is still Friday
+    23:00. With local_tz the day-class is WEEKEND; UTC logic says WEEKDAY.
+    """
+    riga = ZoneInfo("Europe/Riga")
+    now = datetime(2024, 1, 12, 23, 0, tzinfo=timezone.utc)  # == local Sat 01:00
+    history = _build_30d_weekday_only_history(date(2024, 1, 13))
+    series = _price_series_for_day(date(2024, 1, 13), peak_at_hour=12, peak_value=0.20)
+
+    local_result = compute_profitability_score(series, history, now=now, local_tz=riga)
+    assert local_result.today_class == DayClass.WEEKEND
+
+    # Without local_tz the scorer falls back to the UTC date → Friday.
+    utc_result = compute_profitability_score(series, history, now=now)
+    assert utc_result.today_class == DayClass.WEEKDAY
 
 
 # ---------------------------------------------------------------------------
