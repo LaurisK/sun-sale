@@ -159,7 +159,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        # Cancel the scheduled refresh and the control module's pending
+        # verify-tick — otherwise a verify callback scheduled before unload
+        # fires afterwards and issues real Modbus writes from a torn-down entry.
+        await coordinator.async_shutdown()
         if not hass.data[DOMAIN]:
             _async_teardown_shared(hass)
     return unload_ok

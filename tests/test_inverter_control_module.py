@@ -499,6 +499,40 @@ async def test_commanded_change_force_writes_and_schedules_verify(call_later):
 
 
 @pytest.mark.asyncio
+async def test_shutdown_cancels_pending_verify_and_drops_callback(call_later):
+    """Shutdown must cancel the scheduled verify so no callback fires post-unload."""
+    inv = _mock_inverter()
+    on_change = MagicMock()
+    mod = InverterControlModule(
+        inverter=inv,
+        battery_config=default_battery_config(),
+        local_tz=timezone.utc,
+        export_limit_w=10_000,
+        inverter_max_power_w=10_000,
+        hass=MagicMock(),
+        on_state_change=on_change,
+    )
+    # Command a change so a verify-tick is scheduled (i.e. _verify_cancel set).
+    await mod.tick(
+        now=NOW, schedule=_schedule_with(StorageMode.Discharge),
+        reading=_reading(StorageMode.SelfUse, reg=1),
+        history=InverterModeHistory(samples=()),
+        automation_enabled=True,
+    )
+    assert len(call_later.calls) == 1
+    assert call_later.cancels == 0
+
+    mod.shutdown()
+
+    assert call_later.cancels == 1  # pending verify cancelled
+    assert mod._verify_cancel is None
+    assert mod._on_state_change is None  # no push into a torn-down coordinator
+    # Idempotent — a second shutdown is a no-op, not a crash.
+    mod.shutdown()
+    assert call_later.cancels == 1
+
+
+@pytest.mark.asyncio
 async def test_unchanged_command_holds_without_rewriting(call_later):
     """Holding the same target re-asserts nothing — the mode is set once."""
     inv = _mock_inverter()

@@ -97,6 +97,7 @@ async def test_async_setup_entry_skips_duplicate_debug_view():
 
 async def test_async_unload_entry_removes_coordinator_on_success():
     coord = MagicMock()
+    coord.async_shutdown = AsyncMock()
     hass = make_hass(domain_data={"test_entry": coord})
     entry = make_entry()
 
@@ -104,10 +105,14 @@ async def test_async_unload_entry_removes_coordinator_on_success():
 
     assert result is True
     assert "test_entry" not in hass.data[DOMAIN]
+    # Verify timer + scheduled refresh must be cancelled so no callback
+    # fires against torn-down state after unload.
+    coord.async_shutdown.assert_awaited_once()
 
 
 async def test_async_unload_entry_keeps_coordinator_on_failure():
     coord = MagicMock()
+    coord.async_shutdown = AsyncMock()
     hass = make_hass(domain_data={"test_entry": coord})
     hass.config_entries.async_unload_platforms = AsyncMock(return_value=False)
     entry = make_entry()
@@ -116,3 +121,6 @@ async def test_async_unload_entry_keeps_coordinator_on_failure():
 
     assert result is False
     assert "test_entry" in hass.data[DOMAIN]
+    # A failed platform unload leaves the coordinator live; it must not be
+    # shut down.
+    coord.async_shutdown.assert_not_awaited()

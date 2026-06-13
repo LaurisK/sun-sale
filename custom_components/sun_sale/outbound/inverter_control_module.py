@@ -52,7 +52,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 
 from ..contract.const import (
@@ -190,6 +190,30 @@ class InverterControlModule:
         # across each path's full plan→act→verify-arm body makes the last write
         # win and keeps the commanded mode and its verify in lockstep.
         self._dispatch_lock = asyncio.Lock()
+
+    @callback
+    def shutdown(self) -> None:
+        """Tear down the module so no callbacks survive a config-entry unload.
+
+        Cancels any pending ``async_call_later`` verify-tick and drops the
+        ``on_state_change`` callback. Without this, a verify-tick scheduled
+        before unload would still fire afterwards and its retry path would
+        issue real switch/number service calls against the (still-valid)
+        solis_modbus entities — ghost Modbus writes from a torn-down entry —
+        while ``_notify_state_change`` would push into a coordinator that has
+        already been removed from ``hass.data``. Idempotent: safe to call
+        more than once.
+        """
+        if self._verify_cancel is not None:
+            try:
+                self._verify_cancel()
+            except Exception:  # noqa: BLE001 — cancel must never raise
+                _LOGGER.debug(
+                    "inverter_control: shutdown verify-cancel raised — ignoring",
+                    exc_info=True,
+                )
+            self._verify_cancel = None
+        self._on_state_change = None
 
     async def tick(
         self,

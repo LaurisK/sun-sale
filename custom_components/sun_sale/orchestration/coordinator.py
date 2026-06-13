@@ -843,6 +843,18 @@ class SunSaleCoordinator(DataUpdateCoordinator):
         self._mirror_control_module_state()
         self.async_update_listeners()
 
+    async def async_shutdown(self) -> None:
+        """Tear down the coordinator and its control module on entry unload.
+
+        Extends ``DataUpdateCoordinator.async_shutdown`` (which cancels the
+        scheduled refresh) by also shutting down the control module, so its
+        pending verify-tick cannot fire after unload and issue ghost Modbus
+        writes against the still-valid solis_modbus entities.
+        """
+        if self._control_module is not None:
+            self._control_module.shutdown()
+        await super().async_shutdown()
+
     @property
     def tariff_config(self) -> TariffConfig | None:
         """Return the configured TariffConfig, or None before async_setup completes."""
