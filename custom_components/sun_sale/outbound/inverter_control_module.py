@@ -47,6 +47,7 @@ it back through a ``PersistentStore``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -179,6 +180,16 @@ class InverterControlModule:
         # (the inverter may have drifted while automation was paused).
         self._consecutive_drift_cycles: int = 0
         self._reassert_next: bool = False
+        # Serializes every path that issues register writes or mutates the
+        # commanded/verify state: ``_apply_dispatch`` (tick + dispatch_override)
+        # and the verify-tick retry. Each ``apply_mode`` spans multiple Modbus
+        # awaits, so without this a new command landing mid-flight could
+        # interleave with — and be overwritten by — a stale verify retry (the
+        # retry captured the old commanded mode and would re-write it *after*
+        # the new one, then cancel the new command's verify). Holding the lock
+        # across each path's full plan→act→verify-arm body makes the last write
+        # win and keeps the commanded mode and its verify in lockstep.
+        self._dispatch_lock = asyncio.Lock()
 
     async def tick(
         self,
@@ -286,19 +297,20 @@ class InverterControlModule:
                 ``mode_override`` is set.
             mode_override: Operator override, or ``None`` for the scheduler.
         """
-        self._last_dispatch_at = now
-        if not automation_enabled and mode_override is None:
-            self._last_dispatch_outcome = "automation_disabled"
-            self._last_dispatch_target = None
-            self._register_status = self._build_register_status()
-            return
+        async with self._dispatch_lock:
+            self._last_dispatch_at = now
+            if not automation_enabled and mode_override is None:
+                self._last_dispatch_outcome = "automation_disabled"
+                self._last_dispatch_target = None
+                self._register_status = self._build_register_status()
+                return
 
-        outcome, target = await self._dispatch_current_slot(
-            now, schedule, mode_override
-        )
-        self._last_dispatch_outcome = outcome
-        self._last_dispatch_target = target
-        self._register_status = self._build_register_status()
+            outcome, target = await self._dispatch_current_slot(
+                now, schedule, mode_override
+            )
+            self._last_dispatch_outcome = outcome
+            self._last_dispatch_target = target
+            self._register_status = self._build_register_status()
 
     @property
     def last_dispatch_outcome(self) -> str | None:
@@ -876,69 +888,78 @@ class InverterControlModule:
                 and the elapsed-time computation so tests can drive the
                 loop deterministically.
         """
-        self._verify_cancel = None
-        commanded = self._last_commanded_mode
-        if commanded is None:
-            return  # commanded was cleared since the verify was scheduled
-        spec = self._specs.get(commanded)
-        if spec is None:
-            # Shouldn't happen — _dispatch_current_slot already guarded —
-            # but if a future StorageMode lacks a spec, fail closed.
+        # Hold the dispatch lock for the whole tick. This serialises the retry
+        # write against ``_apply_dispatch`` and reads ``_last_commanded_mode``
+        # *after* acquiring it, so a tick that was queued behind an in-flight
+        # command verifies (and, on retry, re-writes) the mode that command
+        # left in place — never a stale one captured before the await.
+        async with self._dispatch_lock:
+            self._verify_cancel = None
+            commanded = self._last_commanded_mode
+            if commanded is None:
+                return  # commanded was cleared since the verify was scheduled
+            spec = self._specs.get(commanded)
+            if spec is None:
+                # Shouldn't happen — _dispatch_current_slot already guarded —
+                # but if a future StorageMode lacks a spec, fail closed.
+                self._verify_state = "mismatch"
+                self._notify_state_change()
+                return
+
+            rows = self._build_register_status()
+            self._register_status = rows
+            self._last_verify_at = now
+            self._last_verify_observed_reg = (
+                self._inverter.get_storage_control_word()
+            )
+
+            if rows and all(r["match"] for r in rows):
+                self._verify_state = "ok"
+                _LOGGER.info(
+                    "inverter_control: verify OK — commanded=%s all %d "
+                    "registers match", commanded.value, len(rows),
+                )
+                self._notify_state_change()
+                return
+
+            mismatched = [r["name"] for r in rows if not r["match"]]
+            window_start = self._verify_window_started_at or now
+            elapsed = (now - window_start).total_seconds()
+
+            if elapsed < _VERIFY_WINDOW_S:
+                # Still within the current window — keep polling. Log at DEBUG
+                # so a normal pending→ok transition stays quiet.
+                _LOGGER.debug(
+                    "inverter_control: verify pending — commanded=%s "
+                    "mismatched=%s elapsed=%.0fs; next poll in %ds",
+                    commanded.value, mismatched, elapsed,
+                    _VERIFY_POLL_INTERVAL_S,
+                )
+                self._schedule_verify(_VERIFY_POLL_INTERVAL_S)
+                self._notify_state_change()
+                return
+
+            # Window exhausted.
+            if not self._verify_retried:
+                _LOGGER.warning(
+                    "inverter_control: verify mismatch after %.0fs — "
+                    "commanded=%s mismatched=%s; re-issuing force-write",
+                    elapsed, commanded.value, mismatched,
+                )
+                self._verify_retried = True
+                await self._inverter.apply_mode(commanded, spec, force=True)
+                self._verify_window_started_at = now  # fresh retry window
+                self._schedule_verify(_VERIFY_INITIAL_DELAY_S)
+                # verify_state stays "pending" — the retry is still in flight
+                self._notify_state_change()
+                return
+
             self._verify_state = "mismatch"
-            self._notify_state_change()
-            return
-
-        rows = self._build_register_status()
-        self._register_status = rows
-        self._last_verify_at = now
-        self._last_verify_observed_reg = self._inverter.get_storage_control_word()
-
-        if rows and all(r["match"] for r in rows):
-            self._verify_state = "ok"
-            _LOGGER.info(
-                "inverter_control: verify OK — commanded=%s all %d registers "
-                "match", commanded.value, len(rows),
-            )
-            self._notify_state_change()
-            return
-
-        mismatched = [r["name"] for r in rows if not r["match"]]
-        window_start = self._verify_window_started_at or now
-        elapsed = (now - window_start).total_seconds()
-
-        if elapsed < _VERIFY_WINDOW_S:
-            # Still within the current window — keep polling. Log at DEBUG
-            # so a normal pending→ok transition stays quiet.
-            _LOGGER.debug(
-                "inverter_control: verify pending — commanded=%s "
-                "mismatched=%s elapsed=%.0fs; next poll in %ds",
-                commanded.value, mismatched, elapsed, _VERIFY_POLL_INTERVAL_S,
-            )
-            self._schedule_verify(_VERIFY_POLL_INTERVAL_S)
-            self._notify_state_change()
-            return
-
-        # Window exhausted.
-        if not self._verify_retried:
-            _LOGGER.warning(
-                "inverter_control: verify mismatch after %.0fs — commanded=%s "
-                "mismatched=%s; re-issuing force-write",
+            _LOGGER.error(
+                "inverter_control: verify mismatch persists after retry "
+                "(%.0fs elapsed in retry window) — commanded=%s mismatched=%s. "
+                "The write is not taking effect; check the Modbus chain and "
+                "inverter.",
                 elapsed, commanded.value, mismatched,
             )
-            self._verify_retried = True
-            await self._inverter.apply_mode(commanded, spec, force=True)
-            self._verify_window_started_at = now  # fresh window for the retry
-            self._schedule_verify(_VERIFY_INITIAL_DELAY_S)
-            # verify_state stays "pending" — the retry is still in flight
             self._notify_state_change()
-            return
-
-        self._verify_state = "mismatch"
-        _LOGGER.error(
-            "inverter_control: verify mismatch persists after retry "
-            "(%.0fs elapsed in retry window) — commanded=%s mismatched=%s. "
-            "The write is not taking effect; check the Modbus chain and "
-            "inverter.",
-            elapsed, commanded.value, mismatched,
-        )
-        self._notify_state_change()
